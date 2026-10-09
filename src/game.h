@@ -1,0 +1,73 @@
+// SPDX-License-Identifier: MIT
+
+// A game's JAudio2 sound files: its start-up archive (BAA), its sequence archive and its wave archives, from a folder
+// or a GameCube disc image, and the sequences to convert.
+
+#pragma once
+
+#include <cstdint>
+#include <filesystem>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "disc.h"
+#include "jaudio.h"
+#include "performance.h"
+
+namespace dolphinsf2
+{
+
+class Game
+{
+public:
+    // Open the start-up archive at `baa`. The game keeps its sequence archive in a Seqs folder beside it and its wave
+    // archives in a Waves folder; dolphinsf2 also looks beside the archive itself. Throw FormatError if the archive
+    // can't be read.
+    static Game FromFolder(const std::filesystem::path& baa);
+
+    // Open the start-up archive on a GameCube disc image. Throw FormatError if the image can't be read or has no
+    // start-up archive.
+    static Game FromDisc(const std::filesystem::path& image);
+
+    const SoundArchive& Archive() const
+    {
+        return *archive_;
+    }
+
+    // The sequences to convert: the sounds of the sound table that play sequences, in its order, then the files of the
+    // sequence archive that no sound plays, named after their files.
+    const std::vector<SequenceSound>& Sequences() const
+    {
+        return sequences_;
+    }
+
+    // Read a wave archive by name, or return nothing if it can't be found.
+    std::optional<std::vector<uint8_t>> ReadWaveArchive(const std::string& name) const;
+
+    // What dolphinsf2 found missing or damaged, such as a missing sequence archive.
+    const std::vector<std::string>& Warnings() const
+    {
+        return warnings_;
+    }
+
+private:
+    // List the sequences once the archive and the sequence archive are read.
+    void FindSequences();
+
+    std::unique_ptr<SoundArchive> archive_;
+    std::vector<uint8_t> sequence_archive_;
+    std::string sequence_archive_name_;
+    std::vector<ArchiveFile> sequence_files_;
+    std::vector<SequenceSound> sequences_;
+    std::vector<std::string> warnings_;
+
+    // Where the wave archives are: the folders to look in, or the disc's files by lowercase name.
+    std::vector<std::filesystem::path> wave_folders_;
+    std::optional<DiscImage> disc_;
+    std::map<std::string, DiscImage::File> disc_waves_;
+};
+
+} // namespace dolphinsf2

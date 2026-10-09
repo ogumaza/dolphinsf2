@@ -1,0 +1,111 @@
+# SPDX-License-Identifier: MIT
+
+# Push vX.Y.Z to publish a Windows x64 release. The tag must match the version in CMakeLists.txt.
+# Release notes come from docs/release-notes/X.Y.Z.md. The attached dolphinsf2-X.Y.Z-win-x64.zip
+# contains dolphinsf2.exe, README.md and LICENSE.
+#
+# Manual runs (Actions > Release > Run workflow) upload the same ZIP as a workflow artifact without
+# publishing a release.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Read the project version, check the tag if present, and require release notes.
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: version
+        name: Read version
+        run: |
+          version=$(sed -n 's/^project(dolphinsf2 VERSION \([0-9][0-9.]*\) .*/\1/p' CMakeLists.txt)
+          if [ -z "$version" ]; then
+            echo "::error::CMakeLists.txt project() has no version"
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match project version $version; expected v$version"
+            exit 1
+          fi
+          if [ ! -f "docs/release-notes/$version.md" ]; then
+            echo "::error::missing release notes: docs/release-notes/$version.md"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: version
+    name: Windows x64
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        run: |
+          cmake -S . -B build -A x64
+          cmake --build build --config Release --parallel --target dolphinsf2
+
+      # Check both --version and the version resource shown in Windows file properties.
+      - name: Verify version
+        shell: pwsh
+        run: |
+          $version = '${{ needs.version.outputs.version }}'
+          $said = (& build/Release/dolphinsf2.exe --version) -join ''
+          if ($said -ne "dolphinsf2 $version") { throw "unexpected --version output: '$said'; expected 'dolphinsf2 $version'" }
+          $info = (Get-Item build/Release/dolphinsf2.exe).VersionInfo
+          if ($info.ProductVersion -ne $version -or $info.FileVersion -ne $version) {
+            throw "version resource mismatch: file '$($info.FileVersion)', product '$($info.ProductVersion)'; expected $version"
+          }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: win-x64
+          path: build/Release/dolphinsf2.exe
+
+  package:
+    needs: [version, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: win-x64
+          path: artifacts/win-x64
+
+      - name: Package
+        run: |
+          mkdir -p dist stage
+          cp artifacts/win-x64/dolphinsf2.exe README.md LICENSE stage/
+          (cd stage && zip -q -X "../dist/dolphinsf2-$VERSION-win-x64.zip" *)
+          unzip -l "dist/dolphinsf2-$VERSION-win-x64.zip"
+
+      # Only a pushed tag publishes. A manual run started from a tag uploads the ZIP like any other manual run.
+      - name: Publish release
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "dolphinsf2 $VERSION" \
+            --notes-file "docs/release-notes/$VERSION.md"
+
+      - name: Upload package (manual run)
+        if: github.event_name != 'push' || github.ref_type != 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: dolphinsf2-${{ env.VERSION }}
+          path: dist/
