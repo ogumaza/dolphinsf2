@@ -10,11 +10,12 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstddef>
-#include <cstdio>
 #include <map>
-#include <set>
 #include <utility>
+
+#include "seqlib/sfz/opcodes.h"
+#include "seqlib/sfz/text.h"
+#include "seqlib/wav.h"
 
 #include "convert.h"
 #include "envelope.h"
@@ -23,66 +24,11 @@
 
 namespace dolphinsf2
 {
-
 namespace
 {
 
-// Custom curve IDs; sfizz reserves 0-6.
-constexpr int kPanCurve = 7; // CC10 to pan
-
-// sfizz divides pitch wheel values by 8191; the MIDI writer uses 8192 steps per full range. Scale the SFZ bend range by
-// 8191/8192.
-constexpr double kBendScale = 8191.0 / 8192.0;
-
-// Format `v` with at most `decimals` fractional digits.
-std::string Number(double v, int decimals)
-{
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.*f", decimals, v);
-    std::string s = buf;
-    if (s.find('.') != std::string::npos)
-    {
-        while (s.back() == '0')
-        {
-            s.pop_back();
-        }
-        if (s.back() == '.')
-        {
-            s.pop_back();
-        }
-    }
-
-    return s == "-0" ? "0" : s;
-}
-
-// Write a <curve> mapping controller values 0-127 through `f`.
-template <typename F>
-std::string Curve(int index, const char* what, F f)
-{
-    std::string s = "// " + std::string(what) + "\n<curve> curve_index=" + std::to_string(index);
-    for (int v = 0; v < 128; v++)
-    {
-        char name[8];
-        std::snprintf(name, sizeof(name), "v%03d", v);
-        s += (v % 8 == 0 ? "\n" : " ") + std::string(name) + "=" + Number(f(v), 6);
-    }
-
-    return s + "\n\n";
-}
-
-// Make `text` safe for a single-line comment by replacing control characters, including line breaks, with spaces.
-std::string CommentText(std::string text)
-{
-    for (char& c : text)
-    {
-        if (static_cast<unsigned char>(c) < 0x20 || c == 0x7f)
-        {
-            c = ' ';
-        }
-    }
-
-    return text;
-}
+using seqlib::WavFile;
+using seqlib::sfz::Number;
 
 // Shared samples: one WAV file per wave, generated on first use.
 class SampleSet
@@ -126,9 +72,10 @@ const SampleSet::Wave& SampleSet::Get(uint32_t wave_system, uint16_t wave_id)
     Wave wave;
     if (const Pcm* pcm = banks_.GetWave(wave_system, wave_id))
     {
-        const PreparedWave w = PrepareForSfz(*pcm);
+        const auto crossfade = static_cast<uint32_t>((pcm->sample_rate * 4.0f + 999.0f) / 1000.0f); // 4 ms
+        const PreparedWave w = PrepareForSfz(*pcm, crossfade);
         wave.name = "w" + std::to_string(wave_system) + "_" + std::to_string(wave_id) + ".wav";
-        samples_.push_back({wave.name, WavFile(w.samples, static_cast<uint32_t>(std::lround(pcm->sample_rate)))});
+        samples_.push_back({wave.name, WavFile(w.channels[0], static_cast<uint32_t>(std::lround(pcm->sample_rate)))});
         wave.loop = w.loop;
         if (w.loop)
         {
@@ -147,15 +94,7 @@ std::string RegionLine(const PresetZone& z, const SampleSet::Wave& wave, double 
     std::string s = "<region> sample=" + wave.name + " lokey=" + std::to_string(z.low_key) +
                     " hikey=" + std::to_string(z.high_key) + " lovel=" + std::to_string(z.low_velocity) +
                     " hivel=" + std::to_string(z.high_velocity) + " pitch_keycenter=" + std::to_string(z.root_key);
-    const int cents = static_cast<int>(std::lround(std::clamp(z.cents, -12000.0, 12000.0)));
-    if (cents / 100 != 0)
-    {
-        s += " transpose=" + std::to_string(cents / 100);
-    }
-    if (cents % 100 != 0)
-    {
-        s += " tune=" + std::to_string(cents % 100);
-    }
+    s += seqlib::sfz::TuneOpcodes(static_cast<int>(std::lround(std::clamp(z.cents, -12000.0, 12000.0))));
 
     const SfzEnvelope e = ConvertEnvelopeForSfz(z.envelope);
     const double volume = (z.volume > 0.0 ? 20.0 * std::log10(z.volume) : -144.0) + e.peak_db + gain_db;
@@ -171,33 +110,13 @@ std::string RegionLine(const PresetZone& z, const SampleSet::Wave& wave, double 
         s += " pan=" + Number(pan, 1);
     }
 
-    if (e.delay > 0.0)
-    {
-        s += " ampeg_delay=" + Number(e.delay, 6);
-    }
-    if (e.attack > 0.0)
-    {
-        s += " ampeg_attack=" + Number(e.attack, 6);
-    }
-    if (e.hold > 0.0)
-    {
-        s += " ampeg_hold=" + Number(e.hold, 6);
-    }
-    if (e.sustain < 100.0)
-    {
-        s += " ampeg_decay=" + Number(e.decay, 6) + " ampeg_sustain=" + Number(e.sustain, 6);
-    }
-    s += " ampeg_release=" + Number(e.release, 6);
-
-    if (wave.loop)
-    {
-        s += " loop_mode=loop_continuous loop_start=" + std::to_string(wave.loop_start) +
-             " loop_end=" + std::to_string(wave.loop_end);
-    }
-    else
-    {
-        s += " loop_mode=no_loop";
-    }
+    s += seqlib::sfz::AmpEnvelopeOpcodes({.delay = e.delay,
+                                          .attack = e.attack,
+                                          .hold = e.hold,
+                                          .decay = e.decay,
+                                          .sustain = e.sustain,
+                                          .release = e.release});
+    s += seqlib::sfz::LoopOpcodes(wave.loop, wave.loop_start, wave.loop_end);
 
     return s + "\n";
 }
@@ -222,133 +141,46 @@ std::string VibratoOpcodes(const PresetKey& key)
     return s + "\n";
 }
 
-// Write track `t`'s SFZ file.
-std::string TrackFile(const Performance& perf, int t, int bend_range, BankSet& banks, SampleSet& samples,
-                      const std::string& title, const std::vector<std::string>& preset_names)
-{
-    std::set<uint32_t> presets;
-    for (const TrackEvent& e : perf.tracks[static_cast<std::size_t>(t)])
-    {
-        if (e.kind == EventKind::kPreset)
-        {
-            presets.insert(e.preset);
-        }
-    }
-
-    const std::string& track = perf.track_names[static_cast<std::size_t>(t)];
-    const std::string track_name = track.empty() ? "Track " + std::to_string(t) : track;
-    std::string s = "// " + CommentText(track_name) + " of " + CommentText(title) +
-                    ", converted by dolphinsf2. Load for MIDI track \"" + CommentText(track_name) +
-                    "\" and its layers.\n";
-    if (perf.level_cut_db > 0.0)
-    {
-        s += "// MIDI gain was reduced by " + Number(perf.level_cut_db, 2) + " dB. Region volumes restore that gain.\n";
-    }
-    s += "\n";
-    s += "<control>\ndefault_path=../" + kSfzSamplesFolder + "/\nhint_ram_based=1\n\n";
-
-    // Map CC10 to (value - 64) / 64. That's the SoundFont pan convention that the MIDI writer uses.
-    s += Curve(kPanCurve, "CC10 to pan", [](int v) { return (v - 64) / 64.0; });
-
-    const std::string bend = Number(bend_range * 100.0 * kBendScale, 6);
-    s += "<global>\nbend_up=" + bend + " bend_down=-" + bend + "\n";
-    // Like the game's settings, CC7, CC10 and CC11 act at once. sfizz would otherwise smooth them over 10 ms, from CC7
-    // 100 at first. A note whose track sets its volume or pan in the tick it starts would then begin at the old value.
-    // Curve 4 squares CC7 and CC11. JAudio2 squares the volumes too.
-    s += "pan_oncc10=100 pan_curvecc10=" + std::to_string(kPanCurve) + " pan_smoothcc10=0\n";
-    s += "amplitude_oncc7=100 amplitude_curvecc7=4 amplitude_smoothcc7=0 amplitude_oncc11=100 amplitude_curvecc11=4 "
-         "amplitude_smoothcc11=0\n";
-
-    const bool banks_selected = perf.presets.size() > 128;
-    for (uint32_t p : presets)
-    {
-        const PresetKey& key = perf.presets[p];
-        s += "\n// " + CommentText(preset_names[p]) + "\n<master> loprog=" + std::to_string(p % 128) +
-             " hiprog=" + std::to_string(p % 128);
-        if (banks_selected)
-        {
-            s += " locc0=" + std::to_string(p / 128) + " hicc0=" + std::to_string(p / 128);
-        }
-        s += "\n" + VibratoOpcodes(key) + "<group>\n";
-        for (const PresetZone& z : ZonesOf(key, perf, banks))
-        {
-            const SampleSet::Wave& wave = samples.Get(z.wave_system, z.wave_id);
-            if (!wave.name.empty())
-            {
-                s += RegionLine(z, wave, perf.level_cut_db);
-            }
-        }
-    }
-
-    return s;
-}
-
 } // namespace
 
 SfzInstruments BuildSfz(const Performance& perf, const MidiReport& midi, BankSet& banks, const std::string& title,
                         const std::vector<std::string>& preset_names)
 {
-    SfzInstruments out;
+    // Each file is named after its MIDI track.
+    seqlib::sfz::TrackFileOptions options;
+    options.title = title;
+    options.program = "dolphinsf2";
+    options.preset_names = preset_names;
+    options.presets = perf.presets.size();
+    options.level_cut_db = perf.level_cut_db;
+    options.track_names = true;
+
+    // Each preset adds its vibrato and a group of its zones.
     SampleSet samples(banks);
-    for (int t = 0; t < 16; t++)
+    SfzInstruments out;
+    auto text = [&](int)
     {
-        if (midi.bend_ranges[static_cast<std::size_t>(t)] == 0)
+        seqlib::sfz::TrackText added;
+        added.preset = [&](uint32_t p)
         {
-            continue; // no MIDI channel assigned to this track
-        }
+            const PresetKey& key = perf.presets[p];
+            std::string s = VibratoOpcodes(key) + "<group>\n";
+            for (const PresetZone& z : ZonesOf(key, perf, banks))
+            {
+                const SampleSet::Wave& wave = samples.Get(z.wave_system, z.wave_id);
+                if (!wave.name.empty())
+                {
+                    s += RegionLine(z, wave, perf.level_cut_db);
+                }
+            }
 
-        // Each file is named after its MIDI track.
-        const std::string& track = perf.track_names[static_cast<std::size_t>(t)];
-        out.files.push_back(
-            {FileName(track.empty() ? "Track " + std::to_string(t) : track) + ".sfz",
-             TrackFile(perf, t, midi.bend_ranges[static_cast<std::size_t>(t)], banks, samples, title, preset_names)});
-    }
+            return s;
+        };
 
+        return added;
+    };
+    out.files = seqlib::sfz::TrackFiles(perf, midi, options, text);
     out.samples = samples.Take();
-
-    return out;
-}
-
-std::vector<uint8_t> WavFile(std::span<const int16_t> samples, uint32_t rate)
-{
-    const auto data_size = static_cast<uint32_t>(samples.size() * 2);
-    std::vector<uint8_t> out;
-    out.reserve(44 + data_size);
-
-    auto u32 = [&](uint32_t v)
-    {
-        for (int i = 0; i < 4; i++)
-        {
-            out.push_back(static_cast<uint8_t>(v >> (8 * i)));
-        }
-    };
-    auto u16 = [&](uint16_t v)
-    {
-        out.push_back(static_cast<uint8_t>(v));
-        out.push_back(static_cast<uint8_t>(v >> 8));
-    };
-    auto tag = [&](const char* t)
-    {
-        out.insert(out.end(), t, t + 4);
-    };
-
-    tag("RIFF");
-    u32(36 + data_size);
-    tag("WAVE");
-    tag("fmt ");
-    u32(16);
-    u16(1); // PCM
-    u16(1); // mono
-    u32(rate);
-    u32(rate * 2);
-    u16(2);
-    u16(16);
-    tag("data");
-    u32(data_size);
-    for (int16_t v : samples)
-    {
-        u16(static_cast<uint16_t>(v));
-    }
 
     return out;
 }

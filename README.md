@@ -10,8 +10,9 @@ Games known to work:
 
 - The Legend of Zelda: Four Swords Adventures
 
-Other games that use JAudio2 may convert too. Games with the first JAudio, such as The Wind
-Waker, keep their sound in an `.aaf` file. dolphinsf2 doesn't read those.
+Other games that use JAudio2 may convert too. Some play music from streamed audio files
+rather than sequences. dolphinsf2 leaves those out. Games with the first JAudio, such as The
+Wind Waker, keep their sound in an `.aaf` file. dolphinsf2 doesn't read those.
 
 dolphinsf2 reads a game's disc image or its start-up archive:
 
@@ -35,6 +36,10 @@ dolphinsf2 [options] <archive.baa | disc image> [...]
   --seed N       initial game random state (default 0)
   --port N=V     set port N (0-15) of each sequence to V before it starts;
                  repeat for more ports
+  --voices N     drop the notes that the game drops for lack of a voice,
+                 with N voices (the game has 64). The result only
+                 approximates the game.
+  --voices off   keep every note (default)
   --list         list sequences without converting
   --quiet        print errors only
   --version      show the version
@@ -43,6 +48,10 @@ dolphinsf2 [options] <archive.baa | disc image> [...]
 Games write ports to steer their music. A sequence can branch on a port's value or wait until
 the game writes the port. `--port` writes a port before each sequence starts. As in the game,
 ports start at 0. Use `--only` to choose the sequences it applies to.
+
+The game plays at most 64 notes at once. A note that finds every voice busy takes the voice of
+an older note. By default, dolphinsf2 keeps every note. `--voices 64` drops the notes that the
+game drops for lack of a voice. The result only approximates the game.
 
 The sequences come from the game's sound table. They keep the table's order. Sound effects are
 sequences too. Files take the names that the table gives the sounds. A sound without a name
@@ -55,14 +64,10 @@ Windows and macOS. The same applies to a sequence named `samples`. That name wou
 the SFZ sample folder. The default output folder is `<input name>_dolphinsf2`. Its name follows
 the same rules. Use `--output` to choose another location.
 
-dolphinsf2 is the GameCube counterpart of revosf2. revosf2 converts Nintendo Wii sound archives.
-The MIDI, SoundFont and SFZ writers come from revosf2. The readers of JAudio2's files, the
-sequence player and the instrument model are new.
-
 ## Downloads
 
-The Releases page has dolphinsf2 for 64-bit Windows. On macOS and Linux, build it from source
-(see [Building](#building)).
+The Releases page has dolphinsf2 for 64-bit Windows. On macOS on Apple Silicon, build it from
+source (see [Building](#building)).
 
 ## Drag and drop
 
@@ -202,6 +207,8 @@ regions become zones with:
   segments, the attack rises linearly in amplitude. Decays and releases fall linearly in
   decibels. Each is fitted to reach the level that the game's curve reaches when the curve has
   fallen half its range in decibels. A curve that falls to silence is fitted at -20 dB.
+  The release is fitted from the level that the curve holds at. Notes on a curve that stops or
+  falls to silence are released before its end. Their release is fitted from the curve's peak.
   SoundFont decays and releases fall 100 dB in 101.6 s at the slowest. Slower ones play at that
   rate. The SFZ files keep the game's rate.
 - A vibrato LFO at the track's speed and delay. CC1 sets its depth.
@@ -313,16 +320,18 @@ SoundFont output follows the specification and targets FluidSynth. Player differ
 
 ## Building
 
-Building requires C++20 and CMake 3.20 or later. There are no other build dependencies. CI
-builds and tests Windows/MSVC x64, macOS/Apple Clang on Apple Silicon and Intel, and Linux/GCC
-and Clang x64.
+Building requires C++20 and CMake 3.20 or later. It also requires three libraries that the
+converters and the PSF players share: seqlib (MIDI, SoundFont 2 and SFZ), xsflib (common code)
+and ntdlib (Nintendo's formats). They're submodules in `externals/`. Clone with
+`git clone --recursive`, or run `git submodule update --init` in a checkout. There are no other
+build dependencies. dolphinsf2 supports macOS on Apple Silicon and Windows x64 with clang-cl.
+CI builds and tests both.
 
-- **Windows:** install Visual Studio 2022 or later with "Desktop development with C++". That
-  workload includes CMake. Use Developer PowerShell or Developer Command Prompt.
+- **Windows:** install Visual Studio 2022 with "Desktop development with C++". That workload
+  includes CMake. Add the "C++ Clang tools for Windows" component. Use Developer PowerShell or
+  Developer Command Prompt.
 - **macOS:** install Xcode command line tools (`xcode-select --install`) and CMake
   (`brew install cmake` or the installer from cmake.org).
-- **Linux:** install GCC or Clang and CMake. On Debian/Ubuntu:
-  `sudo apt install build-essential cmake`.
 
 From the repository root:
 
@@ -332,11 +341,14 @@ cmake --build build --config Release
 ctest --test-dir build -C Release
 ```
 
+On Windows, the first command is `cmake -S . -B build -A x64 -T ClangCL`. It selects clang-cl
+and 64-bit output.
+
 The executable is `build/dolphinsf2`. With Visual Studio, it's `build/Release/dolphinsf2.exe`.
-Xcode and other multi-configuration generators also use `build/Release`. MSVC links the runtime
-statically. The executable requires no runtime DLLs. CI uploads the Windows executable as an
-artifact. macOS builds also produce `build/Dolphinsf2.app`. The app contains a copy of the
-program. You can move the app elsewhere.
+Xcode and other multi-configuration generators also use `build/Release`. The Windows build links
+the runtime statically. The executable requires no runtime DLLs. CI uploads the Windows
+executable as an artifact. macOS builds also produce `build/Dolphinsf2.app`. The app contains a
+copy of the program. You can move the app elsewhere.
 
 C++ formatting uses clang-format with the repository's `.clang-format`.
 
@@ -345,23 +357,25 @@ C++ formatting uses clang-format with the repository's `.clang-format`.
 `ctest` runs unit tests without game data. The tests build archives, banks, wave systems and
 sequences in memory. Coverage includes:
 
-- 4-bit ADPCM decoding.
-- Wave systems and banks of both versions with their instruments and drum sets.
+- Wave decoding, and what banks of both versions play for a note: instruments, drum sets,
+  velocity regions and effects.
 - Oscillators and the envelope fit.
 - The player: tempo and timing, sweeps and ties, loops and their markers, ports and registers,
   drums and volume.
-- SoundFont and MIDI output checked by independent readers, SFZ output and file naming.
+- SoundFont and MIDI output checked by independent readers, and SFZ output.
 
 Other checks and tools:
 
 - `-DDOLPHINSF2_TEST_ARCHIVE=path/to/archive.baa` adds conversion of every sequence of that
   game. Each output file is validated with independent readers.
-- `tools/check_sf2.py` checks SoundFont structure using Python alone.
+- seqlib's `seqlib_check` program checks SoundFont and MIDI files. seqlib's README says how to
+  build it.
 
 The conversion test requires game files supplied separately. dolphinsf2 doesn't distribute any.
 
 ## Licence
 
-[MIT](LICENSE). The output code is adapted from revosf2. revosf2 draws on citrusf2 and the WSF
-project. All three are MIT-licensed. The licence includes their copyright lines. Game data is
-not covered by this licence.
+[MIT](LICENSE). The program contains the libraries seqlib, xsflib and ntdlib. They're
+MIT-licensed too. The one exception is a table in ntdlib made from Unicode's data. It's under
+the Unicode License v3. `THIRD-PARTY-NOTICES.md` gives their licence texts, and the release zip
+includes it. Game data is not covered by this licence.

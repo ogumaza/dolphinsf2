@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
-// Sequence conversion (see convert.h). This file builds the SoundFont; midi.cpp and sfz.cpp write the other formats.
+// Sequence conversion (see convert.h). This file builds the SoundFont, and sfz.cpp writes the SFZ files. seqlib writes
+// the MIDI and SoundFont files.
 //
 // Each performance preset is a bank's program with the track's oscillators and settings. Each such preset becomes one
 // SoundFont instrument and preset, with a zone for each of the program's regions. Zones contain the region's key and
@@ -12,52 +13,40 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <iterator>
 #include <map>
-#include <string_view>
 #include <utility>
+#include <vector>
 
-#include "binary.h"
+#include "ntdlib/sequence_export/conversion.h"
+#include "seqlib/sf2/presets.h"
+#include "seqlib/sf2/samples.h"
+#include "seqlib/sf2/soundfont.h"
+
 #include "envelope.h"
-#include "midi.h"
-#include "sf2.h"
 #include "wave.h"
 
 namespace dolphinsf2
 {
 
+namespace sf2 = seqlib::sf2;
+
 namespace
 {
 
-// SoundFont modulator sources: 7-bit index, CC flag (bit 7), direction (bit 8), polarity (bit 9), type (bits 10-15).
-constexpr uint16_t kSrcVelocityLinearNegative = 0x0102;
-constexpr uint16_t kSrcVelocitySwitch = 0x0C02;
-constexpr uint16_t kSrcModWheel = 0x0081;   // CC1, linear, unipolar, positive
-constexpr uint16_t kSrcPitchWheel = 0x020E; // linear, bipolar, positive
-constexpr uint16_t kSrcPitchWheelSensitivity = 0x0010;
-
-// SoundFont bank for MIDI channel 10 (General MIDI drums). Synths use this bank regardless of bank select.
-constexpr uint16_t kChannel10Bank = 128;
-
-// Build the instrument's global zone. JAudio2 doesn't filter by velocity. Override the default velocity-to-filter
-// modulator, in both the SoundFont 2.01 and the FluidSynth version.
+// Build the instrument's global zone. JAudio2 doesn't filter by velocity. The zone starts with seqlib's
+// kNoVelocityFilterFullBend. Those modulators turn the default velocity-to-filter modulators off, and give the pitch
+// wheel its full range.
 //
 // CC1 holds 128 times the vibrato's depth over kVibratoRangeCents, and the vibrato LFO has the preset's speed and
 // delay. A vibrato that doesn't move (a speed of 0) gets no depth.
-//
-// The default pitch wheel modulator uses 12700 cents times the bend range / 128. This makes a 7-semitone bend set
-// through RPN 0 about 5.5 cents flat. Like FluidSynth, replace it with a 12800-cent modulator targeting fineTune. The
-// bend then covers the full range.
 sf2::Zone GlobalZone(const PresetKey& key)
 {
     sf2::Zone global;
-    global.modulators.push_back({kSrcVelocityLinearNegative, sf2::kInitialFilterFc, 0, 0});
-    global.modulators.push_back({kSrcVelocityLinearNegative, sf2::kInitialFilterFc, 0, kSrcVelocitySwitch});
-    global.modulators.push_back({kSrcPitchWheel, sf2::kFineTune, 12800, kSrcPitchWheelSensitivity});
+    global.modulators.assign(sf2::kNoVelocityFilterFullBend.begin(), sf2::kNoVelocityFilterFullBend.end());
 
     const double hz = kVibratoHz * key.vibrato_rate;
     const auto depth = static_cast<int16_t>(hz > 0.0 ? kVibratoRangeCents : 0.0);
-    global.modulators.push_back({kSrcModWheel, sf2::kVibLfoToPitch, depth, 0});
+    global.modulators.push_back({sf2::kSrcModWheel, sf2::kVibLfoToPitch, depth, 0});
     if (hz > 0.0)
     {
         const int freq = std::clamp(static_cast<int>(std::lround(1200.0 * std::log2(hz / 8.176))), -16000, 4500);
@@ -72,59 +61,33 @@ sf2::Zone GlobalZone(const PresetKey& key)
 // Build a zone for `z` with `sample`. Add `quieter` centibels of attenuation.
 sf2::Zone RegionZone(const PresetZone& z, double quieter, uint16_t sample, bool loop)
 {
-    sf2::Zone zone;
-
-    auto gen = [&](uint16_t oper, int v)
-    {
-        zone.generators.push_back(sf2::Generator::Value(oper, v));
-    };
-
-    zone.generators.push_back(sf2::Generator::Range(sf2::kKeyRange, z.low_key, z.high_key));
-    zone.generators.push_back(sf2::Generator::Range(sf2::kVelRange, z.low_velocity, z.high_velocity));
     const Sf2Envelope e = ConvertEnvelope(z.envelope);
     const double level_db = (z.volume > 0.0 ? 20.0 * std::log10(z.volume) : -144.0) + e.peak_db;
-    const int attenuation = std::clamp(static_cast<int>(std::lround(quieter - 10.0 * level_db)), 0, 1440);
-    if (attenuation != 0)
-    {
-        gen(sf2::kInitialAttenuation, attenuation);
-    }
+    const int cents = static_cast<int>(std::lround(std::clamp(z.cents, -12000.0, 12000.0)));
 
+    sf2::ZoneValues values;
+    values.keys = {z.low_key, z.high_key};
+    values.velocities = {z.low_velocity, z.high_velocity};
+    values.attenuation = quieter - 10.0 * level_db;
     // JAudio2's pan law is SoundFont's: the left side plays at the cosine and the right at the sine of a quarter turn
     // times the pan.
-    const int pan = std::clamp(static_cast<int>(std::lround((z.pan - 0.5) * 1000.0)), -500, 500);
-    if (pan != 0)
-    {
-        gen(sf2::kPan, pan);
-    }
-
+    values.pan = std::clamp(static_cast<int>(std::lround((z.pan - 0.5) * 1000.0)), -500, 500);
     if (e.delay > -12000)
     {
-        gen(sf2::kDelayVolEnv, e.delay);
+        values.delay = e.delay;
     }
-    gen(sf2::kAttackVolEnv, e.attack);
-    gen(sf2::kHoldVolEnv, e.hold);
-    gen(sf2::kDecayVolEnv, e.decay);
-    gen(sf2::kSustainVolEnv, e.sustain);
-    gen(sf2::kReleaseVolEnv, e.release);
+    values.attack = e.attack;
+    values.hold = e.hold;
+    values.decay = e.decay;
+    values.sustain = e.sustain;
+    values.release = e.release;
+    values.root_key = z.root_key;
+    values.coarse_tune = cents / 100;
+    values.fine_tune = cents % 100;
+    values.loop = loop;
+    values.sample = sample;
 
-    gen(sf2::kOverridingRootKey, z.root_key);
-    const int cents = static_cast<int>(std::lround(std::clamp(z.cents, -12000.0, 12000.0)));
-    if (cents / 100 != 0)
-    {
-        gen(sf2::kCoarseTune, cents / 100);
-    }
-    if (cents % 100 != 0)
-    {
-        gen(sf2::kFineTune, cents % 100);
-    }
-
-    if (loop)
-    {
-        gen(sf2::kSampleModes, 1);
-    }
-    gen(sf2::kSampleId, sample);
-
-    return zone;
+    return sf2::RegionZone(values);
 }
 
 // Build a SoundFont instrument and preset for each performance preset. Add each wave's samples only once.
@@ -177,27 +140,11 @@ std::optional<std::pair<uint16_t, bool>> SoundFontBuilder::Sample(uint32_t wave_
     if (const Pcm* pcm = banks_.GetWave(wave_system, wave_id))
     {
         PreparedWave w = PrepareForSoundFont(*pcm);
-        sf2::Sample s;
-        s.name = "w" + std::to_string(wave_system) + "_" + std::to_string(wave_id);
-        s.data = std::move(w.samples);
-        s.sample_rate = static_cast<uint32_t>(std::lround(pcm->sample_rate));
-        s.original_key = 60;
-        if (w.loop)
-        {
-            s.loop_start = w.loop_start;
-            s.loop_end = w.loop_end;
-        }
-        else if (s.data.size() > 1)
-        {
-            s.loop_end = static_cast<uint32_t>(s.data.size()); // some synths validate unused loops too
-        }
-
-        id = std::make_pair(static_cast<uint16_t>(sf_.samples.size()), w.loop);
-        sf_.samples.push_back(std::move(s));
-        if (sf_.samples.size() > 0xffff)
-        {
-            throw FormatError("more than 65535 samples");
-        }
+        const bool loop = w.loop;
+        const std::vector<uint16_t> ids =
+            sf2::AddSamples(sf_, std::move(w), "w" + std::to_string(wave_system) + "_" + std::to_string(wave_id),
+                            static_cast<uint32_t>(std::lround(pcm->sample_rate)), 60);
+        id = std::make_pair(ids.at(0), loop);
     }
 
     return samples_.emplace(key, id).first->second;
@@ -227,57 +174,12 @@ void SoundFontBuilder::Add(uint32_t index, const std::string& name)
         inst.zones.push_back(RegionZone(z, quieter_, sample->first, sample->second));
     }
 
-    const auto inst_index = static_cast<uint16_t>(sf_.instruments.size());
-    sf_.instruments.push_back(std::move(inst));
-
-    sf2::Preset preset;
-    preset.name = name;
-    preset.bank = static_cast<uint16_t>(index / 128);
-    preset.program = static_cast<uint16_t>(index % 128);
-    sf2::Zone z;
-    z.generators.push_back(sf2::Generator::Value(sf2::kInstrument, inst_index));
-    preset.zones.push_back(std::move(z));
-    sf_.presets.push_back(std::move(preset));
+    sf2::AddInstrumentPreset(sf_, index, name, std::move(inst));
 }
 
 void SoundFontBuilder::AddChannel10Copy(uint32_t index)
 {
-    sf2::Preset copy = sf_.presets[index];
-    for (const sf2::Preset& p : sf_.presets)
-    {
-        if (p.bank == kChannel10Bank && p.program == copy.program)
-        {
-            warnings_.push_back(copy.name + ": MIDI channel 10 plays " + p.name + " instead");
-            return;
-        }
-    }
-
-    copy.bank = kChannel10Bank;
-    sf_.presets.push_back(std::move(copy));
-}
-
-// Check whether Windows reserves `stem` (the part before the first dot) as a device name. Trailing spaces are ignored;
-// COM and LPT followed by superscript 1, 2 or 3 also count.
-bool IsDeviceName(std::string stem)
-{
-    constexpr std::string_view kDevices[] = {"CON",  "PRN",  "AUX",  "NUL",  "CONIN$", "CONOUT$", "COM0", "COM1",
-                                             "COM2", "COM3", "COM4", "COM5", "COM6",   "COM7",    "COM8", "COM9",
-                                             "COM¹", "COM²", "COM³", "LPT0", "LPT1",   "LPT2",    "LPT3", "LPT4",
-                                             "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",   "LPT¹",    "LPT²", "LPT³"};
-
-    while (!stem.empty() && stem.back() == ' ')
-    {
-        stem.pop_back();
-    }
-    for (char& c : stem)
-    {
-        if (c >= 'a' && c <= 'z')
-        {
-            c = static_cast<char>(c - 'a' + 'A');
-        }
-    }
-
-    return std::find(std::begin(kDevices), std::end(kDevices), stem) != std::end(kDevices);
+    sf2::AddChannel10Copy(sf_, index, warnings_);
 }
 
 // The loudest zone of the presets that `perf` plays, as amplitude: its volume times its envelope's peak.
@@ -300,25 +202,13 @@ double LoudestZone(const Performance& perf, BankSet& banks)
 
 std::vector<std::string> PresetNames(const std::vector<PresetKey>& keys)
 {
-    std::map<std::pair<uint32_t, uint32_t>, int> count, seen;
+    std::vector<std::pair<uint32_t, uint32_t>> banks_and_programs;
     for (const PresetKey& k : keys)
     {
-        count[{k.bank, k.program}]++;
+        banks_and_programs.emplace_back(k.bank, k.program);
     }
 
-    std::vector<std::string> names;
-    for (const PresetKey& k : keys)
-    {
-        std::string n = "b" + std::to_string(k.bank) + " p" + std::to_string(k.program);
-        if (count[{k.bank, k.program}] > 1)
-        {
-            n += " #" + std::to_string(++seen[{k.bank, k.program}]);
-        }
-
-        names.push_back(n);
-    }
-
-    return names;
+    return sf2::PresetNames(banks_and_programs, true);
 }
 
 std::vector<PresetZone> ZonesOf(const PresetKey& key, const Performance& perf, BankSet& banks)
@@ -342,14 +232,7 @@ Conversion ConvertSequence(const SequenceSound& sound, BankSet& banks, const Per
     Conversion c;
     c.performance = Perform(sound, banks, options);
 
-    MidiReport midi;
-    c.midi = WriteMidi(c.performance, sound.name, midi);
-    c.channels = midi.channels;
-    if (midi.cut_notes)
-    {
-        c.performance.approximations["overlapping same-key notes cut short (all MIDI channels in use)"] +=
-            midi.cut_notes;
-    }
+    const MidiReport midi = ntdlib::sequence_export::WriteMidiFile(c, sound.name);
 
     // SoundFont zones can't amplify their samples. If a zone plays above full level, attenuate every zone equally to
     // keep their balance. SFZ keeps the levels.
@@ -370,53 +253,20 @@ Conversion ConvertSequence(const SequenceSound& sound, BankSet& banks, const Per
     {
         builder.Add(static_cast<uint32_t>(i), names[i]);
     }
+
     for (uint32_t index : midi.channel_10_presets)
     {
         builder.AddChannel10Copy(index);
     }
 
     sf2::SoundFont& sf = builder.Result();
-    sf.name = sound.name;
-    sf.comment = "Converted by dolphinsf2 from sequence " + sound.name + ".";
-    c.samples = sf.samples.size();
-    c.sf2 = sf2::Write(sf);
+    const std::string comment = "Converted by dolphinsf2 from sequence " + sound.name + ".";
+    ntdlib::sequence_export::WriteSoundFont(c, sf, sound.name, comment, "dolphinsf2");
     c.sfz = BuildSfz(c.performance, midi, banks, sound.name, names);
 
-    c.warnings = midi.warnings;
-    c.warnings.insert(c.warnings.end(), builder.Warnings().begin(), builder.Warnings().end());
-    c.warnings.insert(c.warnings.end(), c.performance.warnings.begin(), c.performance.warnings.end());
+    ntdlib::sequence_export::CollectWarnings(c, midi, builder.Warnings(), {});
 
     return c;
-}
-
-std::string FileName(const std::string& sequence_name)
-{
-    constexpr std::string_view kNotAllowed = "<>:\"/\\|?*";
-    std::string name = sequence_name;
-    for (char& c : name)
-    {
-        if (static_cast<unsigned char>(c) < 0x20 || kNotAllowed.find(c) != std::string_view::npos)
-        {
-            c = '_';
-        }
-    }
-
-    // This is also the SFZ directory name. Windows strips trailing dots and spaces from directory names; "." and ".."
-    // refer to existing directories.
-    if (!name.empty() && (name.back() == '.' || name.back() == ' '))
-    {
-        name.back() = '_';
-    }
-
-    // Windows reserves device names regardless of extension: "NUL.mid" and "NUL.x.mid" are invalid, but "NUL_.x.mid" is
-    // allowed.
-    const std::size_t stem_end = std::min(name.find('.'), name.size());
-    if (IsDeviceName(name.substr(0, stem_end)))
-    {
-        name.insert(stem_end, "_");
-    }
-
-    return name;
 }
 
 } // namespace dolphinsf2

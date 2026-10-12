@@ -9,13 +9,14 @@
 
 #pragma once
 
-#include <array>
 #include <cstdint>
 #include <map>
-#include <optional>
 #include <span>
 #include <string>
 #include <vector>
+
+#include "ntdlib/sequence_export/performance_base.h"
+#include "seqlib/midi/performance.h"
 
 #include "jaudio.h"
 
@@ -23,6 +24,10 @@ namespace dolphinsf2
 {
 
 class BankSet;
+
+// The vibrato depth that CC1's full value gives, in cents. CC1 holds 128 times the depth over this. The performer
+// records CC1 that way, and the SoundFont's and SFZ's modulators read it that way.
+constexpr double kVibratoRangeCents = 100.0;
 
 // Note-on settings that a MIDI channel can't represent. Each distinct PresetKey makes a SoundFont preset.
 struct PresetKey
@@ -44,85 +49,16 @@ struct PresetKey
     uint16_t vibrato_delay = 0; // in sub-frames
 };
 
-// Event types, with the fields used by each.
-enum class EventKind : uint8_t
+// The events of a performance's tracks, from seqlib.
+using EventKind = seqlib::midi::EventKind;
+using TrackEvent = seqlib::midi::TrackEvent;
+
+// Recorded sequence. ntdlib's PerformanceBase holds seqlib's part (the tempo, the tracks' events and names, each tick's
+// sub-frame, the length and the main loop) and what the performance found. This part holds the presets.
+struct Performance : ntdlib::sequence_export::PerformanceBase
 {
-    kNoteOn,     // key, value: velocity
-    kNoteOff,    // key
-    kPreset,     // preset: index into Performance::presets
-    kVolume,     // value: 0-127 (CC7)
-    kExpression, // value: 0-127 (CC11)
-    kPan,        // value: 0-127, 64 centre (CC10)
-    kPitch,      // semitones: the track's bend and a sweeping note's pitch
-    kModulation, // value: vibrato depth (CC1)
-    kReverb,     // value: the effect send (CC91)
-};
-
-// An event on a track's timeline.
-//
-// MIDI has one set of controllers per channel. JAudio2's channels take their track's settings until the track detaches
-// them. Notes that the game plays with other settings than the track's later notes go on another part of the track.
-// The MIDI writer gives that part another channel. A track's changes go to the part its new notes go to; a note's
-// events go to its part.
-//
-// An event belongs to the sub-frame its tick is processed in. A pitch that a sweep reaches in a sub-frame between ticks
-// comes `after` the tick by the fraction of a tick at which the sub-frame starts.
-struct TrackEvent
-{
-    uint32_t tick = 0;
-    EventKind kind = EventKind::kNoteOn;
-    uint8_t key = 0; // 0-127
-    uint8_t value = 0;
-    uint32_t preset = 0;
-    float semitones = 0.0f;
-    uint32_t note = 0; // NoteOn/NoteOff ID, starting at 1; distinguishes overlapping notes of the same key
-    uint8_t part = 0;  // the part of the track, 0 for its first
-    double after = 0;  // 0, between 0 and 1 for a sub-frame between ticks, or more after the last tick
-};
-
-// Recorded sequence: tempo, track events, presets, main loop and duration.
-struct Performance
-{
-    // A tempo change.
-    struct Tempo
-    {
-        uint32_t tick = 0;
-        double bpm = 120.0; // quarter notes (`timebase` ticks) per minute
-    };
-
-    // The main loop, in ticks.
-    struct Loop
-    {
-        uint32_t start = 0, end = 0;
-    };
-
-    uint32_t timebase = 48; // ticks per quarter note
-    std::vector<Tempo> tempo;
-
-    // Each MIDI track's events, and the name of the sequence track it records.
-    std::array<std::vector<TrackEvent>, 16> tracks;
-    std::array<std::string, 16> track_names;
-
     std::vector<PresetKey> presets;
     std::vector<Oscillator> oscillators; // the tracks' oscillators that presets name
-
-    // MIDI attenuation in dB. CC11 stops at 127. Scale all CC11 values equally to fit. The tracks keep their balance.
-    // SFZ adds this gain back.
-    double level_cut_db = 0.0;
-
-    // Start of each tick's sub-frame, expressed as a fractional tick. MIDI events are placed at these positions.
-    std::vector<double> frame_ticks;
-
-    uint32_t end_tick = 0;
-    double seconds = 0;       // length, release tails included
-    std::optional<Loop> loop; // if it loops
-    int loops = 0;            // times the main loop was played
-    bool truncated = false;   // stopped at the time limit
-    bool holds = false;       // holds until stopped by the game; subject to the hold limit
-    std::vector<std::string> warnings;
-
-    // Counts of features approximated or omitted in MIDI/SoundFont output.
-    std::map<std::string, uint32_t> approximations;
 };
 
 // Options for playing a sequence.
@@ -138,6 +74,11 @@ struct PerformOptions
     // Values for the sequence's ports (0-15), set before it starts. Games write ports to steer their music, and some
     // sequences read one when they start.
     std::map<uint8_t, uint16_t> ports;
+
+    // The voices that notes play on, from --voices. With a count, a note that finds no voice free takes the voice of an
+    // older note of no higher priority, or is lost, as in the game with that many voices. The game has 64. With 0,
+    // every note is kept.
+    int voice_limit = 0;
 };
 
 // A sequence to play: its data, the offset its first track starts at, and the sound's volume from the sound table.
@@ -152,7 +93,6 @@ struct SequenceSound
 // Play `sound`. Throw FormatError if it can't be read.
 Performance Perform(const SequenceSound& sound, BankSet& banks, const PerformOptions& options);
 
-// Returns the number of notes that `perf` plays.
-uint32_t NoteCount(const Performance& perf);
+using seqlib::midi::NoteCount;
 
 } // namespace dolphinsf2

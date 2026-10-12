@@ -3,81 +3,52 @@
 cmake_minimum_required(VERSION 3.20)
 # The version is dolphinsf2 --version's, and the one in the file properties of the Windows program and the Info.plist of
 # the macOS app. A release changes it here and adds its notes in docs/release-notes/.
-project(dolphinsf2 VERSION 1.0.0 LANGUAGES CXX)
+project(dolphinsf2 VERSION 1.0.1 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-  set(CMAKE_BUILD_TYPE Release)
+# The libraries that dolphinsf2 shares with the other converters and the PSF players: seqlib for MIDI, SoundFont 2
+# and SFZ, xsflib for the common code and the build's templates, and ntdlib for Nintendo's formats. All three are
+# submodules. xsflib's XsflibProject.cmake sets the C++ standard, a release build by default, the static C runtime and
+# the compiler options that keep the output the same on every platform. Among them, -ffp-contract=off turns off fused
+# multiply-adds. JAudio2's arithmetic is single precision without them. The build then keeps the game's rounding.
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/externals/xsflib/CMakeLists.txt")
+  message(FATAL_ERROR "externals/xsflib is missing. Run: git submodule update --init")
 endif()
-if(MSVC)
-  add_compile_options(/W4 /utf-8)
-  # Link the runtime statically so the drag-and-drop executable runs without runtime DLLs.
-  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-else()
-  # Disable FMA contraction. Clang enables it by default on CPUs such as Apple Silicon. JAudio2's arithmetic is single
-  # precision without fused multiply-adds. Without contraction, the build keeps the game's rounding and gives the same
-  # results on every platform.
-  add_compile_options(-Wall -Wextra -ffp-contract=off)
-  # Use SSE2 on 32-bit x86 to avoid x87's extra precision. Results then match 64-bit x86.
-  if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(i.86|x86|x86_64|AMD64)$")
-    add_compile_options(-msse2 -mfpmath=sse)
-  endif()
-endif()
+include(externals/xsflib/cmake/XsflibProject.cmake)
+xsflib_project(WARNINGS_ON_EVERY_TARGET)
+set(NTDLIB_SEQUENCE_EXPORT ON) # the converters' layer, with their command line
+xsflib_add_libraries(seqlib xsflib ntdlib)
 
 add_library(dolphinsf2_core STATIC
-  src/jaudio.cpp
   src/wave.cpp
   src/instruments.cpp
   src/envelope.cpp
   src/performance.cpp
-  src/midi.cpp
-  src/sf2.cpp
   src/sfz.cpp
   src/convert.cpp
-  src/disc.cpp
   src/game.cpp)
 target_include_directories(dolphinsf2_core PUBLIC src)
+target_link_libraries(dolphinsf2_core PUBLIC seqlib::seqlib xsflib::common ntdlib::disc ntdlib::jaudio ntdlib::wave
+                      ntdlib::sequence_export)
 
 add_executable(dolphinsf2 src/main.cpp)
 target_link_libraries(dolphinsf2 PRIVATE dolphinsf2_core)
-target_compile_definitions(dolphinsf2 PRIVATE DOLPHINSF2_VERSION="${PROJECT_VERSION}")
-if(WIN32)
-  target_link_libraries(dolphinsf2 PRIVATE shell32) # CommandLineToArgvW
-  # A version resource. Explorer shows its version and description in the file's properties.
-  configure_file(platform/windows/version.rc.in version.rc @ONLY)
-  target_sources(dolphinsf2 PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/version.rc")
-endif()
+# The version that --version prints, and on Windows a version resource. Explorer shows its version and description in
+# the file's properties.
+xsflib_add_version(dolphinsf2 VERSION ${PROJECT_VERSION} DEFINE DOLPHINSF2_VERSION
+                   DESCRIPTION "Nintendo GameCube music converter" PRODUCT dolphinsf2
+                   COPYRIGHT "Copyright (c) 2026 the dolphinsf2 authors. MIT licence.")
 
 # Finder cannot drop files onto a command-line executable. Package it in a macOS droplet app, with the version in its
 # Info.plist.
-if(APPLE)
-  find_program(OSACOMPILE osacompile)
-  find_program(CODESIGN codesign)
-  find_program(PLUTIL plutil)
-  if(OSACOMPILE AND CODESIGN AND PLUTIL)
-    set(app "${CMAKE_CURRENT_BINARY_DIR}/Dolphinsf2.app")
-    set(app_script "${PROJECT_SOURCE_DIR}/platform/macos/Dolphinsf2.applescript")
-    add_custom_command(
-      OUTPUT "${app}/Contents/Resources/dolphinsf2"
-      COMMAND "${CMAKE_COMMAND}" -E rm -rf "${app}"
-      COMMAND "${OSACOMPILE}" -o "${app}" "${app_script}"
-      COMMAND "${PLUTIL}" -replace CFBundleShortVersionString -string "${PROJECT_VERSION}" "${app}/Contents/Info.plist"
-      COMMAND "${PLUTIL}" -replace CFBundleVersion -string "${PROJECT_VERSION}" "${app}/Contents/Info.plist"
-      COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:dolphinsf2>" "${app}/Contents/Resources/dolphinsf2"
-      COMMAND "${CODESIGN}" --force --deep --sign - "${app}"
-      DEPENDS dolphinsf2 "${app_script}"
-      COMMENT "Building Dolphinsf2.app"
-      VERBATIM)
-    add_custom_target(dolphinsf2_app ALL DEPENDS "${app}/Contents/Resources/dolphinsf2")
-  endif()
-endif()
+set(app_description "Drop a GameCube game's start-up archive (.baa) or disc image (.iso, .gcm) here to convert its \
+music to MIDI, SoundFont and SFZ. Output goes in a folder beside each file.")
+xsflib_add_droplet_tool(dolphinsf2 APP_NAME Dolphinsf2 VERSION ${PROJECT_VERSION} DESCRIPTION "${app_description}"
+                         PROMPT "Choose GameCube start-up archives (.baa) or disc images (.iso, .gcm) to convert:")
 
 include(CTest)
 if(BUILD_TESTING)
   add_executable(dolphinsf2_test tests/dolphinsf2_test.cpp)
-  target_link_libraries(dolphinsf2_test PRIVATE dolphinsf2_core)
+  target_link_libraries(dolphinsf2_test PRIVATE dolphinsf2_core ntdlib::testing)
   add_test(NAME dolphinsf2_units COMMAND dolphinsf2_test)
 
   # The program reports the version it was built as.
@@ -96,8 +67,5 @@ if(BUILD_TESTING)
   endif()
 
   # Load local_tests.cmake from each immediate subdirectory to register tests that use locally supplied files.
-  file(GLOB local_tests CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/*/local_tests.cmake")
-  foreach(file IN LISTS local_tests)
-    include("${file}")
-  endforeach()
+  xsflib_include_local_tests()
 endif()

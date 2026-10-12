@@ -7,12 +7,12 @@
 
 #pragma once
 
-#include <cstdint>
-#include <span>
 #include <string>
 #include <vector>
 
-#include "midi.h"
+#include "seqlib/midi/performance_writer.h"
+#include "seqlib/sfz/track_file.h"
+
 #include "performance.h"
 
 namespace dolphinsf2
@@ -20,36 +20,20 @@ namespace dolphinsf2
 
 class BankSet;
 
-// An SFZ file for one sequence track.
-struct SfzFile
-{
-    std::string name; // the MIDI track's name, such as "Track 3.sfz"
-    std::string text;
-};
+// What seqlib's MIDI writer reports about a file, such as each track's pitch bend range.
+using seqlib::midi::MidiReport;
 
-// A WAV sample used by the SFZ files.
-struct SfzSample
-{
-    std::string name; // "w<wave system>_<wave>.wav"
-    std::vector<uint8_t> wav;
-};
-
-// A sequence's SFZ files and shared samples.
-struct SfzInstruments
-{
-    std::vector<SfzFile> files;
-    std::vector<SfzSample> samples;
-};
+// A sequence's SFZ files, named after their MIDI tracks, such as "Track 3.sfz", and the samples that they share, named
+// "w<wave system>_<wave>.wav" (seqlib/sfz/track_file.h).
+using SfzSample = seqlib::sfz::Sample;
+using SfzInstruments = seqlib::sfz::Instruments;
 
 // Shared sample directory, beside the sequence directories.
-inline const std::string kSfzSamplesFolder = "samples";
+inline const std::string& kSfzSamplesFolder = seqlib::sfz::kSamplesFolder;
 
 // Build SFZ files for active tracks in `perf`. Take the bend ranges from `midi`. `title` and `preset_names` supply
 // names for comments.
 SfzInstruments BuildSfz(const Performance& perf, const MidiReport& midi, BankSet& banks, const std::string& title,
                         const std::vector<std::string>& preset_names);
-
-// Returns a mono WAV file of 16-bit samples at `rate` Hz.
-std::vector<uint8_t> WavFile(std::span<const int16_t> samples, uint32_t rate);
 
 } // namespace dolphinsf2

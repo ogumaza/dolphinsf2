@@ -13,7 +13,8 @@
 #include <string>
 #include <vector>
 
-#include "disc.h"
+#include "ntdlib/disc/game.h"
+
 #include "jaudio.h"
 #include "performance.h"
 
@@ -57,6 +58,9 @@ private:
     // List the sequences once the archive and the sequence archive are read.
     void FindSequences();
 
+    // Read the disc's file at `path`. Throw FormatError if it can't be read.
+    std::vector<uint8_t> ReadDiscFile(const std::string& path) const;
+
     std::unique_ptr<SoundArchive> archive_;
     std::vector<uint8_t> sequence_archive_;
     std::string sequence_archive_name_;
@@ -64,10 +68,10 @@ private:
     std::vector<SequenceSound> sequences_;
     std::vector<std::string> warnings_;
 
-    // Where the wave archives are: the folders to look in, or the disc's files by lowercase name.
+    // Where the wave archives are: the folders to look in, or the disc's files, their paths by lowercase name.
     std::vector<std::filesystem::path> wave_folders_;
-    std::optional<DiscImage> disc_;
-    std::map<std::string, DiscImage::File> disc_waves_;
+    std::shared_ptr<ntdlib::disc::GameFiles> disc_;
+    std::map<std::string, std::string> disc_waves_;
 };
 
 } // namespace dolphinsf2

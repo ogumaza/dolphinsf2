@@ -8,12 +8,10 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <limits>
 #include <optional>
 
 namespace dolphinsf2
 {
-
 namespace
 {
 
@@ -165,6 +163,8 @@ void OscillatorState::Update()
         return;
     }
 
+    // A track can replace its table while a note plays it (JASTrack::overwriteOsc). The new table can be shorter.
+    point_ = std::min(point_, table.size() - 1);
     for (int passed = 0; counter_ >= static_cast<float>(table[point_].time); passed++)
     {
         if (passed >= kMaxPointsPerUpdate)
@@ -198,6 +198,7 @@ void OscillatorState::Update()
         curve_ = p.mode;
         target_ = static_cast<float>(p.value) / 32768.0f;
     }
+
     Interpolate(static_cast<float>(table[point_].time));
 }
 
@@ -236,6 +237,7 @@ EnvelopeCurve TraceEnvelope(const std::vector<const Oscillator*>& volume_oscilla
 
         return std::max(product, 0.0f);
     };
+
     auto settled = [&]()
     {
         return std::ranges::all_of(oscs, [](const OscillatorState& o) { return !o.Valid() || o.Holding(); });
@@ -243,6 +245,8 @@ EnvelopeCurve TraceEnvelope(const std::vector<const Oscillator*>& volume_oscilla
 
     EnvelopeCurve curve;
     curve.attack.push_back(level());
+    float peak = curve.attack.back();
+    std::vector<OscillatorState> peak_oscs = oscs;
     while (!oscs[0].Stopped() && !settled() && curve.attack.size() < kMaxTrace)
     {
         for (OscillatorState& osc : oscs)
@@ -250,11 +254,19 @@ EnvelopeCurve TraceEnvelope(const std::vector<const Oscillator*>& volume_oscilla
             osc.Advance(kOscStep);
         }
         curve.attack.push_back(level());
+        if (curve.attack.back() > peak)
+        {
+            peak = curve.attack.back();
+            peak_oscs = oscs;
+        }
     }
     curve.holds = !oscs[0].Stopped();
-    if (!curve.holds)
+
+    // Notes on a curve that stops, or falls to silence, are released before then. Their release is traced from the peak
+    // instead.
+    if (!curve.holds || level() <= 1e-10f)
     {
-        return curve;
+        oscs = peak_oscs;
     }
 
     for (std::size_t i = 0; i < oscs.size(); i++)
@@ -367,7 +379,7 @@ Shape FitShape(const EnvelopeCurve& curve)
     s.sustain_db = Db(a.back()) - s.peak_db;
     s.decay_db_per_second = FitFall(a, decay_start, s.peak_db, Db(a.back()));
 
-    // The release, from the held level. A release that starts in silence, or doesn't fall, ends at once.
+    // The release. A release that starts in silence, or doesn't fall, ends at once.
     if (curve.release.size() > 1 && curve.release.front() > 1e-10f)
     {
         const double start = Db(curve.release.front());
@@ -414,16 +426,6 @@ SfzEnvelope ConvertEnvelopeForSfz(const EnvelopeCurve& curve)
     e.release = kFallDb / s.release_db_per_second;
 
     return e;
-}
-
-int ToTimecents(double ms, int lo, int hi)
-{
-    if (ms <= 1.0)
-    {
-        return lo;
-    }
-
-    return std::clamp(static_cast<int>(std::lround(1200.0 * std::log2(ms / 1000.0))), lo, hi);
 }
 
 } // namespace dolphinsf2

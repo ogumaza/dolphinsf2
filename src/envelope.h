@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "seqlib/sf2/units.h"
+
 #include "jaudio.h"
 
 namespace dolphinsf2
@@ -94,12 +96,12 @@ private:
 };
 
 // The level over time of a note's volume oscillators, multiplied together, from note-on with no release, and after a
-// release from its sustain.
+// release. The release starts from the held level. Where the curve stops or falls to silence, it starts from the peak.
 struct EnvelopeCurve
 {
     std::vector<float> attack;  // each sub-frame's level from note-on, up to where it holds or stops
     bool holds = false;         // it holds at its last level until the release
-    std::vector<float> release; // each sub-frame's level after a release at the held level, until it stops
+    std::vector<float> release; // each sub-frame's level after the release, until it stops
 };
 
 // Trace the curve of `volume_oscillators` (their targets are the volume) with `direct_release` (0 for none). No
@@ -126,11 +128,10 @@ struct SfzEnvelope
     double peak_db = 0.0;
 };
 
-// Convert to sfizz's SFZ envelope, fitted as for SoundFont. sfizz's decays and releases fall by a factor of e^-9
-// (78.17 dB) over their time.
+// Convert to sfizz's SFZ envelope, fitted as for SoundFont. Over their time, sfizz's decays and releases fall by a
+// factor of e^-9 (78.17 dB).
 SfzEnvelope ConvertEnvelopeForSfz(const EnvelopeCurve& curve);
 
-// Convert milliseconds to SoundFont timecents, clamped to lo..hi. Times <= 1 ms return lo.
-int ToTimecents(double ms, int lo, int hi);
+using seqlib::sf2::ToTimecents;
 
 } // namespace dolphinsf2

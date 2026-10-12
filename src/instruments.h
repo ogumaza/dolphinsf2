@@ -9,7 +9,6 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -30,23 +29,20 @@ struct NoteSound
     uint32_t wave_system = 0;
     uint16_t wave_id = 0;
     const WaveInfo* wave = nullptr;
-
-    float volume = 1.0f; // amplitude, before the velocity
-    float pitch = 1.0f;  // a ratio, before the key
-    float pan = 0.5f;    // 0 left, 1 right
-
+    float volume = 1.0f;                        // amplitude, before the velocity
+    float pitch = 1.0f;                         // a ratio, before the key
+    float pan = 0.5f;                           // 0 left, 1 right
     std::vector<const Oscillator*> oscillators; // at most two
     uint16_t direct_release = 0;                // drums: their release
     bool drum = false;                          // plays its wave at its rate whatever the key
     bool random = false;                        // a random effect would have varied the note
-    bool key_sense = false;                     // an effect follows the key
     bool velocity_sense = false;                // an effect follows the velocity
 };
 
 // The region of `bank`'s `program` that `key` and `velocity` play. Like JAudio2, take the first key region whose high
 // key is at or above the key, then the first velocity region of it whose high velocity is at or above the velocity. A
-// drum set plays the drum of the key. Return nothing if the program plays nothing there. Random effects take their
-// base value: dolphinsf2 can't vary a preset note by note. The result reports that one was there.
+// drum set plays the drum of the key. Return nothing if the program plays nothing there. Random effects take their base
+// value: dolphinsf2 can't vary a preset note by note. The result reports that one was there.
 std::optional<NoteSound> FindSound(const Bank& bank, uint32_t program, int key, int velocity);
 
 // The keys and velocities with which one region plays, for building presets: a run of keys that find the same key
@@ -73,7 +69,6 @@ struct PresetZone
     double volume = 1.0;   // amplitude, before the velocity
     double pan = 0.5;      // 0 left, 1 right
     EnvelopeCurve envelope;
-    bool pitch_envelope = false; // an oscillator moves the pitch (the zone leaves that out)
 };
 
 // The zones of `program` in `bank`, whose waves are in `waves`, played with `volume_override` and `pitch_override` in

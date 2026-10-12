@@ -12,11 +12,10 @@
 #include <tuple>
 #include <variant>
 
-#include "binary.h"
+#include "xsflib/binary.h"
 
 namespace dolphinsf2
 {
-
 namespace
 {
 
@@ -61,7 +60,6 @@ void ApplyEffects(const std::vector<InstEffect>& effects, int key, int velocity,
         else
         {
             y = SenseValue(e, key, velocity);
-            sound.key_sense = sound.key_sense || e.trigger == 2;
             sound.velocity_sense = sound.velocity_sense || e.trigger == 1;
         }
 
@@ -116,6 +114,7 @@ std::optional<NoteSound> FindSound(const Bank& bank, uint32_t program, int key, 
         sound.volume = inst->volume;
         sound.pitch = inst->pitch;
         ApplyEffects(inst->effects, key, velocity, sound);
+
         for (const KeyRegion& keys : inst->keys)
         {
             if (key <= keys.high_key)
@@ -124,6 +123,7 @@ std::optional<NoteSound> FindSound(const Bank& bank, uint32_t program, int key, 
                 break;
             }
         }
+
         for (std::size_t index : inst->oscillators)
         {
             sound.oscillators.push_back(&bank.oscillators[index]);
@@ -284,7 +284,6 @@ std::vector<PresetZone> PresetZones(const Bank& bank, const WaveSystem* waves, u
                 {
                     volume.push_back(osc);
                 }
-                z.pitch_envelope = z.pitch_envelope || (osc != nullptr && osc->target == 1);
             }
             const uint16_t release = direct_release != 0 ? direct_release : sound->direct_release;
             const auto key =

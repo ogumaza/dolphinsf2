@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 
 // Sequence execution (see performance.h). The performer follows JAudio2's sequence player as Four Swords Adventures'
-// main.dol links it. Its parser's command table is Twilight Princess's without 0xe7 (built at 0x80491e54), and the
-// player's classes are Twilight Princess's: JASSeqParser, JASSeqCtrl, JASSeqReader, JASTrack, JASRegisterParam,
-// JASTrackPort, JASChannel, JASOscillator, JASLfo and JASDSPChannel. Each sub-frame of 80 samples, the channels update
-// first (JASDSPChannel::updateAll), then the sequence runs its ticks (JASTrack::seqMain).
+// main.dol links it. The parser's command table (built at 0x80491e54) is Twilight Princess's without 0xe7. The
+// performer reads 0xe7's arguments as Twilight Princess's table gives them. The player's classes are Twilight
+// Princess's: JASSeqParser, JASSeqCtrl, JASSeqReader, JASTrack, JASRegisterParam, JASTrackPort, JASChannel,
+// JASOscillator, JASLfo and JASDSPChannel. Each sub-frame of 80 samples, the channels update first
+// (JASDSPChannel::updateAll), then the sequence runs its ticks (JASTrack::seqMain).
 
 #include "performance.h"
 
@@ -13,23 +14,23 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
-#include <iterator>
 #include <limits>
 #include <map>
 #include <optional>
 #include <set>
-#include <tuple>
 #include <utility>
 #include <vector>
 
-#include "binary.h"
+#include "ntdlib/sequence_export/passes.h"
+#include "seqlib/midi/recorder.h"
+#include "xsflib/binary.h"
+
 #include "envelope.h"
 #include "instruments.h"
 #include "wave.h"
 
 namespace dolphinsf2
 {
-
 namespace
 {
 
@@ -48,7 +49,7 @@ constexpr double kMaxSeconds = 900.0;
 constexpr double kHoldSeconds = 10.0;
 
 // Shortest wait that counts as waiting for ever: 200 beats at the default timebase, minutes at a typical tempo. Games
-// wait that long for sounds that they stop themselves (revosf2 and WSF use the same limit).
+// wait that long for sounds that they stop themselves.
 constexpr int32_t kHeldTicks = 9600;
 
 // Longest release tail kept after the end.
@@ -68,15 +69,13 @@ constexpr std::size_t kMaxTracks = 512;
 // A vibrato's counter moves on by this much each sub-frame (JASChannel::updateDSPChannel, with 32028.5 at 0x8053b090).
 constexpr float kLfoStep = 32028.5f / kDacRate;
 
-// The vibrato depth that CC1's full value gives, in cents.
-constexpr double kVibratoRangeCents = 100.0;
-
 // A note quieter than this, in dB, can't be heard. A released note that quiet no longer counts as sounding when a track
 // looks for a free MIDI channel. A tie on a note whose envelope has fallen that far raises nothing in MIDI.
 constexpr double kInaudibleDb = -40.0;
 
 // The command table at 0x80491e54: each command's argument count and their encodings, two bits each, the first argument
-// lowest: 0 a byte, 1 16 bits, 2 24 bits, 3 a register's value (its number as a byte).
+// lowest: 0 a byte, 1 16 bits, 2 24 bits, 3 a register's value (its number as a byte). The entry for 0xe7 is from
+// Twilight Princess's table (0x803c5e80 in the game's main.dol).
 struct CommandInfo
 {
     uint8_t count = 0;
@@ -86,10 +85,12 @@ struct CommandInfo
 constexpr std::array<CommandInfo, 96> MakeCommands()
 {
     std::array<CommandInfo, 96> c{};
+
     auto set = [&](int cmd, uint8_t count, uint16_t types)
     {
         c[static_cast<std::size_t>(cmd - 0xa0)] = {count, types};
     };
+
     set(0xb1, 3, 0x0000); // noteon: key, note id, velocity
     set(0xb2, 1, 0x0000); // noteoff
     set(0xb3, 4, 0x0040); // note: flags, key, velocity, length
@@ -127,6 +128,7 @@ constexpr std::array<CommandInfo, 96> MakeCommands()
     set(0xe1, 1, 0x0001); // bank and program
     set(0xe2, 1, 0x0000); // bank
     set(0xe3, 1, 0x0000); // program
+    set(0xe7, 2, 0x0004); // an oscillator's scale, in 16383ths
     set(0xe8, 2, 0x0008); // an oscillator's table
     set(0xe9, 5, 0x0155); // a simple ADSR
     set(0xea, 2, 0x0004); // bus connection
@@ -195,8 +197,8 @@ struct ChannelParams
     float bend = 0.0f;
 };
 
-// A channel's vibrato or tremolo (JASLfo): a sine of `depth`, `pitch` 72nds of a cycle per sub-frame, after a delay
-// in sub-frames.
+// A channel's vibrato or tremolo (JASLfo): a sine of `depth`, `pitch` 72nds of a cycle per sub-frame, after a delay in
+// sub-frames.
 class Lfo
 {
 public:
@@ -291,8 +293,6 @@ struct Channel
     bool midi_on = false;
     uint32_t midi_id = 0;
     uint8_t part = 0;
-    uint32_t preset = 0;
-    uint32_t on_tick = 0;
     float midi_key_offset = 0.0f; // key_offset when the MIDI note started
     uint8_t midi_velocity = 0;    // the MIDI note's velocity
     uint8_t cc11_velocity = 0;    // the velocity that CC11 follows (GateOn)
@@ -398,9 +398,7 @@ struct Track
     ChannelParams params;
 
     // MIDI state.
-    uint8_t part = 0;
-    std::map<std::tuple<uint8_t, EventKind>, int> sent; // each part's last controller values
-    std::map<uint8_t, float> sent_pitch;
+    seqlib::midi::TrackOutput output; // the MIDI track and part it records into, and each part's last values
     std::optional<uint32_t> last_change;
     std::optional<uint64_t> last_signal; // when it last wrote another track's port, in commands run
     bool idle = false;                   // its last pass of a loop changed nothing
@@ -417,18 +415,25 @@ enum class Outcome
     kFinish,
 };
 
+using ntdlib::sequence_export::FitParts;
+using ntdlib::sequence_export::LevelScale;
+
+// The rules of the main loop's passes (ntdlib/sequence_export/passes.h). A setting that RestoreAtLoopStart sends again
+// goes after the presets at the loop's first tick.
+const ntdlib::sequence_export::LoopRules kLoopRules{{}, true};
+
+// How the recorder places events (seqlib/midi/recorder.h). A setting replaces an earlier value of its kind anywhere in
+// its tick. A part switch sends the new part the old part's values. No tick's frame starts before tick 0.
+constexpr seqlib::midi::RecorderOptions kRecorderOptions{
+    .replace_anywhere_in_tick = true, .resend_on_switch = true, .frame_ticks_from_zero = true};
+
 // Execute a sequence sub-frame by sub-frame, following JAudio2, and record its output.
 class Performer
 {
 public:
     // What MarkSteadyPass chose: whether the performance stops, the pass of the main loop it marked, if any, and
     // whether the performance plays one more pass to mark it.
-    struct LoopChoice
-    {
-        bool stop = false;
-        std::optional<std::size_t> marked;
-        bool extend = false;
-    };
+    using LoopChoice = ntdlib::sequence_export::LoopChoice;
 
     // Multiply CC11 by `level_scale` (LevelPeak). Give each MIDI track at most `part_limits` parts. Make the main
     // loop's choices in `loop_choices`, from an earlier run (LoopChoices), and then decide.
@@ -439,11 +444,12 @@ public:
           banks_(banks),
           options_(options),
           rng_(options.seed),
+          recorder_(kRecorderOptions),
           replay_(loop_choices),
-          level_scale_(level_scale),
-          part_limits_(part_limits),
           tie_velocities_in_(tie_velocities)
     {
+        recorder_.SetLevelScale(level_scale);
+        recorder_.SetPartLimits(part_limits);
     }
 
     Performance Run();
@@ -451,13 +457,13 @@ public:
     // Highest CC11 value before `level_scale` and MIDI clamping.
     double LevelPeak() const
     {
-        return level_peak_;
+        return recorder_.LevelPeak();
     }
 
     // The parts each MIDI track used: one more than the highest.
     const std::array<uint8_t, 16>& PartsUsed() const
     {
-        return parts_used_;
+        return recorder_.PartsUsed();
     }
 
     // The choices MarkSteadyPass made for the main loop, for a later run to make again.
@@ -474,17 +480,9 @@ public:
     }
 
 private:
-    // A setting of a MIDI track's part: the MIDI track, the part and the kind of event.
-    using SettingKey = std::tuple<int, uint8_t, EventKind>;
-
     // How a pass of the main loop starts: each part's settings and the tempo after the commands of its first tick, and
     // the part each MIDI track's new notes go to.
-    struct PassStart
-    {
-        std::map<SettingKey, TrackEvent> settings;
-        double bpm = 120.0;
-        std::array<uint8_t, 16> parts{};
-    };
+    using PassStart = ntdlib::sequence_export::PassStart;
 
     // A pass of a loop that the sub-frame's end decides about: the track, and the ticks it started and ended in.
     struct PendingLoop
@@ -495,7 +493,6 @@ private:
     };
 
     // --- Tracks ---
-
     int NewTrack(int parent, int number);
     void CloseTrack(int t);
     int OpenChild(int t, uint32_t number);
@@ -534,7 +531,6 @@ private:
     bool Advance();
 
     // --- Channels ---
-
     std::optional<std::size_t> StartChannel(int t, int key, int velocity, uint32_t timer, float sweep = 0.0f,
                                             uint32_t sweep_subframes = 0, bool bends = false);
     void NoteOn(int t, uint32_t note_id, int key, int velocity);
@@ -550,9 +546,8 @@ private:
     float ChannelRatio(const Channel& ch, float osc_pitch) const;
 
     // --- Loops and ends ---
-
-    // Handle track `t` jumping back to `target`: a pass of a loop when it's a jump back to commands that ran before
-    // a wait. Detect the main loop, and ask the sub-frame's end to decide whether to stop.
+    // Handle track `t` jumping back to `target`: a pass of a loop when it's a jump back to commands that ran before a
+    // wait. Detect the main loop, and ask the sub-frame's end to decide whether to stop.
     void OnJumpBack(int t, uint32_t target);
 
     // Decide about the pending loop at the end of a sub-frame: mark its steady pass and stop, or play on.
@@ -576,20 +571,14 @@ private:
     // track hasn't released. The performance ends kHoldSeconds after the last change.
     std::optional<double> HeldSoundEnd(uint32_t start) const;
 
-    // The settings of each part after the commands of `tick`, from `perf`'s events.
-    static std::map<SettingKey, TrackEvent> SettingsAt(const Performance& perf, uint32_t tick);
-
     // How a pass that starts at `tick` starts.
     PassStart PassStartAt(uint32_t tick) const;
 
     // A copy of this performer that plays on up to tick `until`, with no limit on the loops.
     Performer PlayOn(uint32_t until) const;
 
-    // True if events `a` and `b` give a setting the same value.
-    static bool SameSetting(const TrackEvent& a, const TrackEvent& b);
-
     // True if a player that loops on the pass from `start` to `end` plays each repeat's notes as the game plays the
-    // notes of the next pass: the same notes at the same ticks, with the same settings and tempo (revosf2's rule).
+    // notes of the next pass: the same notes at the same ticks, with the same settings and tempo.
     bool RepeatsAsTheGame(uint32_t start, uint32_t end) const;
 
     // Select the first of the loop owner's passes that plays as the pass after it does.
@@ -598,27 +587,22 @@ private:
     // Mark the pass that ChooseSteadyPass selects. Return true if the performance can stop.
     bool MarkSteadyPass();
 
-    // Send at the main loop's start each setting, and the tempo, that the game gives back its value at the loop's start
-    // in `next_pass`. A player that loops on the markers otherwise keeps the loop end's value.
-    void RestoreAtLoopStart(const PassStart& next_pass);
-
     // --- Recording ---
-
     int SlotOf(int t);
-    void Emit(int t, TrackEvent e, int part = -1);
+    seqlib::midi::TrackOutput& Output(int t);
     void EmitTempo();
     void RecordOutputs(int t);
     void SendSetting(int t, EventKind kind, int value);
     void SendPitch(int t, float semitones);
     float GatePitch(int t) const;
     bool GateBends(int t) const;
+    bool HoldsOnPart(int t) const;
     void SweepBetweenTicks();
     void SwitchPart(int t);
     void MidiNoteOn(std::size_t c);
     void MidiNoteOff(std::size_t c);
     bool Audible(const Channel& ch) const;
     bool TailsOnPart(int slot, uint8_t part) const;
-    int PresetIndex(const PresetKey& key);
     void Approximate(const std::string& what);
     void RecordTickTime();
     double TrackLevel(int t) const;
@@ -634,11 +618,10 @@ private:
     PerformOptions options_;
     Random rng_;
     Performance out_;
-
+    seqlib::midi::Recorder recorder_;
     std::vector<Track> tracks_;
     std::vector<Channel> channels_;
-    std::array<int, kDspChannels> voices_{}; // channel index per voice, -1 free
-
+    std::vector<int> voices_;  // channel index per voice, -1 free
     float accumulator_ = 1.0f; // ticks due (JASTrack's field_0x1d8)
     uint16_t tempo_ = 120;
     uint16_t timebase_ = 48;
@@ -651,7 +634,6 @@ private:
     double sound_end_ = 0.0;     // when the last channel stopped
     uint64_t last_sounding_ = 0; // the last sub-frame in which a channel sounded
     uint64_t commands_run_ = 0;  // by all tracks
-    uint32_t next_midi_id_ = 1;
     bool stop_ = false;
     bool silent_end_ = false; // the main loop's pass was idle and silent: the sequence has ended
     std::optional<PendingLoop> pending_loop_;
@@ -662,21 +644,15 @@ private:
     bool extended_ = false;                                   // the performance plays one more pass to mark it
     std::optional<double> held_sound_end_;                    // set when the main loop holds a sound (HeldSoundEnd)
     std::optional<uint32_t> last_draw_;                       // the last tick a track drew a random number in
-    std::vector<std::tuple<uint32_t, int, uint8_t>> part_switches_; // tick, MIDI track and new part of each switch
-    std::vector<LoopChoice> replay_;                                // the choices of an earlier run to make again
-    std::size_t replayed_ = 0;                                      // how many of them have been made
-    std::vector<LoopChoice> choices_;                               // the choices made
-    double level_scale_ = 1.0;
-    double level_peak_ = 0.0;
-    std::array<uint8_t, 16> part_limits_{};
-    std::array<uint8_t, 16> parts_used_{};
-    std::array<int, 16> slot_tracks_{};             // the track recorded in each MIDI track, or -1
-    std::map<uint32_t, uint8_t> tie_velocities_in_; // an earlier run's TieVelocities
+    std::vector<LoopChoice> replay_;                          // the choices of an earlier run to make again
+    std::size_t replayed_ = 0;                                // how many of them have been made
+    std::vector<LoopChoice> choices_;                         // the choices made
+    std::array<int, 16> slot_tracks_{};                       // the track recorded in each MIDI track, or -1
+    std::map<uint32_t, uint8_t> tie_velocities_in_;           // an earlier run's TieVelocities
     std::map<uint32_t, uint8_t> tie_velocities_;
 };
 
 // --- Tracks ---
-
 int Performer::NewTrack(int parent, int number)
 {
     if (tracks_.size() >= kMaxTracks)
@@ -736,9 +712,7 @@ int Performer::OpenChild(int t, uint32_t number)
         }
         fresh.slot = c.slot;
         fresh.name = c.name;
-        fresh.part = c.part;
-        fresh.sent = c.sent;
-        fresh.sent_pitch = c.sent_pitch;
+        fresh.output = c.output;
         fresh.visited = c.visited;
         c = std::move(fresh);
     }
@@ -767,6 +741,7 @@ void Performer::CloseTrack(int t)
             CloseTrack(child);
         }
     }
+
     for (int& slot : tracks_[static_cast<std::size_t>(t)].slots)
     {
         if (slot >= 0)
@@ -776,6 +751,7 @@ void Performer::CloseTrack(int t)
             slot = -1;
         }
     }
+
     tracks_[static_cast<std::size_t>(t)].open = false;
 }
 
@@ -1039,38 +1015,48 @@ void Performer::WriteRegister(int t, uint32_t reg, uint32_t value)
         r[0] = (value >> 8) & 0xff;
         r[1] = value & 0xff;
         break;
+
     case 33:
         r[4] = static_cast<uint16_t>(value >> 16);
         r[5] = static_cast<uint16_t>(value);
         break;
+
     case 34:
         r[4] = static_cast<uint16_t>((r[4] & 0xff) | (value & 0xff) << 8);
         break;
+
     case 35:
         r[4] = static_cast<uint16_t>((r[4] & 0xff00) | (value & 0xff));
         break;
+
     case 36:
         r[5] = static_cast<uint16_t>((r[5] & 0xff) | (value & 0xff) << 8);
         break;
+
     case 37:
         r[5] = static_cast<uint16_t>((r[5] & 0xff00) | (value & 0xff));
         break;
+
     case 38:
         r[6] = static_cast<uint16_t>(value >> 16);
         r[7] = static_cast<uint16_t>(value);
         break;
+
     case 39:
         r[8] = static_cast<uint16_t>(value >> 16);
         r[9] = static_cast<uint16_t>(value);
         break;
+
     case 40:
         r[10] = static_cast<uint16_t>(value >> 16);
         r[11] = static_cast<uint16_t>(value);
         break;
+
     case 41:
         r[12] = static_cast<uint16_t>(value >> 16);
         r[13] = static_cast<uint16_t>(value);
         break;
+
     default:
         break;
     }
@@ -1104,46 +1090,67 @@ uint32_t Performer::ReadReg(int t, uint32_t reg)
             }
             return running;
         }
+
     case 0x61:
         return tr.depth > 0 ? tr.loop_count[static_cast<std::size_t>(tr.depth - 1)] : 0;
+
     case 0x62:
         return timebase_;
+
     case 0x63:
         return static_cast<uint32_t>(static_cast<int32_t>(tr.transpose));
+
     case 0x64:
         return tr.bend_sense;
+
     case 0x65:
         return tr.gate_rate;
+
     case 0x66:
         return tr.skip_samples;
+
     case 0x67:
         return tr.bank;
+
     case 0x68:
         return tr.program;
+
     case 0x69:
         return static_cast<uint32_t>(static_cast<int32_t>(tr.pan_power * 32767.0f));
+
     case 0x6a:
         return tr.release_prio | tr.note_on_prio; // the game forgets to shift the release priority
+
     case 0x6b:
         return tr.note_on_prio;
+
     case 0x6c:
         return tr.release_prio;
+
     case 0x6d:
         return tr.direct_release;
+
     case 0x6e:
         return static_cast<uint32_t>(tr.vib_depth * 1524.0f);
+
     case 0x6f:
         return static_cast<uint32_t>(tr.vib_depth * 12192.0f);
+
     case 0x70:
         return static_cast<uint32_t>(tr.trem_depth * 256.0f);
+
     case 0x71:
         return static_cast<uint32_t>(tr.vib_pitch * 64.0f);
+
     case 0x72:
         return static_cast<uint32_t>(tr.trem_pitch * 64.0f);
+
     case 0x73:
         return tr.vib_delay;
+
     case 0x74:
         return tr.trem_delay;
+
     default:
         return 0;
     }
@@ -1176,61 +1183,80 @@ void Performer::WriteReg(int t, uint32_t reg, uint32_t value)
             EmitTempo();
         }
         break;
+
     case 0x63:
         tr.transpose = static_cast<int8_t>(value);
         break;
+
     case 0x64:
         tr.bend_sense = static_cast<uint8_t>(value);
         break;
+
     case 0x65:
         tr.gate_rate = static_cast<uint8_t>(value);
         break;
+
     case 0x66:
         tr.skip_samples = value;
         break;
+
     case 0x67:
         tr.bank = static_cast<uint8_t>(value);
         break;
+
     case 0x68:
         tr.program = static_cast<uint8_t>(value);
         break;
+
     case 0x69:
         tr.pan_power = static_cast<float>(value) / 32767.0f;
         break;
+
     case 0x6a:
         tr.release_prio = static_cast<uint8_t>(value >> 8);
         tr.note_on_prio = static_cast<uint8_t>(value);
         break;
+
     case 0x6b:
         tr.note_on_prio = static_cast<uint8_t>(value);
         break;
+
     case 0x6c:
         tr.release_prio = static_cast<uint8_t>(value);
         break;
+
     case 0x6d:
         tr.direct_release = static_cast<uint16_t>(value);
         break;
+
     case 0x6e:
         tr.vib_depth = static_cast<float>(value) / 1524.0f;
         break;
+
     case 0x6f:
         tr.vib_depth = static_cast<float>(value) / 12192.0f;
         break;
+
     case 0x70:
         tr.trem_depth = static_cast<float>(value) / 256.0f;
         break;
+
     case 0x71:
         tr.vib_pitch = static_cast<float>(value) / 64.0f;
         break;
+
     case 0x72:
         tr.trem_pitch = static_cast<float>(value) / 64.0f;
         break;
+
     case 0x73:
         tr.vib_delay = static_cast<uint16_t>(value);
         break;
+
     case 0x74:
         tr.trem_delay = static_cast<uint16_t>(value);
         break;
+
     default:
         break;
     }
@@ -1504,9 +1530,11 @@ Outcome Performer::Command(int t, uint8_t cmd, uint16_t override_types)
     case 0xb1:
         NoteOn(t, a[1], static_cast<int>(a[0]), static_cast<int>(a[2]));
         break;
+
     case 0xb2:
         NoteOff(t, a[0], 0);
         break;
+
     case 0xb3:
         GateOn(t, static_cast<int>(a[1]), static_cast<int>(a[2]), static_cast<float>(a[3]),
                GateFlags(static_cast<uint8_t>(a[0]), a[3]));
@@ -1519,12 +1547,14 @@ Outcome Performer::Command(int t, uint8_t cmd, uint16_t override_types)
             tracks_[static_cast<std::size_t>(t)].wait_note_finish = true;
         }
         return Outcome::kWait;
+
     case 0xb4:
         if (a[0] < 256)
         {
             tr.latest_key = static_cast<uint8_t>(a[0] + TransposeTotal(t));
         }
         break;
+
     case 0xb8:
     case 0xba:
         {
@@ -1538,10 +1568,12 @@ Outcome Performer::Command(int t, uint8_t cmd, uint16_t override_types)
             SetParam(t, a[0], static_cast<float>(value) / 32767.0f, cmd == 0xba ? a[2] : 0);
             break;
         }
+
     case 0xb9:
     case 0xbb:
         SetParam(t, a[0], static_cast<float>(static_cast<int16_t>(a[1])) / 32767.0f, cmd == 0xbb ? a[2] : 0);
         break;
+
     case 0xc1:
         {
             if (a[0] >= kChildren)
@@ -1555,45 +1587,55 @@ Outcome Performer::Command(int t, uint8_t cmd, uint16_t override_types)
             c.dirty = true;
             break;
         }
+
     case 0xc2:
         if (a[0] < kChildren)
         {
             CloseChild(t, a[0]);
         }
         break;
+
     case 0xc3:
         Call(t, a[0]);
         break;
+
     case 0xc4:
         if (Condition(t, a[0]))
         {
             Call(t, a[1]);
         }
         break;
+
     case 0xc5:
         Return(t);
         break;
+
     case 0xc6:
         if (Condition(t, a[0]))
         {
             Return(t);
         }
         break;
+
     case 0xc7:
         Jump(t, a[0]);
         break;
+
     case 0xc8:
         if (Condition(t, a[0]))
         {
             Jump(t, a[1]);
         }
         break;
+
     case 0xc9:
         Jump(t, Data24(a[1] + 3 * a[0]));
         break;
+
     case 0xca:
         Call(t, Data24(a[1] + 3 * a[0]));
         break;
+
     case 0xcb:
         // JASSeqReader::loopStart: the count goes on the call stack with the return address.
         if (tr.depth < kStackSize)
@@ -1603,6 +1645,7 @@ Outcome Performer::Command(int t, uint8_t cmd, uint16_t override_types)
             tr.depth++;
         }
         break;
+
     case 0xcc:
         {
             // JASSeqReader::loopEnd: a count of 0 or 1 plays the loop once.
@@ -1621,20 +1664,25 @@ Outcome Performer::Command(int t, uint8_t cmd, uint16_t override_types)
             tr.pc = tr.return_to[static_cast<std::size_t>(tr.depth - 1)];
             break;
         }
+
     case 0xd0:
         tr.imported = static_cast<uint16_t>(tr.imported & ~(1u << (a[0] & 15)));
         WriteReg(t, a[1], tr.ports[a[0] & 15]);
         break;
+
     case 0xd1:
         tr.exported = static_cast<uint16_t>(tr.exported | (1u << (a[0] & 15)));
         tr.ports[a[0] & 15] = static_cast<uint16_t>(a[1]);
         break;
+
     case 0xd2:
         WriteRegister(t, 3, (tr.imported >> (a[0] & 15)) & 1);
         break;
+
     case 0xd3:
         WriteRegister(t, 3, (tr.exported >> (a[0] & 15)) & 1);
         break;
+
     case 0xd4:
     case 0xd5:
         {
@@ -1663,6 +1711,7 @@ Outcome Performer::Command(int t, uint8_t cmd, uint16_t override_types)
             }
             break;
         }
+
     case 0xd6:
     case 0xd7:
         {
@@ -1685,9 +1734,11 @@ Outcome Performer::Command(int t, uint8_t cmd, uint16_t override_types)
             WriteReg(t, a[1], o.ports[port]);
             break;
         }
+
     case 0xd8:
         WriteReg(t, a[0], a[1]);
         break;
+
     case 0xd9:
     case 0xda:
         {
@@ -1698,51 +1749,64 @@ Outcome Performer::Command(int t, uint8_t cmd, uint16_t override_types)
             {
             case 0:
                 break;
+
             case 1:
                 v += ReadReg(t, reg);
                 break;
+
             case 2:
                 v = ReadReg(t, reg) - v;
                 break;
+
             case 3:
                 v = ReadReg(t, reg) - v;
                 reg = 3;
                 break;
+
             case 4:
                 v *= ReadReg(t, reg);
                 reg = 0x21;
                 break;
+
             case 5:
                 v &= ReadReg(t, reg);
                 break;
+
             case 6:
                 v |= ReadReg(t, reg);
                 break;
+
             case 7:
                 v ^= ReadReg(t, reg);
                 break;
+
             case 8:
                 last_draw_ = tick_;
                 v = v != 0 ? (rng_.Next() >> 9) % v : 0;
                 break;
+
             case 9:
                 v = ReadReg(t, reg) << (v & 31);
                 break;
+
             case 10:
                 v = ReadReg(t, reg) >> (v & 31);
                 break;
+
             default:
                 return Outcome::kContinue;
             }
             WriteReg(t, reg, v);
             break;
         }
+
     case 0xdb:
         if (a[0] == 11)
         {
             WriteReg(t, a[1], static_cast<uint32_t>(-static_cast<int32_t>(ReadReg(t, a[1]))));
         }
         break;
+
     case 0xdc:
         {
             uint32_t v = 0;
@@ -1769,6 +1833,7 @@ Outcome Performer::Command(int t, uint8_t cmd, uint16_t override_types)
             WriteReg(t, a[1], v);
             break;
         }
+
     case 0xe0:
         // Only the first track's tempo counts (JASTrack::setTempo asserts it).
         if (tr.parent < 0)
@@ -1778,16 +1843,23 @@ Outcome Performer::Command(int t, uint8_t cmd, uint16_t override_types)
             EmitTempo();
         }
         break;
+
     case 0xe1:
         tr.bank = static_cast<uint16_t>((a[0] >> 8) & 0xff);
         tr.program = static_cast<uint16_t>(a[0] & 0xff);
         break;
+
     case 0xe2:
         tr.bank = static_cast<uint16_t>(a[0] & 0xff);
         break;
+
     case 0xe3:
         tr.program = static_cast<uint16_t>(a[0] & 0xff);
         break;
+
+    case 0xe7:
+        break; // JASTrack::setOscScale: not applied
+
     case 0xe8:
         {
             // JASTrack::setOscTable: the track's table for oscillator 0 (volume) or 1 (pitch), from the sequence.
@@ -1814,10 +1886,11 @@ Outcome Performer::Command(int t, uint8_t cmd, uint16_t override_types)
             tr.osc[a[0]] = std::move(osc);
             break;
         }
+
     case 0xe9:
         {
-            // JASTrack::setOscAdsr: oscillator 0 becomes the track's four-point table (sAdsTable) with these times
-            // and sustain, and the direct release.
+            // JASTrack::setOscAdsr: oscillator 0 becomes the track's four-point table (sAdsTable) with these times and
+            // sustain, and the direct release.
             Oscillator osc;
             osc.target = 0;
             osc.attack = {{0, static_cast<int16_t>(a[0]), 0x7fff},
@@ -1828,30 +1901,39 @@ Outcome Performer::Command(int t, uint8_t cmd, uint16_t override_types)
             tr.direct_release = static_cast<uint16_t>(a[4]);
             break;
         }
+
     case 0xea:
     case 0xed:
         break; // bus connections and FIR filters: the effects that the game sets up
+
     case 0xeb:
         tr.iir = a[0] < 127;
         break;
+
     case 0xec:
         tr.iir = !(static_cast<int16_t>(a[0]) == 0x7fff && a[1] == 0 && a[2] == 0 && a[3] == 0);
         break;
+
     case 0xf0:
         tr.wait = static_cast<int32_t>(ReadMidiValue(t));
         return tr.wait != 0 ? Outcome::kWait : Outcome::kContinue;
+
     case 0xf1:
         tr.wait = static_cast<int32_t>(a[0]);
         return tr.wait != 0 ? Outcome::kWait : Outcome::kContinue;
+
     case 0xf3:
         tr.intr_table = a[0];
         break;
+
     case 0xf4:
         tr.intr_mask = static_cast<uint16_t>(tr.intr_mask | a[0]);
         break;
+
     case 0xf5:
         tr.intr_mask = static_cast<uint16_t>(tr.intr_mask & ~a[0]);
         break;
+
     case 0xf6:
         if (tr.intr_return)
         {
@@ -1860,20 +1942,24 @@ Outcome Performer::Command(int t, uint8_t cmd, uint16_t override_types)
         }
         CheckInterrupt(t);
         break;
+
     case 0xf7:
         tr.intr_return.reset();
         CheckInterrupt(t);
         break;
+
     case 0xf8:
         tr.timer_repeats = static_cast<uint8_t>(a[0]);
         tr.timer = a[1];
         tr.timer_reload = a[1];
         break;
+
     case 0xf9:
         // A game can answer through a callback. Four Swords Adventures registers none. The command's handler
         // (0x80034654) then writes 0xffff to the flag register.
         WriteRegister(t, 3, 0xffff);
         break;
+
     case 0xfd:
         {
             // A debugging print: its text, then a byte for each % in it.
@@ -1885,6 +1971,7 @@ Outcome Performer::Command(int t, uint8_t cmd, uint16_t override_types)
                 {
                     break;
                 }
+
                 if (c == '\\')
                 {
                     if (ReadByte(t) == 0)
@@ -1907,8 +1994,10 @@ Outcome Performer::Command(int t, uint8_t cmd, uint16_t override_types)
             }
             break;
         }
+
     case 0xff:
         return Outcome::kFinish;
+
     default:
         break;
     }
@@ -1927,26 +2016,29 @@ void Performer::OnJumpBack(int t, uint32_t target)
         return;
     }
 
-    // A pass that changed nothing is idle: the track only waited. Writing another track's port counts as a change.
     const uint32_t start = run->second.first;
     const uint64_t first_command = run->second.second;
+
+    // A pass that changed nothing is idle: the track only waited. Writing another track's port counts as a change.
     auto changed = [&](std::size_t i)
     {
         const Track& other = tracks_[i];
         return (other.last_change && *other.last_change >= start) ||
                (other.last_signal && *other.last_signal > first_command);
     };
+
     tr.idle = !changed(static_cast<std::size_t>(t));
 
     // Use the first track that can still advance, in the order the tracks opened. A pass counts only if no earlier
     // track contributed during it. A track whose last pass was idle doesn't count as advancing. An idle pass counts
     // only if no later track advances or contributed either. A later track that has been quiet for kHoldSeconds doesn't
-    // count as advancing (revosf2's OnLoop).
+    // count as advancing.
     auto plays_on = [&](std::size_t i)
     {
         return tracks_[i].open && !WaitsForever(static_cast<int>(i)) && !tracks_[i].idle &&
                (static_cast<int>(i) < t || !Quiet(static_cast<int>(i)));
     };
+
     for (std::size_t i = 0; i < tracks_.size(); i++)
     {
         if (static_cast<int>(i) != t && (static_cast<int>(i) < t || tr.idle) && (plays_on(i) || changed(i)))
@@ -1990,29 +2082,35 @@ void Performer::OnJumpBack(int t, uint32_t target)
 }
 
 // --- Channels ---
-
 std::optional<std::size_t> Performer::AllocateVoice(uint8_t priority)
 {
     // JASDSPChannel::getLowestChannel: a free voice, or the oldest voice of the lowest priority at or below this one.
     int best = -1;
     int best_priority = 0xff;
     uint32_t best_age = 0;
-    for (int v = 0; v < kDspChannels; v++)
+    for (std::size_t v = 0; v < voices_.size(); v++)
     {
-        const int c = voices_[static_cast<std::size_t>(v)];
+        const int c = voices_[v];
         if (c < 0)
         {
-            return static_cast<std::size_t>(v);
+            return v;
         }
 
         const Channel& ch = channels_[static_cast<std::size_t>(c)];
         const int p = ch.released ? ch.release_priority : ch.priority;
         if (p <= priority && p <= best_priority && (p != best_priority || ch.age > best_age))
         {
-            best = v;
+            best = static_cast<int>(v);
             best_priority = p;
             best_age = ch.age;
         }
+    }
+
+    // Without a voice limit, a note that finds every voice busy gets a new one.
+    if (options_.voice_limit == 0)
+    {
+        voices_.push_back(-1);
+        return voices_.size() - 1;
     }
     if (best < 0)
     {
@@ -2021,7 +2119,7 @@ std::optional<std::size_t> Performer::AllocateVoice(uint8_t priority)
 
     // The voice's channel stops at once.
     const auto stolen = static_cast<std::size_t>(voices_[static_cast<std::size_t>(best)]);
-    Approximate("notes cut when the game's 64 voices ran out");
+    Approximate("notes cut when the game's " + std::to_string(options_.voice_limit) + " voices ran out");
     EndChannel(stolen);
 
     return static_cast<std::size_t>(best);
@@ -2057,6 +2155,7 @@ std::optional<std::size_t> Performer::StartChannel(int t, int key, int velocity,
     {
         return std::nullopt;
     }
+
     if (found->random)
     {
         Approximate("random variation of instruments omitted");
@@ -2069,7 +2168,7 @@ std::optional<std::size_t> Performer::StartChannel(int t, int key, int velocity,
     const std::optional<std::size_t> voice = AllocateVoice(tr.note_on_prio);
     if (!voice)
     {
-        Approximate("notes lost when the game's 64 voices ran out");
+        Approximate("notes lost when the game's " + std::to_string(options_.voice_limit) + " voices ran out");
         return std::nullopt;
     }
 
@@ -2133,7 +2232,6 @@ std::optional<std::size_t> Performer::StartChannel(int t, int key, int velocity,
         SetSweep(ch, sweep, sweep_subframes);
     }
     ch.bends = bends;
-    ch.on_tick = tick_;
     channels_.push_back(std::move(ch));
     const std::size_t c = channels_.size() - 1;
     voices_[*voice] = static_cast<int>(c);
@@ -2410,9 +2508,9 @@ void Performer::UpdateChannel(Channel& ch)
 
 void Performer::UpdateChannels()
 {
-    for (int v = 0; v < kDspChannels; v++)
+    for (std::size_t v = 0; v < voices_.size(); v++)
     {
-        const int c = voices_[static_cast<std::size_t>(v)];
+        const int c = voices_[v];
         if (c >= 0)
         {
             Channel& ch = channels_[static_cast<std::size_t>(c)];
@@ -2424,7 +2522,6 @@ void Performer::UpdateChannels()
 }
 
 // --- Recording ---
-
 int Performer::SlotOf(int t)
 {
     // The first 16 tracks that record something get MIDI tracks: the first track's children by number, others in the
@@ -2478,40 +2575,17 @@ int Performer::SlotOf(int t)
         out_.track_names[static_cast<std::size_t>(wanted)] = tr.name;
     }
     tracks_[static_cast<std::size_t>(t)].slot = wanted;
+    tracks_[static_cast<std::size_t>(t)].output.midi_track = static_cast<uint8_t>(wanted);
 
     return wanted;
 }
 
-void Performer::Emit(int t, TrackEvent e, int part)
+seqlib::midi::TrackOutput& Performer::Output(int t)
 {
-    // Controller changes go before the tick's notes. A change replaces an earlier value of the same setting in the
-    // tick.
-    e.tick = tick_;
-    e.part = static_cast<uint8_t>(part >= 0 ? part : tracks_[static_cast<std::size_t>(t)].part);
-    tracks_[static_cast<std::size_t>(t)].last_change = tick_;
-    std::vector<TrackEvent>& events = out_.tracks[static_cast<std::size_t>(SlotOf(t))];
-    const bool setting = e.kind != EventKind::kNoteOn && e.kind != EventKind::kNoteOff && e.kind != EventKind::kPreset;
-    if (!setting)
-    {
-        events.push_back(e);
-        return;
-    }
+    // The track's output, with the MIDI track it records into (SlotOf).
+    SlotOf(t);
 
-    auto at = events.end();
-    while (at != events.begin() && std::prev(at)->tick == tick_ && std::prev(at)->after == 0 &&
-           (std::prev(at)->kind == EventKind::kNoteOn || std::prev(at)->kind == EventKind::kPreset))
-    {
-        --at;
-    }
-    for (auto it = at; it != events.begin() && std::prev(it)->tick == tick_; --it)
-    {
-        if (std::prev(it)->kind == e.kind && std::prev(it)->part == e.part && std::prev(it)->after == 0)
-        {
-            *std::prev(it) = e;
-            return;
-        }
-    }
-    events.insert(at, e);
+    return tracks_[static_cast<std::size_t>(t)].output;
 }
 
 void Performer::EmitTempo()
@@ -2521,20 +2595,7 @@ void Performer::EmitTempo()
     {
         out_.timebase = std::max<uint16_t>(timebase_, 1);
     }
-    const double bpm = static_cast<double>(tempo_) * timebase_ / out_.timebase * tempo_rate_;
-    if (bpm <= 0.0)
-    {
-        return;
-    }
-
-    if (!out_.tempo.empty() && out_.tempo.back().tick == tick_)
-    {
-        out_.tempo.back().bpm = bpm;
-    }
-    else if (out_.tempo.empty() || out_.tempo.back().bpm != bpm)
-    {
-        out_.tempo.push_back({tick_, bpm});
-    }
+    recorder_.SetTempo(out_, tick_, static_cast<double>(tempo_) * timebase_ / out_.timebase * tempo_rate_);
 }
 
 bool Performer::Audible(const Channel& ch) const
@@ -2553,13 +2614,14 @@ bool Performer::Audible(const Channel& ch) const
 
 bool Performer::TailsOnPart(int slot, uint8_t part) const
 {
-    // A note on the part that its track has detached, and that can still be heard.
+    // A note on the part that its track has detached, and that can still be heard. Its MIDI note has started. The
+    // release's note-off has usually ended it before the track detaches the channel.
     for (const int c : voices_)
     {
         if (c >= 0)
         {
             const Channel& ch = channels_[static_cast<std::size_t>(c)];
-            if (ch.midi_on && ch.track < 0 && ch.slot == slot && ch.part == part && Audible(ch))
+            if (ch.midi_id != 0 && ch.track < 0 && ch.slot == slot && ch.part == part && Audible(ch))
             {
                 return true;
             }
@@ -2574,105 +2636,56 @@ void Performer::SwitchPart(int t)
     // Tails keep the settings they had when their track detached them. A change the track makes while they still sound
     // on its part would reach them. The track therefore moves to a part where none of its tails sound, and sends that
     // part every setting first.
-    Track& tr = tracks_[static_cast<std::size_t>(t)];
     const int slot = SlotOf(t);
-    if (!TailsOnPart(slot, tr.part))
+    if (!TailsOnPart(slot, tracks_[static_cast<std::size_t>(t)].output.part))
     {
         return;
     }
 
-    // A note that bends keeps the part. Its pitch and CC11 follow the track's settings. The tails there follow them
-    // too.
-    if (GateBends(t))
+    // A note that the track still holds keeps the part. It follows the track's settings, as in the game. The tails
+    // there follow them too.
+    if (HoldsOnPart(t))
     {
-        Approximate("released notes take the settings of a later tied or sweeping note of their track");
+        Approximate("released notes take later settings of their track while it holds a note on their part");
         return;
     }
 
-    const uint8_t limit = part_limits_[static_cast<std::size_t>(slot)];
-    for (uint8_t p = 0; p < limit; p++)
+    if (recorder_.Switch(out_, Output(t), tick_, [&](uint8_t part) { return TailsOnPart(slot, part); }))
     {
-        if (p == tr.part || TailsOnPart(slot, p))
-        {
-            continue;
-        }
-
-        const uint8_t old = tr.part;
-        tr.part = p;
-        part_switches_.emplace_back(tick_, slot, p);
-        parts_used_[static_cast<std::size_t>(slot)] =
-            std::max<uint8_t>(parts_used_[static_cast<std::size_t>(slot)], static_cast<uint8_t>(p + 1));
-        std::vector<std::pair<EventKind, int>> copy;
-        for (const auto& [key, value] : tr.sent)
-        {
-            if (std::get<0>(key) == old)
-            {
-                copy.emplace_back(std::get<1>(key), value);
-            }
-        }
-        for (const auto& [kind, value] : copy)
-        {
-            tracks_[static_cast<std::size_t>(t)].sent[{p, kind}] = value;
-            TrackEvent e;
-            e.kind = kind;
-            if (kind == EventKind::kPreset)
-            {
-                e.preset = static_cast<uint32_t>(value);
-            }
-            else
-            {
-                e.value = static_cast<uint8_t>(value);
-            }
-            Emit(t, e);
-        }
-        const auto pitch = tracks_[static_cast<std::size_t>(t)].sent_pitch.find(old);
-        if (pitch != tracks_[static_cast<std::size_t>(t)].sent_pitch.end())
-        {
-            tracks_[static_cast<std::size_t>(t)].sent_pitch[p] = pitch->second;
-            TrackEvent e;
-            e.kind = EventKind::kPitch;
-            e.semitones = pitch->second;
-            Emit(t, e);
-        }
-        return;
+        Changed(t);
     }
 }
 
 void Performer::SendSetting(int t, EventKind kind, int value)
 {
-    Track& tr = tracks_[static_cast<std::size_t>(t)];
-    const auto it = tr.sent.find({tr.part, kind});
-    if (it != tr.sent.end() && it->second == value)
-    {
-        return;
-    }
-
-    if (it != tr.sent.end())
+    // A setting that changes the part's last value moves the track off a part where its tails sound (SwitchPart).
+    const seqlib::midi::TrackOutput& output = tracks_[static_cast<std::size_t>(t)].output;
+    const auto it = output.sent.find({output.part, kind});
+    if (it != output.sent.end() && it->second != value)
     {
         SwitchPart(t);
     }
-    tracks_[static_cast<std::size_t>(t)].sent[{tracks_[static_cast<std::size_t>(t)].part, kind}] = value;
-    TrackEvent e;
-    e.kind = kind;
-    e.value = static_cast<uint8_t>(value);
-    Emit(t, e);
+    if (recorder_.SendSetting(out_, Output(t), tick_, kind, static_cast<uint8_t>(value)))
+    {
+        Changed(t);
+    }
 }
 
 void Performer::SendPitch(int t, float semitones)
 {
-    Track& tr = tracks_[static_cast<std::size_t>(t)];
-    const auto it = tr.sent_pitch.find(tr.part);
-    if ((it == tr.sent_pitch.end() && semitones == 0.0f) || (it != tr.sent_pitch.end() && it->second == semitones))
+    // Any pitch that goes out moves the track off a part where its tails sound (SwitchPart).
+    const seqlib::midi::TrackOutput& output = tracks_[static_cast<std::size_t>(t)].output;
+    const auto it = output.pitch.find(output.part);
+    if ((it == output.pitch.end() && semitones == 0.0f) || (it != output.pitch.end() && it->second == semitones))
     {
         return;
     }
 
     SwitchPart(t);
-    tracks_[static_cast<std::size_t>(t)].sent_pitch[tracks_[static_cast<std::size_t>(t)].part] = semitones;
-    TrackEvent e;
-    e.kind = EventKind::kPitch;
-    e.semitones = semitones;
-    Emit(t, e);
+    if (recorder_.SendPitch(out_, Output(t), tick_, semitones))
+    {
+        Changed(t);
+    }
 }
 
 float Performer::GatePitch(int t) const
@@ -2696,7 +2709,23 @@ bool Performer::GateBends(int t) const
     }
 
     const Channel& ch = channels_[static_cast<std::size_t>(tr.slots[0])];
-    return ch.midi_on && ch.bends && ch.part == tr.part;
+    return ch.midi_on && ch.bends && ch.part == tr.output.part;
+}
+
+bool Performer::HoldsOnPart(int t) const
+{
+    // A note of the track that it hasn't released, on the track's part.
+    const Track& tr = tracks_[static_cast<std::size_t>(t)];
+    for (const int c : tr.slots)
+    {
+        if (c >= 0 && channels_[static_cast<std::size_t>(c)].midi_on &&
+            channels_[static_cast<std::size_t>(c)].part == tr.output.part)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 void Performer::SweepBetweenTicks()
@@ -2719,22 +2748,22 @@ void Performer::SweepBetweenTicks()
             continue;
         }
 
+        // A pitch of exactly 0 goes out on a part that has had no pitch yet. The part is at 0 already. The recorder's
+        // SendPitch leaves such a pitch out.
         const float semitones = 12.0f * tracks_[t].params.bend + GatePitch(i);
-        const auto sent = tracks_[t].sent_pitch.find(tracks_[t].part);
-        if (sent != tracks_[t].sent_pitch.end() && sent->second == semitones)
+        seqlib::midi::TrackOutput& output = Output(i);
+        if (semitones == 0.0f && !output.pitch.contains(output.part))
         {
+            output.pitch[output.part] = semitones;
+            TrackEvent e;
+            e.kind = EventKind::kPitch;
+            e.semitones = semitones;
+            e.after = after;
+            recorder_.Emit(out_, output, tick_, e);
             continue;
         }
 
-        const int slot = SlotOf(i);
-        tracks_[t].sent_pitch[tracks_[t].part] = semitones;
-        TrackEvent e;
-        e.tick = tick_;
-        e.kind = EventKind::kPitch;
-        e.semitones = semitones;
-        e.part = tracks_[t].part;
-        e.after = after;
-        out_.tracks[static_cast<std::size_t>(slot)].push_back(e);
+        recorder_.SendPitch(out_, output, tick_, semitones, -1, after);
     }
 }
 
@@ -2748,8 +2777,8 @@ double Performer::TrackLevel(int t) const
 
 void Performer::RecordOutputs(int t)
 {
-    // The MIDI controllers for a track's settings: CC7 its volume, CC11 the rest of the volume, CC10 the pan, the
-    // bend, CC1 the vibrato's depth and CC91 the effect send.
+    // The MIDI controllers for a track's settings: CC7 its volume, CC11 the rest of the volume, CC10 the pan, the bend,
+    // CC1 the vibrato's depth and CC91 the effect send.
     const Track& tr = tracks_[static_cast<std::size_t>(t)];
     if (!tr.open || tr.slot < 0)
     {
@@ -2763,9 +2792,9 @@ void Performer::RecordOutputs(int t)
         const Channel& ch = channels_[static_cast<std::size_t>(tr.slots[0])];
         level *= static_cast<double>(ch.cc11_velocity) / static_cast<double>(ch.midi_velocity);
     }
-    level_peak_ = std::max(level_peak_, level);
+    recorder_.RaiseLevelPeak(level);
     const int volume = std::clamp(static_cast<int>(std::lround(127.0 * std::abs(tr.move[0].value))), 0, 127);
-    const int expression = std::clamp(static_cast<int>(std::lround(level * level_scale_)), 0, 127);
+    const int expression = recorder_.Expression(level);
     const int pan = std::clamp(static_cast<int>(std::lround(127.0 * std::clamp(tr.params.pan, 0.0f, 1.0f))), 0, 127);
     const double vibrato_cents = 1200.0 * std::abs(tr.vib_depth);
     if (vibrato_cents > kVibratoRangeCents)
@@ -2794,21 +2823,6 @@ void Performer::RecordOutputs(int t)
     SendPitch(t, 12.0f * tr.params.bend + GatePitch(t));
 }
 
-int Performer::PresetIndex(const PresetKey& key)
-{
-    for (std::size_t i = 0; i < out_.presets.size(); i++)
-    {
-        if (out_.presets[i] == key)
-        {
-            return static_cast<int>(i);
-        }
-    }
-
-    out_.presets.push_back(key);
-
-    return static_cast<int>(out_.presets.size() - 1);
-}
-
 void Performer::MidiNoteOn(std::size_t c)
 {
     Channel& ch = channels_[c];
@@ -2823,6 +2837,10 @@ void Performer::MidiNoteOn(std::size_t c)
     PresetKey key;
     key.bank = ch.sound.bank;
     key.program = ch.sound.program;
+    auto same_point = [](const OscPoint& a, const OscPoint& b)
+    {
+        return a.mode == b.mode && a.time == b.time && a.value == b.value;
+    };
     for (std::size_t i = 0; i < 2; i++)
     {
         if (tr.osc[i])
@@ -2832,9 +2850,7 @@ void Performer::MidiNoteOn(std::size_t c)
             {
                 const Oscillator& o = out_.oscillators[k];
                 if (o.target == tr.osc[i]->target && o.attack.size() == tr.osc[i]->attack.size() &&
-                    std::equal(o.attack.begin(), o.attack.end(), tr.osc[i]->attack.begin(),
-                               [](const OscPoint& a, const OscPoint& b)
-                               { return a.mode == b.mode && a.time == b.time && a.value == b.value; }))
+                    std::equal(o.attack.begin(), o.attack.end(), tr.osc[i]->attack.begin(), same_point))
                 {
                     index = static_cast<int>(k);
                 }
@@ -2850,7 +2866,7 @@ void Performer::MidiNoteOn(std::size_t c)
     key.direct_release = tr.direct_release;
     key.vibrato_rate = tr.vib_pitch;
     key.vibrato_delay = tr.vib_delay;
-    const int preset = PresetIndex(key);
+    const uint32_t preset = seqlib::midi::PresetIndex(out_.presets, key);
 
     // A note that bends goes on a part where no tail of its track sounds. The tails keep their pitch there.
     if (ch.bends)
@@ -2860,23 +2876,14 @@ void Performer::MidiNoteOn(std::size_t c)
 
     // The settings go before the note. The note then starts with them.
     RecordOutputs(t);
-    Track& again = tracks_[static_cast<std::size_t>(t)];
-    const auto sent = again.sent.find({again.part, EventKind::kPreset});
-    if (sent == again.sent.end() || sent->second != preset)
-    {
-        again.sent[{again.part, EventKind::kPreset}] = preset;
-        TrackEvent p;
-        p.kind = EventKind::kPreset;
-        p.preset = static_cast<uint32_t>(preset);
-        Emit(t, p);
-    }
+    recorder_.SendPreset(out_, Output(t), tick_, preset);
 
     ch.midi_on = true;
     ch.midi_key_offset = ch.key_offset;
     ch.midi_velocity = ch.velocity;
     ch.cc11_velocity = ch.velocity;
     ch.slot = SlotOf(t);
-    ch.midi_id = next_midi_id_++;
+    ch.midi_id = recorder_.NextNote();
 
     // A note that ties take above its velocity starts at the highest they reach. The instrument has to play the same
     // wave at that velocity. CC11 lowers the note until then.
@@ -2891,17 +2898,9 @@ void Performer::MidiNoteOn(std::size_t c)
             ch.midi_velocity = planned->second;
         }
     }
-    ch.part = again.part;
-    ch.preset = static_cast<uint32_t>(preset);
-    TrackEvent e;
-    e.kind = EventKind::kNoteOn;
-    e.key = ch.key;
-    e.value = ch.midi_velocity;
-    e.note = ch.midi_id;
-    Emit(t, e);
-    const int slot = SlotOf(t);
-    parts_used_[static_cast<std::size_t>(slot)] =
-        std::max<uint8_t>(parts_used_[static_cast<std::size_t>(slot)], static_cast<uint8_t>(again.part + 1));
+    ch.part = tracks_[static_cast<std::size_t>(t)].output.part;
+    recorder_.NoteOn(out_, Output(t), tick_, ch.key, ch.midi_velocity);
+    Changed(t);
 }
 
 void Performer::MidiNoteOff(std::size_t c)
@@ -2913,13 +2912,7 @@ void Performer::MidiNoteOff(std::size_t c)
     }
 
     ch.midi_on = false;
-    TrackEvent e;
-    e.kind = EventKind::kNoteOff;
-    e.key = ch.key;
-    e.note = ch.midi_id;
-    e.tick = tick_;
-    e.part = ch.part;
-    out_.tracks[static_cast<std::size_t>(ch.slot)].push_back(e);
+    recorder_.NoteOff(out_, static_cast<uint8_t>(ch.slot), tick_, ch.part, ch.key, ch.midi_id);
 }
 
 void Performer::Approximate(const std::string& what)
@@ -2936,18 +2929,7 @@ void Performer::RecordTickTime()
     tick_seconds_.push_back(tick_seconds_.empty() ? 0.0 : tick_seconds_.back() + per_tick);
     tick_subframes_.push_back(subframe_);
     const double start = static_cast<double>(subframe_ > 0 ? subframe_ - 1 : 0) * kSubFrameSeconds;
-    std::size_t k = tick_seconds_.size() - 1;
-    while (k > 0 && tick_seconds_[k] > start)
-    {
-        k--;
-    }
-
-    double tick = static_cast<double>(k);
-    if (k + 1 < tick_seconds_.size() && tick_seconds_[k + 1] > tick_seconds_[k])
-    {
-        tick += (start - tick_seconds_[k]) / (tick_seconds_[k + 1] - tick_seconds_[k]);
-    }
-    out_.frame_ticks.push_back(std::min(std::max(tick, 0.0), static_cast<double>(tick_)));
+    recorder_.RecordFrameStart(out_, tick_seconds_, tick_, start);
 }
 
 bool Performer::TrackSounds(int t) const
@@ -2981,6 +2963,7 @@ bool Performer::Steady() const
         {
             return false;
         }
+
         for (const MoveParam& m : tr.move)
         {
             if (m.count != 0)
@@ -3113,56 +3096,16 @@ double Performer::TickSeconds(uint32_t tick) const
            (static_cast<double>(tick) - static_cast<double>(tick_seconds_.size()) + 1.0) * per_tick;
 }
 
-std::map<Performer::SettingKey, TrackEvent> Performer::SettingsAt(const Performance& perf, uint32_t tick)
-{
-    // A MIDI track's first part starts at its key's pitch without an event.
-    std::map<SettingKey, TrackEvent> settings;
-    for (int t = 0; t < 16; t++)
-    {
-        settings[{t, 0, EventKind::kPitch}] = TrackEvent{0, EventKind::kPitch};
-        for (const TrackEvent& e : perf.tracks[static_cast<std::size_t>(t)])
-        {
-            if (e.tick > tick || (e.tick == tick && e.after > 0))
-            {
-                break;
-            }
-            if (e.kind != EventKind::kNoteOn && e.kind != EventKind::kNoteOff)
-            {
-                settings[{t, e.part, e.kind}] = e;
-            }
-        }
-    }
-
-    return settings;
-}
-
 Performer::PassStart Performer::PassStartAt(uint32_t tick) const
 {
-    PassStart start;
-    start.settings = SettingsAt(out_, tick);
-    for (const Performance::Tempo& tempo : out_.tempo)
-    {
-        if (tempo.tick > tick)
-        {
-            break;
-        }
-        start.bpm = tempo.bpm;
-    }
-    for (const auto& [switch_tick, slot, part] : part_switches_)
-    {
-        if (switch_tick > tick)
-        {
-            break;
-        }
-        start.parts[static_cast<std::size_t>(slot)] = part;
-    }
-
-    return start;
+    return ntdlib::sequence_export::PassStartAt(out_, recorder_.PartSwitches(), tick);
 }
 
 Performer Performer::PlayOn(uint32_t until) const
 {
+    // The copy's vector holds only the tracks open so far. The channels that the probe starts point into it (see Run).
     Performer probe = *this;
+    probe.tracks_.reserve(kMaxTracks);
     probe.stop_ = false;
     probe.pending_loop_.reset();
     probe.options_.loops = std::numeric_limits<int>::max();
@@ -3178,208 +3121,22 @@ Performer Performer::PlayOn(uint32_t until) const
     return probe;
 }
 
-bool Performer::SameSetting(const TrackEvent& a, const TrackEvent& b)
-{
-    switch (a.kind)
-    {
-    case EventKind::kPitch:
-        return a.semitones == b.semitones;
-    case EventKind::kPreset:
-        return a.preset == b.preset;
-    default:
-        return a.value == b.value;
-    }
-}
-
 bool Performer::RepeatsAsTheGame(uint32_t start, uint32_t end) const
 {
-    const PassStart at_start = PassStartAt(start);
-    const PassStart next = PassStartAt(end);
-    const uint32_t length = end - start;
-
-    // The tempo: a repeat starts with the tempo at the loop's end. A tempo event on the loop's first tick replaces that
-    // with the start's tempo. When the game's next pass starts with the start's tempo, RestoreAtLoopStart sends that
-    // tempo again, and the repeat starts with it too.
-    double end_bpm = at_start.bpm;
-    bool tempo_sent = false;
-    for (const Performance::Tempo& tempo : out_.tempo)
-    {
-        tempo_sent = tempo_sent || tempo.tick == start;
-        if (tempo.tick < end)
-        {
-            end_bpm = tempo.bpm;
-        }
-    }
-    const double repeat_bpm = tempo_sent || next.bpm == at_start.bpm ? at_start.bpm : end_bpm;
-
-    auto bpm_at = [&](uint32_t tick, uint32_t since, double otherwise)
-    {
-        double bpm = otherwise;
-        for (const Performance::Tempo& tempo : out_.tempo)
-        {
-            if (tempo.tick > tick)
-            {
-                break;
-            }
-            if (tempo.tick >= since)
-            {
-                bpm = tempo.bpm;
-            }
-        }
-
-        return bpm;
-    };
-
-    // A note of a pass: its tick in the pass, key, velocity and part, and the settings of its part that it plays with.
-    struct Strike
-    {
-        uint32_t offset = 0;
-        uint8_t key = 0;
-        uint8_t velocity = 0;
-        uint8_t part = 0;
-        std::map<EventKind, TrackEvent> settings;
-    };
-
-    for (int t = 0; t < 16; t++)
-    {
-        const auto slot = static_cast<std::size_t>(t);
-        std::vector<Strike> loop;
-        std::vector<Strike> game;
-        std::array<std::map<EventKind, TrackEvent>, 16> settings{};
-        std::array<std::map<EventKind, TrackEvent>, 16> sent{};
-        std::array<std::map<EventKind, TrackEvent>, 16> at_end{};
-        std::array<std::set<EventKind>, 16> in_first_tick{};
-        settings[0][EventKind::kPitch] = TrackEvent{0, EventKind::kPitch};
-
-        bool ended = false;
-        for (const TrackEvent& e : out_.tracks[slot])
-        {
-            if (e.tick >= end + length)
-            {
-                break;
-            }
-            if (e.part >= 16)
-            {
-                continue;
-            }
-
-            if (!ended && e.tick >= end)
-            {
-                at_end = settings;
-                ended = true;
-            }
-            if (e.kind != EventKind::kNoteOn && e.kind != EventKind::kNoteOff)
-            {
-                settings[e.part][e.kind] = e;
-                if (e.tick >= start)
-                {
-                    sent[e.part][e.kind] = e;
-                }
-                if (e.tick == start && e.after == 0)
-                {
-                    in_first_tick[e.part].insert(e.kind);
-                }
-            }
-            else if (e.kind == EventKind::kNoteOn && e.tick >= start)
-            {
-                const bool in_loop = e.tick < end;
-                (in_loop ? loop : game)
-                    .push_back({e.tick - (in_loop ? start : end), e.key, e.value, e.part,
-                                in_loop ? sent[e.part] : settings[e.part]});
-            }
-        }
-        if (!ended)
-        {
-            at_end = settings;
-        }
-        if (loop.size() != game.size())
-        {
-            return false;
-        }
-
-        auto repeat_value = [&](uint8_t part, EventKind kind) -> const TrackEvent*
-        {
-            const auto first = at_start.settings.find({t, part, kind});
-            const auto again = next.settings.find({t, next.parts[slot], kind});
-            if (part == at_start.parts[slot] && !in_first_tick[part].contains(kind) &&
-                first != at_start.settings.end() && again != next.settings.end() &&
-                SameSetting(first->second, again->second))
-            {
-                return &first->second;
-            }
-
-            const auto kept = at_end[part].find(kind);
-            return kept != at_end[part].end() ? &kept->second : nullptr;
-        };
-
-        for (std::size_t k = 0; k < loop.size(); k++)
-        {
-            const Strike& a = loop[k];
-            const Strike& b = game[k];
-            if (a.offset != b.offset || a.key != b.key || a.velocity != b.velocity ||
-                bpm_at(start + a.offset, start, repeat_bpm) != bpm_at(end + b.offset, 0, at_start.bpm))
-            {
-                return false;
-            }
-
-            std::set<EventKind> kinds;
-            const std::array<const std::map<EventKind, TrackEvent>*, 3> lists = {&a.settings, &b.settings,
-                                                                                 &at_end[a.part]};
-            for (const auto* list : lists)
-            {
-                for (const auto& [kind, e] : *list)
-                {
-                    kinds.insert(kind);
-                }
-            }
-            for (EventKind kind : kinds)
-            {
-                const auto sent_before = a.settings.find(kind);
-                const TrackEvent* repeat =
-                    sent_before != a.settings.end() ? &sent_before->second : repeat_value(a.part, kind);
-                const auto played = b.settings.find(kind);
-                if ((repeat == nullptr) != (played == b.settings.end()) ||
-                    (repeat && !SameSetting(*repeat, played->second)))
-                {
-                    return false;
-                }
-            }
-        }
-    }
-
-    return true;
+    return ntdlib::sequence_export::RepeatsAsTheGame(out_, recorder_.PartSwitches(), start, end, kLoopRules);
 }
 
 Performer::LoopChoice Performer::ChooseSteadyPass() const
 {
-    // A loop that draws random numbers plays each pass otherwise anyway, and keeps its first pass.
-    if (owner_passes_.empty() || (last_draw_ && *last_draw_ >= owner_passes_[0].first))
+    auto play_on = [this](uint32_t until)
     {
-        return {true, std::nullopt, false};
-    }
-
-    // A copy plays the two passes after the owner's last pass. Each pass and the next then have the pass after them to
-    // compare with.
-    const auto [last_start, last_end] = owner_passes_.back();
-    const uint32_t length = last_end - last_start;
-    const Performer probe = PlayOn(last_end + 2 * length);
-    for (std::size_t i = marked_; i < owner_passes_.size(); i++)
-    {
-        const auto [start, end] = owner_passes_[i];
-        if (probe.RepeatsAsTheGame(start, end))
+        return [probe = PlayOn(until)](uint32_t start, uint32_t end)
         {
-            return {static_cast<int>(owner_passes_.size() - i) >= options_.loops, i, false};
-        }
-    }
-
-    // No pass so far plays as the next one does. If the next pass plays as the one after it, play it too, and otherwise
-    // keep the first.
-    if (!extended_ && probe.RepeatsAsTheGame(last_end, last_end + length))
-    {
-        return {false, std::nullopt, true};
-    }
-
-    return {true, std::nullopt, false};
+            return probe.RepeatsAsTheGame(start, end);
+        };
+    };
+    return ntdlib::sequence_export::ChooseSteadyPass(owner_passes_, marked_, last_draw_, extended_, options_.loops,
+                                                     play_on);
 }
 
 bool Performer::MarkSteadyPass()
@@ -3410,92 +3167,6 @@ void Performer::DecideLoop()
     }
 }
 
-void Performer::RestoreAtLoopStart(const PassStart& next_pass)
-{
-    const uint32_t start = out_.loop->start;
-    const uint32_t end = out_.loop->end;
-    const PassStart at_loop_start = PassStartAt(start);
-
-    auto tempo_at = [&](uint32_t tick, bool in_tick)
-    {
-        double bpm = at_loop_start.bpm;
-        for (const Performance::Tempo& tempo : out_.tempo)
-        {
-            if (tempo.tick > start && (tempo.tick < tick || (in_tick && tempo.tick == tick)))
-            {
-                bpm = tempo.bpm;
-            }
-        }
-
-        return bpm;
-    };
-
-    const bool tempo_sent = std::ranges::any_of(out_.tempo, [start](const auto& tempo) { return tempo.tick == start; });
-    if (!tempo_sent && next_pass.bpm == at_loop_start.bpm &&
-        (tempo_at(end, false) != at_loop_start.bpm || tempo_at(end, true) != at_loop_start.bpm))
-    {
-        auto later = [start](const Performance::Tempo& tempo)
-        {
-            return tempo.tick > start;
-        };
-        out_.tempo.insert(std::ranges::find_if(out_.tempo, later), {start, at_loop_start.bpm});
-    }
-
-    for (const auto& [key, at_start] : at_loop_start.settings)
-    {
-        // The game gives the setting back its value at the loop's start. Only the part that the MIDI track's new notes
-        // go to counts.
-        const auto [t, part, kind] = key;
-        const auto slot = static_cast<std::size_t>(t);
-        if (part != at_loop_start.parts[slot])
-        {
-            continue;
-        }
-        const auto next = next_pass.settings.find({t, next_pass.parts[slot], kind});
-        if (next == next_pass.settings.end() || !SameSetting(next->second, at_start))
-        {
-            continue;
-        }
-
-        std::vector<TrackEvent>& events = out_.tracks[slot];
-        bool sent = false;
-        const TrackEvent* before_end = &at_start;
-        const TrackEvent* at_end = &at_start;
-        for (const TrackEvent& e : events)
-        {
-            if (e.part != part || e.kind != kind || e.tick < start || e.tick > end || (e.tick == end && e.after > 0))
-            {
-                continue;
-            }
-            if (e.tick == start && e.after == 0)
-            {
-                sent = true;
-            }
-            if (e.tick < end)
-            {
-                before_end = &e;
-            }
-            at_end = &e;
-        }
-        if (sent || (SameSetting(*before_end, at_start) && SameSetting(*at_end, at_start)))
-        {
-            continue;
-        }
-
-        // Send it with the loop start's other settings, ahead of its notes.
-        auto past_settings = [start](const TrackEvent& e)
-        {
-            return e.tick > start ||
-                   (e.tick == start && (e.kind == EventKind::kNoteOn || e.kind == EventKind::kNoteOff));
-        };
-        const auto at = std::find_if(events.begin(), events.end(), past_settings);
-        TrackEvent e = at_start;
-        e.tick = start;
-        e.after = 0;
-        events.insert(at, e);
-    }
-}
-
 uint32_t Performer::SecondsToTick(double seconds) const
 {
     const auto it = std::lower_bound(tick_seconds_.begin(), tick_seconds_.end(), seconds);
@@ -3523,23 +3194,14 @@ void Performer::EndPerformance(bool finished)
         held_sound_end_ ? std::optional<uint32_t>(std::min(SecondsToTick(*held_sound_end_), tick_)) : stop_tick_;
     if (!finished && end_tick)
     {
-        for (std::vector<TrackEvent>& events : out_.tracks)
+        // A note that started before the end keeps its note-off. The cut drops a note-off that came later.
+        seqlib::midi::ClampNoteOffs(out_, *end_tick);
+        const std::set<uint32_t> late = seqlib::midi::CutAt(out_, *end_tick);
+        for (Channel& ch : channels_)
         {
-            std::set<uint32_t> late;
-            for (const TrackEvent& e : events)
+            if (late.contains(ch.midi_id))
             {
-                if (e.kind == EventKind::kNoteOn && e.tick >= *end_tick)
-                {
-                    late.insert(e.note);
-                }
-            }
-            std::erase_if(events, [&](const TrackEvent& e) { return e.tick > *end_tick || late.contains(e.note); });
-            for (Channel& ch : channels_)
-            {
-                if (late.contains(ch.midi_id))
-                {
-                    ch.midi_on = false;
-                }
+                ch.midi_on = false;
             }
         }
         tick_ = *end_tick;
@@ -3588,16 +3250,7 @@ void Performer::EndPerformance(bool finished)
     }
 
     // The note-offs at the end come at the end.
-    for (std::vector<TrackEvent>& events : out_.tracks)
-    {
-        for (TrackEvent& e : events)
-        {
-            if (e.kind == EventKind::kNoteOff && e.tick > out_.end_tick)
-            {
-                e.tick = out_.end_tick;
-            }
-        }
-    }
+    seqlib::midi::ClampNoteOffs(out_, out_.end_tick);
 }
 
 bool Performer::Advance()
@@ -3645,8 +3298,14 @@ bool Performer::Advance()
 
 Performance Performer::Run()
 {
+    // Channels point at their tracks' oscillator tables. The tracks therefore never move: the vector holds room for
+    // every track that a sequence may open.
+    tracks_.reserve(kMaxTracks);
+
+    // The voices: as many as --voices gives, or the DSP's 64 to start with when every note is kept.
+    voices_.assign(static_cast<std::size_t>(options_.voice_limit > 0 ? options_.voice_limit : kDspChannels), -1);
+
     // JAISeq starts the sequence on a first track, with the ports the game has set.
-    voices_.fill(-1);
     slot_tracks_.fill(-1);
     const int root = NewTrack(-1, 0);
     Track& tr = tracks_[static_cast<std::size_t>(root)];
@@ -3667,6 +3326,7 @@ Performance Performer::Run()
             finished = true;
             break;
         }
+
         if (pending_loop_)
         {
             DecideLoop();
@@ -3726,46 +3386,10 @@ Performance Performer::Run()
     }
     if (out_.loop)
     {
-        RestoreAtLoopStart(next_pass);
+        ntdlib::sequence_export::RestoreAtLoopStart(out_, recorder_.PartSwitches(), next_pass, kLoopRules);
     }
 
     return out_;
-}
-
-// Scale factor that keeps rounded CC11 values within 127 for a maximum unscaled value of `peak` (Perform).
-double LevelScale(double peak)
-{
-    return peak >= 127.5 ? 127.0 / peak : 1.0;
-}
-
-// Fit the parts that each MIDI track used into MIDI's 16 channels. The MIDI writer gives them out the same way.
-std::array<uint8_t, 16> FitParts(const Performance& perf, const std::array<uint8_t, 16>& used)
-{
-    std::array<bool, 16> plays{};
-    int channels = 0;
-    for (int t = 0; t < 16; t++)
-    {
-        auto note_on = [](const TrackEvent& e)
-        {
-            return e.kind == EventKind::kNoteOn;
-        };
-        plays[static_cast<std::size_t>(t)] = std::ranges::any_of(perf.tracks[static_cast<std::size_t>(t)], note_on);
-        channels += plays[static_cast<std::size_t>(t)] ? 1 : 0;
-    }
-
-    std::array<uint8_t, 16> limits;
-    limits.fill(1);
-    for (int t = 0; t < 16; t++)
-    {
-        if (plays[static_cast<std::size_t>(t)])
-        {
-            const int extra = std::min(std::max<int>(used[static_cast<std::size_t>(t)], 1) - 1, 16 - channels);
-            limits[static_cast<std::size_t>(t)] = static_cast<uint8_t>(1 + extra);
-            channels += extra;
-        }
-    }
-
-    return limits;
 }
 
 } // namespace
@@ -3838,23 +3462,6 @@ Performance Perform(const SequenceSound& sound, BankSet& banks, const PerformOpt
     }
 
     return performance;
-}
-
-uint32_t NoteCount(const Performance& perf)
-{
-    uint32_t notes = 0;
-    for (const std::vector<TrackEvent>& events : perf.tracks)
-    {
-        for (const TrackEvent& e : events)
-        {
-            if (e.kind == EventKind::kNoteOn)
-            {
-                notes++;
-            }
-        }
-    }
-
-    return notes;
 }
 
 } // namespace dolphinsf2
