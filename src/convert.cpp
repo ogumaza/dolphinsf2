@@ -224,7 +224,7 @@ std::vector<PresetZone> ZonesOf(const PresetKey& key, const Performance& perf, B
     const Oscillator* pitch =
         key.pitch_oscillator >= 0 ? &perf.oscillators[static_cast<std::size_t>(key.pitch_oscillator)] : nullptr;
     return PresetZones(*bank, banks.Archive().FindWaveSystem(bank->wave_system), key.program, volume, pitch,
-                       key.direct_release);
+                       key.direct_release, perf.default_release);
 }
 
 Conversion ConvertSequence(const SequenceSound& sound, BankSet& banks, const PerformOptions& options)

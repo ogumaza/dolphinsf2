@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -59,6 +60,7 @@ struct Performance : ntdlib::sequence_export::PerformanceBase
 {
     std::vector<PresetKey> presets;
     std::vector<Oscillator> oscillators; // the tracks' oscillators that presets name
+    uint16_t default_release = 0;        // the sound's SequenceSound::default_release
 };
 
 // Options for playing a sequence.
@@ -81,13 +83,26 @@ struct PerformOptions
     int voice_limit = 0;
 };
 
-// A sequence to play: its data, the offset its first track starts at, and the sound's volume from the sound table.
+// An echo that a game sets up in the DSP program at start-up (JASDsp::setFXLine). The line delays the voices' effect
+// sends and passes them through a filter. The filter's output feeds back into the line and goes to the mix.
+struct EchoLine
+{
+    uint32_t delay = 0;       // in sub-frames
+    float feedback = 0.0f;    // the filter's gain
+    float volume = 0.0f;      // the output's level in the mix
+    float voice_level = 0.0f; // the game's output of a voice at a volume of 1, as a share of the voice's samples
+};
+
+// A sequence to play: its data, the offset its first track starts at, the sound's volume from the sound table and its
+// category, the release that the game's sound library gives an oscillator without one, and the game's echo.
 struct SequenceSound
 {
     std::string name;
     std::span<const uint8_t> data;
     uint32_t start = 0;
     float volume = 1.0f;
+    uint16_t default_release = 0;                // GameRules::default_release
+    std::optional<EchoLine> echo = std::nullopt; // GameRules::echo
 };
 
 // Play `sound`. Throw FormatError if it can't be read.

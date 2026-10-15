@@ -73,6 +73,10 @@ constexpr float kLfoStep = 32028.5f / kDacRate;
 // looks for a free MIDI channel. A tie on a note whose envelope has fallen that far raises nothing in MIDI.
 constexpr double kInaudibleDb = -40.0;
 
+// The game's echo counts as silent once its output falls below this level, in 16-bit samples. The game's output moves
+// in steps of 4. Below 12, it has fallen to 8 or below (-72 dBFS). A sequence that ends sounds on until then.
+constexpr float kEchoAudible = 12.0f;
+
 // The command table at 0x80491e54: each command's argument count and their encodings, two bits each, the first argument
 // lowest: 0 a byte, 1 16 bits, 2 24 bits, 3 a register's value (its number as a byte). The entry for 0xe7 is from
 // Twilight Princess's table (0x803c5e80 in the game's main.dol).
@@ -282,6 +286,7 @@ struct Channel
     uint8_t release_priority = 0;
     uint32_t age = 0; // sub-frames since it started (JASDSPChannel's update counter)
     double position = 0.0;
+    const Pcm* pcm = nullptr; // the decoded wave
     uint32_t wave_length = 0; // for a wave that doesn't loop: its samples
     bool wave_loops = true;
     float level = 0.0f;          // its volume in the last sub-frame
@@ -317,6 +322,42 @@ bool Inaudible(float volume)
 bool BelowHearing(const Channel& ch)
 {
     return ch.envelope_heard && Inaudible(ch.envelope);
+}
+
+// The largest magnitude among the samples of `pcm` that a voice plays from position `from` up to `to`. A looping wave
+// goes back to its loop's start at the loop's end.
+float WavePeak(const Pcm& pcm, double from, double to)
+{
+    if (pcm.channels.empty())
+    {
+        return 0.0f;
+    }
+
+    const std::vector<int16_t>& samples = pcm.channels[0];
+    const uint64_t loop_length = pcm.loop ? pcm.loop_end - pcm.loop_start : 0;
+    auto i = static_cast<uint64_t>(from);
+    uint64_t count = static_cast<uint64_t>(std::ceil(to)) - i;
+    int peak = 0;
+    while (count > 0)
+    {
+        if (loop_length != 0 && i >= pcm.loop_end)
+        {
+            i = pcm.loop_start + (i - pcm.loop_start) % loop_length;
+        }
+        const uint64_t stop = std::min<uint64_t>(i + count, loop_length != 0 ? pcm.loop_end : samples.size());
+        if (i >= stop)
+        {
+            break;
+        }
+
+        count -= stop - i;
+        for (; i < stop; i++)
+        {
+            peak = std::max(peak, std::abs(static_cast<int>(samples[i])));
+        }
+    }
+
+    return static_cast<float>(peak);
 }
 
 // Start `semitones` of sweep on `ch` over `subframes` (JASChannel::setKeySweepTarget, 0x8002ae78). A sweep of no
@@ -417,6 +458,7 @@ enum class Outcome
 
 using ntdlib::sequence_export::FitParts;
 using ntdlib::sequence_export::LevelScale;
+using ntdlib::sequence_export::SpareChannels;
 
 // The rules of the main loop's passes (ntdlib/sequence_export/passes.h). A setting that RestoreAtLoopStart sends again
 // goes after the presets at the loop's first tick.
@@ -545,6 +587,16 @@ private:
     float ChannelVolume(const Channel& ch, float osc_volume) const;
     float ChannelRatio(const Channel& ch, float osc_pitch) const;
 
+    // --- The echo ---
+    // Add what `ch` sends to the echo in the sub-frame that it played from position `from`.
+    void SendToEcho(const Channel& ch, double from);
+
+    // Move the echo on by sub-frame `subframe`, with the sends of the sub-frame.
+    void StepEcho(uint64_t subframe);
+
+    // True if the echo has something at kEchoAudible or above still to play.
+    bool EchoSounds() const;
+
     // --- Loops and ends ---
     // Handle track `t` jumping back to `target`: a pass of a loop when it's a jump back to commands that ran before a
     // wait. Detect the main loop, and ask the sub-frame's end to decide whether to stop.
@@ -633,7 +685,15 @@ private:
     std::vector<uint64_t> tick_subframes_;
     double sound_end_ = 0.0;     // when the last channel stopped
     uint64_t last_sounding_ = 0; // the last sub-frame in which a channel sounded
-    uint64_t commands_run_ = 0;  // by all tracks
+
+    // The game's echo (SequenceSound::echo): the left and right lines, one entry for each sub-frame of the delay, the
+    // entry that the next sub-frame plays, the sends of the sub-frame, and the last sub-frame in which it sounded.
+    std::array<std::vector<float>, 2> echo_lines_;
+    std::size_t echo_next_ = 0;
+    std::array<float, 2> echo_sends_{};
+    std::optional<uint64_t> echo_heard_;
+
+    uint64_t commands_run_ = 0; // by all tracks
     bool stop_ = false;
     bool silent_end_ = false; // the main loop's pass was idle and silent: the sequence has ended
     std::optional<PendingLoop> pending_loop_;
@@ -2189,6 +2249,7 @@ std::optional<std::size_t> Performer::StartChannel(int t, int key, int velocity,
     {
         ch.direct_release = tr.direct_release;
     }
+    ch.pcm = pcm;
     ch.wave_loops = pcm->loop;
     ch.wave_length = pcm->Length();
     ch.params = tr.params;
@@ -2357,7 +2418,7 @@ void Performer::ReleaseChannel(std::size_t c, uint16_t direct_release)
     {
         if (ch.osc[i].Valid())
         {
-            ch.osc[i].Release(i == 0 ? ch.direct_release : 0);
+            ch.osc[i].Release(i == 0 ? ch.direct_release : 0, sound_.default_release);
         }
     }
     ch.released = true;
@@ -2494,7 +2555,9 @@ void Performer::UpdateChannel(Channel& ch)
     }
 
     // The DSP plays the sub-frame at this pitch. A wave that doesn't loop ends when it runs out.
+    const double from = ch.position;
     ch.position += kSubFrameSamples * static_cast<double>(ChannelRatio(ch, osc_pitch));
+    SendToEcho(ch, from);
     if (ch.sweep_count != 0)
     {
         ch.key_sweep += (ch.sweep_target - ch.key_sweep) / static_cast<float>(ch.sweep_count);
@@ -2519,6 +2582,72 @@ void Performer::UpdateChannels()
             last_sounding_ = subframe_;
         }
     }
+    StepEcho(subframe_);
+}
+
+// --- The echo ---
+void Performer::SendToEcho(const Channel& ch, double from)
+{
+    const float fx_mix = std::clamp(ch.params.fx_mix, 0.0f, 1.0f);
+    if (!sound_.echo || fx_mix <= 0.0f || ch.level <= 0.0f || ch.pcm == nullptr)
+    {
+        return;
+    }
+
+    // JASChannel::updateMixer with JASTrack's default mix (0x352 and 0x412, set at 0x80036650): each side's send is the
+    // volume times the side's pan gain times the effect mix. The pan adds the instrument's pan to the track's
+    // (calcPan). A voice's level is the largest sample that it plays in the sub-frame. The voices' levels add up.
+    constexpr float kHalfPi = 1.57079633f;
+    const float pan = std::clamp(ch.sound.pan + ch.params.pan - 0.5f, 0.0f, 1.0f);
+    const std::array<float, 2> gains{std::sin((1.0f - pan) * kHalfPi), std::sin(pan * kHalfPi)};
+    const float peak = WavePeak(*ch.pcm, from, ch.position);
+    for (std::size_t side = 0; side < 2; side++)
+    {
+        echo_sends_[side] += std::min(ch.level * gains[side] * fx_mix, 1.0f) * sound_.echo->voice_level * peak;
+    }
+}
+
+void Performer::StepEcho(uint64_t subframe)
+{
+    if (!sound_.echo)
+    {
+        return;
+    }
+
+    // Each line plays what it took in a delay ago, through its filter. It takes in the sends and that output. The
+    // output repeats the wave from a delay earlier, at a phase unrelated to the sends'. The two therefore add by power.
+    // Adding their levels would make a long sound's echo up to twice as loud as the game's.
+    for (std::size_t side = 0; side < 2; side++)
+    {
+        float& delayed = echo_lines_[side][echo_next_];
+        const float filtered = sound_.echo->feedback * delayed;
+        if (sound_.echo->volume * filtered >= kEchoAudible)
+        {
+            echo_heard_ = subframe;
+        }
+        delayed = std::hypot(echo_sends_[side], filtered);
+    }
+    echo_next_ = (echo_next_ + 1) % echo_lines_[0].size();
+    echo_sends_ = {};
+}
+
+bool Performer::EchoSounds() const
+{
+    if (!sound_.echo)
+    {
+        return false;
+    }
+
+    const float scale = sound_.echo->volume * sound_.echo->feedback;
+    for (const std::vector<float>& line : echo_lines_)
+    {
+        if (std::ranges::any_of(line, [&](float level) { return scale * level >= kEchoAudible; }))
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 // --- Recording ---
@@ -3221,6 +3350,16 @@ void Performer::EndPerformance(bool finished)
         {
             sound_end_ = std::min(sound_end_, static_cast<double>(last_sounding_ + 1) * kSubFrameSeconds);
         }
+
+        // The game's echo sounds on after the last voice, until it falls silent.
+        for (uint64_t s = subframe_ + 1; EchoSounds(); s++)
+        {
+            StepEcho(s);
+        }
+        if (echo_heard_)
+        {
+            sound_end_ = std::max(sound_end_, static_cast<double>(*echo_heard_ + 1) * kSubFrameSeconds);
+        }
     }
     for (std::size_t c = 0; c < channels_.size(); c++)
     {
@@ -3304,6 +3443,14 @@ Performance Performer::Run()
 
     // The voices: as many as --voices gives, or the DSP's 64 to start with when every note is kept.
     voices_.assign(static_cast<std::size_t>(options_.voice_limit > 0 ? options_.voice_limit : kDspChannels), -1);
+    out_.default_release = sound_.default_release;
+    if (sound_.echo)
+    {
+        for (std::vector<float>& line : echo_lines_)
+        {
+            line.assign(std::max<std::size_t>(sound_.echo->delay, 1), 0.0f);
+        }
+    }
 
     // JAISeq starts the sequence on a first track, with the ports the game has set.
     slot_tracks_.fill(-1);
@@ -3431,7 +3578,8 @@ Performance Perform(const SequenceSound& sound, BankSet& banks, const PerformOpt
         bool parts_fit = true;
         if (!limited)
         {
-            const std::array<uint8_t, 16> fitted = FitParts(performance, performer.PartsUsed());
+            const std::array<uint8_t, 16> fitted =
+                FitParts(performance, performer.PartsUsed(), SpareChannels::kForLayers);
             for (std::size_t t = 0; t < 16; t++)
             {
                 parts_fit = parts_fit && fitted[t] >= performer.PartsUsed()[t];

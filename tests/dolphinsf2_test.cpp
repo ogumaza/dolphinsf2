@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <random>
 #include <string>
@@ -162,6 +163,14 @@ public:
         return *this;
     }
 
+    // The effect send. It feeds the game's echo.
+    Sequence& FxMix(uint32_t byte)
+    {
+        b_.U8(0xb8).U8(2).U8(byte);
+
+        return *this;
+    }
+
     // Oscillator `osc`'s scale, in 16383ths.
     Sequence& OscillatorScale(uint32_t osc, uint32_t scale)
     {
@@ -268,7 +277,7 @@ void TestOscillator()
     const bool holds = s.Holding();
     const float full = s.Value();
 
-    s.Release(0);
+    s.Release(0, 0);
     s.Advance(15.0f);
     const bool releasing = s.Releasing();
     const float falling = s.Value();
@@ -283,19 +292,28 @@ void TestOscillator()
 
 void TestOscillatorWithoutReleaseTable()
 {
-    // Without a release table, an oscillator stops at once. A direct release fades it.
+    // Without a release table, an oscillator stops at once. A direct release fades it. So does a game's default
+    // release, 0x10 in Four Swords Adventures: linearly, over 16 units.
     Oscillator bare;
     bare.attack = {{0, 0, 0x7fff}, {14, 0, 0}};
     OscillatorState cut;
     OscillatorState fade;
+    OscillatorState fallback;
     cut.Start(bare);
     fade.Start(bare);
+    fallback.Start(bare);
 
-    cut.Release(0);
-    fade.Release(100);
+    cut.Release(0, 0);
+    fade.Release(100, 0);
+    fallback.Release(0, 0x10);
+    fallback.Advance(8.0f);
+    const float halfway = fallback.Value();
+    fallback.Advance(9.0f);
 
     Check(cut.Stopped(), "no release table stops at once");
     Check(!fade.Stopped(), "a direct release fades");
+    Check(std::abs(halfway - 0.5f) < 0.001f, "the default release falls linearly");
+    Check(fallback.Stopped(), "the default release stops at its end");
 }
 
 void TestEnvelopeFit()
@@ -304,7 +322,7 @@ void TestEnvelopeFit()
     osc.attack = {{0, 0, 0x7fff}, {0, 600, 0x7fff}, {14, 0, 0}};
     osc.release = {{0, 600, 0}, {15, 0, 0}};
 
-    const EnvelopeCurve curve = TraceEnvelope({&osc}, 0);
+    const EnvelopeCurve curve = TraceEnvelope({&osc}, 0, 0);
     const Sf2Envelope e = ConvertEnvelope(curve);
 
     Check(curve.holds, "the curve holds");
@@ -323,8 +341,8 @@ void TestReleaseAfterDecayToSilence()
     Oscillator stops = holds;
     stops.attack.back().mode = 15;
 
-    const Sf2Envelope held = ConvertEnvelope(TraceEnvelope({&holds}, 0));
-    const Sf2Envelope stopped = ConvertEnvelope(TraceEnvelope({&stops}, 0));
+    const Sf2Envelope held = ConvertEnvelope(TraceEnvelope({&holds}, 0, 0));
+    const Sf2Envelope stopped = ConvertEnvelope(TraceEnvelope({&stops}, 0, 0));
 
     const int release = ToTimecents(4500.0, -12000, 8000);
     Check(std::abs(held.release - release) <= 20, "a curve that holds in silence keeps its release");
@@ -794,6 +812,67 @@ void TestFolderWithAppleDoubleFiles()
     fs::remove_all(folder, ignored);
 }
 
+// Both releases of Four Swords Adventures play their system sounds, category 0, at 0.7, and release an oscillator
+// without a release over 0x10. Their echo repeats a sound every 64 sub-frames. Another game's start-up archive gets the
+// defaults.
+void TestGameRules()
+{
+    const GameRules usa = RulesOf("8c55097f2cc9f5800fd8ab96da4e3b09727e0a39");
+    const GameRules japan = RulesOf("aab07cea25ba957374524c4f29d36b72e6d36a67");
+    const GameRules other = RulesOf(std::string(40, '0'));
+
+    Check(usa.category_volumes == std::map<uint8_t, float>{{0, 0.7f}}, "the USA release plays category 0 at 0.7");
+    Check(usa.default_release == 0x10, "the USA release releases a bare oscillator over 0x10");
+    Check(usa.echo && usa.echo->delay == 64 && usa.echo->feedback == 0x3fff / 32768.0f && usa.echo->volume == 0.75f &&
+              usa.echo->voice_level == 0.732421875f,
+          "the USA release's echo has a delay of 64 sub-frames, a filter of 0x3fff and a volume of 0x6000");
+    Check(japan.category_volumes == usa.category_volumes && japan.default_release == 0x10 && japan.echo &&
+              japan.echo->delay == 64,
+          "the Japanese release has the same rules");
+    Check(other.category_volumes.empty() && other.default_release == 0 && !other.echo,
+          "another game gets the defaults");
+}
+
+// A note that sends to Four Swords Adventures' echo lengthens its sequence by the repeats that the game plays at 12 or
+// above. The test wave peaks at 16384. At a send of 22/127 and the centre's pan gain, the line takes in 1,470 a side.
+// The first repeat plays at 0.375 of that, 551. The 6th plays at 17, and the 7th at 8.6. A note of 12 ticks lasts less
+// than a delay. No repeat overlaps it. A note of 48 ticks lasts three delays. The line then holds the send and its
+// earlier repeats. They add by power to 1.15 times the send. Its 6th repeat after the note is the last at 12 or above.
+// Added as levels, they would give 1.875 times the send and a 7th repeat. A note without a send gets no echo.
+void TestEchoLengthensTheEnd()
+{
+    const auto note = [](uint32_t send, uint32_t ticks)
+    {
+        Sequence s;
+        s.OpenTrack(0, kChild).Timebase(48).Tempo(120).Wait(200).Finish();
+        while (s.Here() < kChild)
+        {
+            s.Byte(0xfe);
+        }
+        s.Bank(0).Program(0).FxMix(send).NoteOn(60, 1, 127).Wait(ticks).NoteOff(1).Finish();
+
+        return s.Data();
+    };
+    const auto repeats = [](const std::vector<uint8_t>& sequence)
+    {
+        TestGame game(files::BankV0File(0, 0), {sequence});
+        SequenceSound with_echo = game.Sound(0);
+        with_echo.echo = RulesOf("8c55097f2cc9f5800fd8ab96da4e3b09727e0a39").echo;
+        const Performance dry = Perform(game.Sound(0), game.banks, {});
+        const Performance wet = Perform(with_echo, game.banks, {});
+
+        return (wet.seconds - dry.seconds) / (64 * kSubFrameSeconds);
+    };
+
+    const double short_note = repeats(note(22, 12));
+    const double long_note = repeats(note(22, 48));
+    const double unsent = repeats(note(0, 12));
+
+    Check(std::abs(short_note - 6.0) < 0.05, "a short note's echo adds six repeats: " + std::to_string(short_note));
+    Check(std::abs(long_note - 6.0) < 0.05, "a long note's echo adds six repeats: " + std::to_string(long_note));
+    Check(unsent == 0.0, "a note without a send gets no echo");
+}
+
 // Convert every sequence of the game at `path`, a start-up archive or a disc image, and validate each file.
 void TestGameConvertsEverySequence(const char* path)
 {
@@ -857,6 +936,8 @@ int main(int argc, char** argv)
     TestDefaultKeepsEveryNote();
     TestConversion();
     TestFolderWithAppleDoubleFiles();
+    TestGameRules();
+    TestEchoLengthensTheEnd();
     if (argc > 1)
     {
         TestGameConvertsEverySequence(argv[1]);

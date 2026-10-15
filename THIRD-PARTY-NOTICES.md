@@ -1,7 +1,7 @@
 # Third-party notices
 
 dolphinsf2 is under the MIT licence (`LICENSE`). The libraries it builds on are under the MIT licence too, apart from
-one file of ntdlib. That's `src/disc/jis0208.h`, a table made from Unicode's data, under the Unicode License v3 (see
+one file of ntdlib. That's `src/disc/cp932.h`, a table made from Unicode's data, under the Unicode License v3 (see
 "Data from Unicode" below).
 
 | Component | Licence | Use in dolphinsf2 |
@@ -9,18 +9,18 @@ one file of ntdlib. That's `src/disc/jis0208.h`, a table made from Unicode's dat
 | seqlib, Copyright (c) 2026 the seqlib authors | MIT (`externals/seqlib/LICENSE`) | In `externals/seqlib`, a submodule, compiled into dolphinsf2: the MIDI, SoundFont 2 and SFZ files and their WAV samples. |
 | xsflib, Copyright (c) 2026 the xsflib authors | MIT (`externals/xsflib/LICENSE`) | In `externals/xsflib`, a submodule, compiled into dolphinsf2: bounds-checked reads in either byte order, file input and output with UTF-8 paths, the printable form of names, the console's UTF-8 arguments and output, the Windows version resource and the macOS app's droplet script. |
 | ntdlib, Copyright (c) 2026 the ntdlib authors | MIT (`externals/ntdlib/LICENSE`) | In `externals/ntdlib`, a submodule, compiled into dolphinsf2: the disc reader, the readers of JAudio2's sound data, the wave decoders, the main loop's rules, the steps of a conversion and the command line's frame. |
-| The JIS X 0208 table in ntdlib's `src/disc/jis0208.h`, made from Unicode's JIS0208.TXT, Copyright © 1991-2026 Unicode, Inc. | Unicode License v3 (`Unicode-3.0`) | Compiled into dolphinsf2 with ntdlib's disc reader. The reader decodes the Shift-JIS file names of GameCube discs with it. |
+| The code page 932 table in ntdlib's `src/disc/cp932.h`, made from Unicode's CP932.TXT, Copyright © 1991-2026 Unicode, Inc. | Unicode License v3 (`Unicode-3.0`) | Compiled into dolphinsf2 with ntdlib's disc reader. The reader decodes the Shift-JIS text of GameCube discs with it. |
 
 Binary distributions must include the MIT notices of dolphinsf2, seqlib, xsflib and ntdlib, and the Unicode License
 v3's notice. Shipping `LICENSE` and this file does that. The licence texts follow.
 
 ## Data from Unicode
 
-ntdlib's `src/disc/jis0208.h` maps the double-byte characters of JIS X 0208 to Unicode, by their Shift-JIS codes.
-ntdlib's disc reader decodes the file names of GameCube discs with it. ntdlib's `tools/write_jis0208_table.py` derives
-the table from Unicode's JIS0208.TXT, table version 2.0. Unicode's terms of use put Unicode's data files under the
-Unicode License v3. The licence's copyright and permission notice must appear with all copies, or in the
-documentation that goes with them. The notice is at the end of this file.
+ntdlib's `src/disc/cp932.h` maps the double-byte characters of code page 932, Windows' Shift-JIS, to Unicode, by their
+codes. ntdlib's disc reader decodes the Shift-JIS text of GameCube discs with it. ntdlib's `tools/write_cp932_table.py`
+derives the table from CP932.TXT, Microsoft's table of code page 932, table version 2.01. Unicode publishes that file.
+Unicode's terms of use put Unicode's data files under the Unicode License v3. The licence's copyright and permission
+notice must appear with all copies, or in the documentation that goes with them. The notice is at the end of this file.
 
 ## Console data
 

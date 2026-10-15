@@ -210,7 +210,7 @@ std::vector<PlayedRegion> ProgramRegions(const Bank& bank, uint32_t program)
 
 std::vector<PresetZone> PresetZones(const Bank& bank, const WaveSystem* waves, uint32_t program,
                                     const Oscillator* volume_override, const Oscillator* pitch_override,
-                                    uint16_t direct_release)
+                                    uint16_t direct_release, uint16_t default_release)
 {
     std::vector<PresetZone> zones;
     const auto found = bank.programs.find(program);
@@ -291,7 +291,7 @@ std::vector<PresetZone> PresetZones(const Bank& bank, const WaveSystem* waves, u
             auto [it, added] = curves.try_emplace(key);
             if (added)
             {
-                it->second = TraceEnvelope(volume, release);
+                it->second = TraceEnvelope(volume, release, default_release);
             }
             z.envelope = it->second;
             zones.push_back(std::move(z));

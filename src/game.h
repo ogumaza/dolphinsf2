@@ -21,6 +21,24 @@
 namespace dolphinsf2
 {
 
+// What a game's code does with its sounds that its start-up archive doesn't say. An unknown game gets the defaults.
+struct GameRules
+{
+    // The volumes, other than 1, that the game's code gives its effect categories. A category is a group of the sound
+    // table. The sound library multiplies an effect's volume by the volume of the effect's category.
+    std::map<uint8_t, float> category_volumes;
+
+    // The direct release that the sound library gives an oscillator with neither a release table nor a direct release
+    // (OscillatorState::Release). With 0, such an oscillator stops at once when its note is released.
+    uint16_t default_release = 0;
+
+    // The echo that the game's code sets up, or nothing. A sequence that sends to it ends when the echo falls silent.
+    std::optional<EchoLine> echo;
+};
+
+// The rules of the game whose start-up archive has the SHA-1 `archive_sha1`, as 40 lowercase hex digits.
+GameRules RulesOf(const std::string& archive_sha1);
+
 class Game
 {
 public:
@@ -55,6 +73,10 @@ public:
     }
 
 private:
+    // Read the start-up archive in `bytes`, and look up its game's rules. Throw FormatError if the archive can't be
+    // read.
+    void OpenArchive(std::vector<uint8_t> bytes);
+
     // List the sequences once the archive and the sequence archive are read.
     void FindSequences();
 
@@ -62,6 +84,7 @@ private:
     std::vector<uint8_t> ReadDiscFile(const std::string& path) const;
 
     std::unique_ptr<SoundArchive> archive_;
+    GameRules rules_;
     std::vector<uint8_t> sequence_archive_;
     std::string sequence_archive_name_;
     std::vector<ArchiveFile> sequence_files_;

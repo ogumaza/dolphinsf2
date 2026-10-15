@@ -42,8 +42,9 @@ public:
     void Advance(float step);
 
     // Start the release: the release table, or a direct release, whose time is in the low 14 bits and whose curve is in
-    // the top two. With neither, the oscillator stops at once.
-    void Release(uint16_t direct_release);
+    // the top two. With neither, the oscillator takes `default_release` as its direct release. Some builds of
+    // JASOscillator::release do that. With 0 for that too, it stops at once.
+    void Release(uint16_t direct_release, uint16_t default_release);
 
     // The oscillator's output: its level times its scale, plus its vertex (getValue).
     float Value() const;
@@ -104,9 +105,11 @@ struct EnvelopeCurve
     std::vector<float> release; // each sub-frame's level after the release, until it stops
 };
 
-// Trace the curve of `volume_oscillators` (their targets are the volume) with `direct_release` (0 for none). No
-// oscillator gives a level of 1 that stops at the release. A direct release fades it instead.
-EnvelopeCurve TraceEnvelope(const std::vector<const Oscillator*>& volume_oscillators, uint16_t direct_release);
+// Trace the curve of `volume_oscillators` (their targets are the volume) with `direct_release` (0 for none), and the
+// game's `default_release` for an oscillator without a release (OscillatorState::Release). No oscillator gives a level
+// of 1 that stops at the release. A direct release fades it instead.
+EnvelopeCurve TraceEnvelope(const std::vector<const Oscillator*>& volume_oscillators, uint16_t direct_release,
+                            uint16_t default_release);
 
 // SoundFont volume envelope generators (timecents; sustain in centibels of attenuation), with the attenuation that
 // brings the envelope's peak to full level.

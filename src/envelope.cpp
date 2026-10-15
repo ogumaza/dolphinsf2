@@ -85,13 +85,17 @@ void OscillatorState::Advance(float step)
     Update();
 }
 
-void OscillatorState::Release(uint16_t direct_release)
+void OscillatorState::Release(uint16_t direct_release, uint16_t default_release)
 {
     if (osc_ == nullptr)
     {
         return;
     }
 
+    if (osc_->release.empty() && direct_release == 0)
+    {
+        direct_release = default_release;
+    }
     if (osc_->release.empty() && direct_release == 0)
     {
         state_ = State::kStopped;
@@ -212,7 +216,8 @@ void OscillatorState::Interpolate(float duration)
     level_ = from_ * along + target_ * (1.0f - along);
 }
 
-EnvelopeCurve TraceEnvelope(const std::vector<const Oscillator*>& volume_oscillators, uint16_t direct_release)
+EnvelopeCurve TraceEnvelope(const std::vector<const Oscillator*>& volume_oscillators, uint16_t direct_release,
+                            uint16_t default_release)
 {
     // A note with no volume oscillator plays at full level. Drums get a constant one. Their direct release can then
     // fade them (JASDrumSet::getParam).
@@ -271,7 +276,7 @@ EnvelopeCurve TraceEnvelope(const std::vector<const Oscillator*>& volume_oscilla
 
     for (std::size_t i = 0; i < oscs.size(); i++)
     {
-        oscs[i].Release(i == 0 ? direct_release : 0);
+        oscs[i].Release(i == 0 ? direct_release : 0, default_release);
     }
     curve.release.push_back(level());
     while (oscs[0].Valid() && !oscs[0].Stopped() && curve.release.size() < kMaxTrace)

@@ -72,12 +72,12 @@ struct PresetZone
 };
 
 // The zones of `program` in `bank`, whose waves are in `waves`, played with `volume_override` and `pitch_override` in
-// place of the instrument's oscillators (nullptr for none) and with the track's `direct_release` (0 for none). A drum
-// plays its wave at its rate whatever the key: its zone's root key is its key. An instrument whose effects follow the
-// key gets a zone per key.
+// place of the instrument's oscillators (nullptr for none), with the track's `direct_release` (0 for none) and with the
+// game's `default_release` (TraceEnvelope). A drum plays its wave at its rate whatever the key: its zone's root key is
+// its key. An instrument whose effects follow the key gets a zone per key.
 std::vector<PresetZone> PresetZones(const Bank& bank, const WaveSystem* waves, uint32_t program,
                                     const Oscillator* volume_override, const Oscillator* pitch_override,
-                                    uint16_t direct_release);
+                                    uint16_t direct_release, uint16_t default_release);
 
 // A sequence's banks and their waves, decoded on demand. Read failures are collected in Errors() and silence only the
 // notes they affect.

@@ -5,13 +5,16 @@
 #include "game.h"
 
 #include <algorithm>
+#include <array>
 #include <memory>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
 #include "xsflib/ascii.h"
 #include "xsflib/binary.h"
 #include "xsflib/files.h"
+#include "xsflib/sha1.h"
 
 namespace dolphinsf2
 {
@@ -66,6 +69,37 @@ std::optional<fs::path> Subfolder(const fs::path& folder, const std::string& nam
 
 } // namespace
 
+GameRules RulesOf(const std::string& archive_sha1)
+{
+    // Four Swords Adventures: the SHA-1s of the USA release's and the Japanese release's start-up archives.
+    constexpr std::array<std::string_view, 2> kFourSwordsAdventures{"8c55097f2cc9f5800fd8ab96da4e3b09727e0a39",
+                                                                    "aab07cea25ba957374524c4f29d36b72e6d36a67"};
+    GameRules rules;
+    if (std::ranges::find(kFourSwordsAdventures, archive_sha1) != kFourSwordsAdventures.end())
+    {
+        // The game plays its system sounds, category 0, at a volume of 0.7 in each of its sound modes. The other
+        // categories keep a volume of 1. The function at 0x80458744 in the USA release's main.dol takes the value from
+        // a table at 0x804b1e60 and passes it to JAISoundParamsMove::moveVolume (0x800262ac). The Japanese release has
+        // the same table.
+        rules.category_volumes[0] = 0.7f;
+
+        // JASOscillator::release (0x8002d8d4) gives an oscillator with neither a release table nor a direct release a
+        // direct release of 0x10. Twilight Princess's build stops such an oscillator at once.
+        rules.default_release = 0x10;
+
+        // At start-up, the function at 0x80459ae4 passes the FX lines in the table at 0x80491600 to JASDsp::setFXLine
+        // (0x8002cf5c). A line delays an effect send by 64 sub-frames (5,120 samples). Its filter has one tap, of
+        // 0x3fff. The filter's output feeds back into the line and goes to one side of the mix at 0x6000. A sound
+        // therefore repeats every 64 sub-frames: the first time at 0.375 times its send, then at half the level each
+        // time. A voice at a volume of 1 gets a mixer volume of 12000: JASDriver::getChannelLevel_dsp (0x8002c328)
+        // returns the halfword at 0x80539bd0. Renders of the game's output show its mix at twice the samples times the
+        // mixer volume in 32768ths.
+        rules.echo = EchoLine{64, 0x3fff / 32768.0f, 0x6000 / 32768.0f, 2.0f * 12000.0f / 32768.0f};
+    }
+
+    return rules;
+}
+
 Game Game::FromFolder(const fs::path& baa)
 {
     std::vector<uint8_t> bytes;
@@ -75,7 +109,7 @@ Game Game::FromFolder(const fs::path& baa)
     }
 
     Game game;
-    game.archive_ = std::make_unique<SoundArchive>(SoundArchive::Parse(std::move(bytes)));
+    game.OpenArchive(std::move(bytes));
 
     // The sequence archive: the first .arc in the Seqs folder. AppleDouble files don't count. macOS writes one, named
     // "._" and the file's name, beside a file that it copies to a FAT or exFAT drive.
@@ -155,7 +189,7 @@ Game Game::FromDisc(const fs::path& image)
         throw FormatError("no JAudio2 start-up archive (.baa) on the disc");
     }
 
-    game.archive_ = std::make_unique<SoundArchive>(SoundArchive::Parse(game.ReadDiscFile(baa->path)));
+    game.OpenArchive(game.ReadDiscFile(baa->path));
     const std::string folder = AsciiLower(baa->path.substr(0, baa->path.rfind('/') + 1));
     for (const ntdlib::disc::GameFile* f : files)
     {
@@ -180,6 +214,12 @@ Game Game::FromDisc(const fs::path& image)
     game.FindSequences();
 
     return game;
+}
+
+void Game::OpenArchive(std::vector<uint8_t> bytes)
+{
+    rules_ = RulesOf(xsflib::Sha1::Hex(xsflib::Sha1::Of(bytes)));
+    archive_ = std::make_unique<SoundArchive>(SoundArchive::Parse(std::move(bytes)));
 }
 
 std::vector<uint8_t> Game::ReadDiscFile(const std::string& path) const
@@ -237,6 +277,8 @@ void Game::FindSequences()
                                         std::to_string(s.index)
                                   : s.name;
         seq.volume = static_cast<float>(s.volume) / 127.0f;
+        seq.default_release = rules_.default_release;
+        seq.echo = rules_.echo;
         if (s.source == SoundEntry::Source::kCollection)
         {
             const std::optional<uint32_t> start = archive_->CollectionSequence(s.group, s.resource);
@@ -246,6 +288,13 @@ void Game::FindSequences()
             }
             seq.data = archive_->Collection();
             seq.start = *start;
+
+            // The collection's sounds are effects. Each plays at the volume of its category too.
+            const auto category = rules_.category_volumes.find(s.group);
+            if (category != rules_.category_volumes.end())
+            {
+                seq.volume *= category->second;
+            }
         }
         else
         {
@@ -268,7 +317,8 @@ void Game::FindSequences()
         if (!played[i] && !sequence_files_[i].data.empty())
         {
             const std::string& name = sequence_files_[i].name;
-            sequences_.push_back({name.substr(0, name.rfind('.')), sequence_files_[i].data, 0, 1.0f});
+            sequences_.push_back({name.substr(0, name.rfind('.')), sequence_files_[i].data, 0, 1.0f,
+                                  rules_.default_release, rules_.echo});
         }
     }
 }
