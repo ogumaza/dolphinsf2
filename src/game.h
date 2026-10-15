@@ -39,6 +39,10 @@ struct GameRules
 // The rules of the game whose start-up archive has the SHA-1 `archive_sha1`, as 40 lowercase hex digits.
 GameRules RulesOf(const std::string& archive_sha1);
 
+// Load the files of the GameCube disc image or the extracted disc at `path`, and with `system_files` its main.dol too.
+// Throw FormatError if the disc can't be read.
+std::shared_ptr<ntdlib::disc::GameFiles> LoadDisc(const std::filesystem::path& path, bool system_files);
+
 class Game
 {
 public:
@@ -50,6 +54,10 @@ public:
     // Open the start-up archive on a GameCube disc image. Throw FormatError if the image can't be read or has no
     // start-up archive.
     static Game FromDisc(const std::filesystem::path& image);
+
+    // Open the start-up archive among the files of a GameCube disc that `disc` holds. Return nothing if the disc has
+    // none. Throw FormatError if the archive can't be read.
+    static std::optional<Game> FromDiscFiles(std::shared_ptr<ntdlib::disc::GameFiles> disc);
 
     const SoundArchive& Archive() const
     {

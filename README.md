@@ -2,43 +2,53 @@
 
 dolphinsf2 converts the music and sound effects of Nintendo GameCube games to MIDI, SoundFont 2
 and SFZ. It reads games that play their sound through JAudio2. JAudio2 is the second generation
-of the sound library in Nintendo EAD's JSystem. Each sequence gets a MIDI file and a SoundFont
-containing its instruments. The SFZ files hold the same instruments at the game's level (see
+of the sound library in Nintendo EAD's JSystem. dolphinsf2 also converts the music of two games
+that play it through Factor 5's MusyX. Each sequence gets a MIDI file and a SoundFont containing
+its instruments. The SFZ files hold the same instruments at the game's level (see
 [SFZ files](#sfz-files)).
 
 Games known to work:
 
-- The Legend of Zelda: Four Swords Adventures
+- The Legend of Zelda: Four Swords Adventures (JAudio2)
+- Mario Golf: Toadstool Tour (USA, MusyX): the music
+- Mario Power Tennis (USA, MusyX): the music
 
 Other games that use JAudio2 may convert too. Some play music from streamed audio files
 rather than sequences. dolphinsf2 leaves those out. Games with the first JAudio, such as The
 Wind Waker, keep their sound in an `.aaf` file. dolphinsf2 doesn't read those.
 
-dolphinsf2 reads a game's disc image or its start-up archive:
+A MusyX game lists its songs and their volumes in a table in its code. dolphinsf2 reads that
+table in the two MusyX games above. dolphinsf2 recognizes each of them by its `main.dol`.
+Other MusyX games don't convert. Neither do the sound effects of these two.
+
+dolphinsf2 reads a game's disc image, an extracted disc or a JAudio2 game's start-up archive:
 
 - **A disc image:** a plain `.iso` or `.gcm` file or an NKit image. dolphinsf2 can't read
   compressed images (RVZ, WIA, GCZ and CISO). Convert them to ISO with Dolphin first:
   right-click the game and choose Convert File.
-- **A start-up archive:** the game's `.baa` file. dolphinsf2 reads the sequence archive from a
-  `Seqs` folder beside it and the wave archives from a `Waves` folder. To get these files,
-  right-click the game in Dolphin, choose Properties and extract the disc on the Filesystem tab.
+- **An extracted disc:** its `sys/main.dol`. dolphinsf2 reads the game's other files from the
+  `files` folder beside `sys`. To extract a disc in Dolphin, right-click the game and choose
+  Properties. On the Filesystem tab, right-click the disc and choose Extract Entire Disc.
+- **A start-up archive:** a JAudio2 game's `.baa` file. dolphinsf2 reads the sequence archive
+  from a `Seqs` folder beside it and the wave archives from a `Waves` folder. An extracted disc
+  has these files.
 
 Drop inputs onto `dolphinsf2.exe` on Windows or `Dolphinsf2.app` on macOS. Output goes in a
 folder beside each input. From a terminal:
 
 ```
-dolphinsf2 [options] <archive.baa | disc image> [...]
+dolphinsf2 [options] <archive.baa | disc image | main.dol> [...]
 
   --output DIR   write to DIR (one input only)
   --only REGEX   convert matching sequence names (for example --only BGM)
   --loops N      repeat the main loop N times (default 1)
                  MIDI loop markers are included for players that support them
-  --seed N       initial game random state (default 0)
+  --seed N       initial game random state (default 0; JAudio2 only)
   --port N=V     set port N (0-15) of each sequence to V before it starts;
-                 repeat for more ports
+                 repeat for more ports (JAudio2 only)
   --voices N     drop the notes that the game drops for lack of a voice,
                  with N voices (the game has 64). The result only
-                 approximates the game.
+                 approximates the game. (JAudio2 only)
   --voices off   keep every note (default)
   --list         list sequences without converting
   --quiet        print errors only
@@ -71,8 +81,8 @@ source (see [Building](#building)).
 
 ## Drag and drop
 
-- **Windows:** drop one or more `.baa` files or disc images onto `dolphinsf2.exe`. The console
-  shows the results and waits for Enter before closing.
+- **Windows:** drop one or more `.baa` files, disc images or `main.dol` files onto
+  `dolphinsf2.exe`. The console shows the results and waits for Enter before closing.
 - **macOS:** drop them onto `Dolphinsf2.app` or open the app to choose files. The app shows the
   results and can open the output folders. The app wraps the command-line program. Finder can't
   drop files onto a bare executable. The app is part of the [build](#building).
@@ -222,6 +232,36 @@ The first pass and the repeats then play as in the game.
 SoundFont zones can't amplify their samples. If a zone plays above full level, dolphinsf2
 attenuates every zone equally and reports it. SFZ keeps the level.
 
+### MusyX
+
+Mario Golf: Toadstool Tour and Mario Power Tennis play their music through MusyX 2, Factor 5's
+sound system. A song group holds the instruments. The group's pool holds the SoundMacros,
+keymaps, layers and tables. The group's project gives the programs and each song's MIDI setup. A
+sample directory and a sample file hold the samples. A song holds tracks of patterns: notes,
+controllers, program changes and the pitch and mod wheels on 16 MIDI channels. dolphinsf2
+follows these parts of MusyX:
+
+- The song table in the game's code. The table gives each song's file, MIDI setup and volume.
+  The songs keep the table's order and names.
+- The MIDI setup: each channel's program, volume, pan, reverb send and chorus send at the
+  song's start.
+- The sequencer. dolphinsf2 runs MusyX's sequencer once a millisecond, like the game. The
+  sequencer follows the tracks and their patterns, the loops, the tempo table and the wheels.
+  dolphinsf2 marks the main loop as it does for JAudio2.
+- The song's volume. MusyX multiplies each channel's volume by it, inside the volume curve.
+  dolphinsf2 scales each CC7 by it.
+- Timing and pitch. MusyX counts time and tunes its samples for an output of 32,000 Hz. The
+  DSP's output runs at 32,028 Hz. In the game, songs therefore play 0.089% fast and 1.54 cents
+  sharp. dolphinsf2 follows the output rate.
+- The SoundMacros. A program's keymaps and layers start macros on a note. A macro is a small
+  program that the voice runs. The macro's steps set up the voice: the sample, volume, pan,
+  envelopes, vibrato, tremolo and key group, and what the release does. Each run of keys that
+  starts the same voice the same way becomes a zone. A macro's envelope is either a DLS envelope
+  or a linear one. A DLS envelope's decay and release fall in decibels.
+- Drums. MusyX plays MIDI channel 10 from the song group's drum programs. dolphinsf2 copies
+  that channel's presets to bank 128. SoundFont synths play channel 10 from that bank.
+- DSPADPCM and PCM samples, with their loops.
+
 ## SFZ files
 
 dolphinsf2 also writes SFZ files with the same instruments:
@@ -295,6 +335,36 @@ in MIDI, SoundFont or SFZ:
 - **Resampling.** Synths resample waves differently from the GameCube's DSP. High frequencies
   can differ as a result.
 
+For MusyX games, the files differ from the game in these ways too. dolphinsf2 reports the first
+eight where a song has them:
+
+- **Linear envelopes.** A linear envelope's decay and release fall in a straight line in
+  amplitude. SoundFont and SFZ envelopes fall in decibels. A fall to silence is fitted to reach
+  the game's level 20 dB down. A note's decay or release therefore fades more evenly than in
+  the game. The fitted fall goes on after the game's note has fallen silent.
+- **Pitch envelopes** fall in a straight line in SoundFont and SFZ. MusyX's pitch envelopes fall
+  in decibels of their range. The fit reaches half the range at the same time.
+- **Volume curves.** Some voices play on MusyX's volume curve rather than the DLS curve.
+  dolphinsf2 plays them on the DLS curve. Below full volume, they play at somewhat different
+  levels.
+- **Key groups.** In MusyX, a note of a key group releases the group's sounding voices.
+  SoundFont and SFZ stop them at once.
+- **Early releases.** A macro's steps can do something different for a note released before
+  the macro's waits are over. dolphinsf2 plays every release as a late one.
+- **Layers.** A MIDI channel holds one note per key. Overlapping notes of the same key take
+  extra channels. When all 16 channels are in use, such notes end early.
+- **Controllers that no voice reads.** A song can send controllers that MusyX's voices ignore.
+  dolphinsf2 sends them as MIDI controllers. A synth may act on them.
+- **Other macro steps.** dolphinsf2 leaves out some rarer steps of a macro and approximates
+  others. The report names each one.
+- **A song's end.** In the game, a song's voices stop when the song ends. In MIDI, the last
+  notes play their releases. These tails are quiet.
+- **Mario Power Tennis's level.** The game plays its songs more quietly than MusyX's volume
+  model gives. The cause isn't known. dolphinsf2 scales every channel volume of the game's
+  songs by a fixed factor to match.
+- **Effect sends.** CC91 and CC93 hold each channel's reverb and chorus sends. Synths play them
+  as reverb and chorus. In the game, the sends reach the effects that the game sets up.
+
 SoundFont output follows the specification and targets FluidSynth. Player differences remain:
 
 - **Pan.** JAudio2's pan law is FluidSynth's sin/cos law. TinySoundFont uses a square-root law.
@@ -354,8 +424,8 @@ C++ formatting uses clang-format with the repository's `.clang-format`.
 
 ## Tests and tools
 
-`ctest` runs unit tests without game data. The tests build archives, banks, wave systems and
-sequences in memory. Coverage includes:
+`ctest` runs unit tests without game data. The tests build archives, banks, wave systems,
+sequences and MusyX songs in memory. Coverage includes:
 
 - Wave decoding, and what banks of both versions play for a note: instruments, drum sets,
   velocity regions and effects.
@@ -363,6 +433,8 @@ sequences in memory. Coverage includes:
 - The player: tempo and timing, sweeps and ties, loops and their markers, ports and registers,
   drums and volume.
 - SoundFont and MIDI output checked by independent readers, and SFZ output.
+- MusyX: song lists and file paths, DLS envelope times, the song's volume and a game's level,
+  tempo tables, and a song that loops.
 
 Other checks and tools:
 

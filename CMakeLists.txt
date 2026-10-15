@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 # The version is dolphinsf2 --version's, and the one in the file properties of the Windows program and the Info.plist of
 # the macOS app. A release changes it here and adds its notes in docs/release-notes/.
-project(dolphinsf2 VERSION 1.0.2 LANGUAGES CXX)
+project(dolphinsf2 VERSION 1.1.0 LANGUAGES CXX)
 
 # The libraries that dolphinsf2 shares with the other converters and the PSF players: seqlib for MIDI, SoundFont 2
 # and SFZ, xsflib for the common code and the build's templates, and ntdlib for Nintendo's formats. All three are
@@ -25,10 +25,14 @@ add_library(dolphinsf2_core STATIC
   src/performance.cpp
   src/sfz.cpp
   src/convert.cpp
-  src/game.cpp)
+  src/game.cpp
+  src/musyx_game.cpp
+  src/musyx_voices.cpp
+  src/musyx_player.cpp
+  src/musyx_convert.cpp)
 target_include_directories(dolphinsf2_core PUBLIC src)
-target_link_libraries(dolphinsf2_core PUBLIC seqlib::seqlib xsflib::common ntdlib::disc ntdlib::jaudio ntdlib::wave
-                      ntdlib::sequence_export)
+target_link_libraries(dolphinsf2_core PUBLIC seqlib::seqlib xsflib::common ntdlib::common ntdlib::disc ntdlib::jaudio
+                      ntdlib::musyx ntdlib::wave ntdlib::sequence_export)
 
 add_executable(dolphinsf2 src/main.cpp)
 target_link_libraries(dolphinsf2 PRIVATE dolphinsf2_core)

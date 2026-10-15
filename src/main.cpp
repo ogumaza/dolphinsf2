@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-// dolphinsf2: convert the sequences of GameCube games that use JAudio2 to MIDI, SoundFont and SFZ.
+// dolphinsf2: convert the music of GameCube games that use JAudio2 or MusyX to MIDI, SoundFont and SFZ.
 //
-//     dolphinsf2 [options] <archive.baa | disc image> [...]
+//     dolphinsf2 [options] <archive.baa | disc image | main.dol> [...]
 //
 // Output goes beside each input. Windows accepts files dropped on the executable; macOS uses Dolphinsf2.app.
 
@@ -23,11 +23,16 @@
 #include "ntdlib/disc/game.h"
 #include "ntdlib/disc/image.h"
 #include "ntdlib/sequence_export/frame.h"
+#include "xsflib/ascii.h"
 #include "xsflib/binary.h"
+#include "xsflib/files.h"
 
 #include "convert.h"
 #include "game.h"
 #include "instruments.h"
+#include "musyx_convert.h"
+#include "musyx_game.h"
+#include "musyx_voices.h"
 #include "performance.h"
 #include "sfz.h"
 
@@ -42,13 +47,14 @@ namespace
 void Usage()
 {
     std::puts(
-        "dolphinsf2: convert the music of GameCube games that use JAudio2 to MIDI,\n"
-        "SoundFont 2 and SFZ.\n"
+        "dolphinsf2: convert the music of GameCube games that use JAudio2 or MusyX to\n"
+        "MIDI, SoundFont 2 and SFZ.\n"
         "\n"
-        "usage: dolphinsf2 [options] <archive.baa | disc image> [...]\n"
+        "usage: dolphinsf2 [options] <archive.baa | disc image | main.dol> [...]\n"
         "\n"
-        "Give it a game's start-up archive (a .baa file, with the Seqs and Waves\n"
-        "folders beside it) or its disc image (.iso or .gcm, NKit included). Each\n"
+        "Give it a game's disc image (.iso or .gcm, NKit included). For a JAudio2 game,\n"
+        "its start-up archive works too: a .baa file, with the Seqs and Waves folders\n"
+        "beside it. For a game extracted with Dolphin, give its sys/main.dol. Each\n"
         "sequence gets <name>.mid, <name>.sf2, and per-track SFZ files in sfz/<name>.\n"
         "Shared samples go in sfz/samples. Output is written to <input name>_dolphinsf2\n"
         "beside the input. You can also drop files onto dolphinsf2.exe on Windows or\n"
@@ -59,12 +65,12 @@ void Usage()
         "  --only REGEX   convert matching sequence names (for example --only BGM)\n"
         "  --loops N      repeat the main loop N times (default 1)\n"
         "                 MIDI loop markers are included for players that support them\n"
-        "  --seed N       initial game random state (default 0)\n"
+        "  --seed N       initial game random state (default 0; JAudio2 only)\n"
         "  --port N=V     set port N (0-15) of each sequence to V before it starts;\n"
-        "                 repeat for more ports\n"
+        "                 repeat for more ports (JAudio2 only)\n"
         "  --voices N     drop the notes that the game drops for lack of a voice,\n"
         "                 with N voices (the game has 64). The result only\n"
-        "                 approximates the game.\n"
+        "                 approximates the game. (JAudio2 only)\n"
         "  --voices off   keep every note (default)\n"
         "  --list         list sequences without converting\n"
         "  --quiet        print errors only\n"
@@ -92,14 +98,65 @@ bool ExtraOption(const std::string& option, frame::OptionReader& reader, Perform
     return PortOption(option, reader, perform) || frame::VoicesOption(option, reader, perform);
 }
 
-// Open `input`: a disc image or a start-up archive. Throw FormatError, with what to do where it can say, if it's
-// neither.
-Game OpenGame(const fs::path& input)
+// An input being converted: a JAudio2 game and the banks that its sequences play, or a MusyX game and the voices of
+// its song group. It counts the errors of the banks or the voices that the conversions have reported.
+struct Input
+{
+    explicit Input(Game opened)
+        : game(std::move(opened)),
+          banks(std::make_unique<BankSet>(game->Archive(),
+                                          [this](const std::string& name) { return game->ReadWaveArchive(name); }))
+    {
+    }
+
+    explicit Input(musyx::Game opened)
+        : musyx_game(std::move(opened)), voices(std::make_unique<musyx::Instruments>(musyx_game->Group()))
+    {
+    }
+
+    const std::vector<std::string>& Errors() const
+    {
+        return banks ? banks->Errors() : voices->Errors();
+    }
+
+    std::optional<Game> game;
+    std::unique_ptr<BankSet> banks;
+    std::optional<musyx::Game> musyx_game;
+    std::unique_ptr<musyx::Instruments> voices;
+    std::size_t errors_reported = 0;
+};
+
+// Open the game on the disc image or the extracted disc at `path`: a JAudio2 game, or one of the MusyX games that
+// dolphinsf2 converts. Only a MusyX game requires the disc's main.dol. Throw FormatError if it's neither.
+std::unique_ptr<Input> OpenDisc(const fs::path& path)
+{
+    if (std::optional<Game> game = Game::FromDiscFiles(LoadDisc(path, false)))
+    {
+        return std::make_unique<Input>(std::move(*game));
+    }
+    if (std::optional<musyx::Game> game = musyx::Game::Open(LoadDisc(path, true)))
+    {
+        return std::make_unique<Input>(std::move(*game));
+    }
+
+    throw FormatError(
+        "no JAudio2 start-up archive (.baa) on the disc, and not one of the MusyX games that dolphinsf2 converts");
+}
+
+// Open `input`: a disc image, a start-up archive, or the main.dol of an extracted disc. Throw FormatError, with what to
+// do where it can say, if it's none of them.
+std::unique_ptr<Input> OpenGame(const fs::path& input)
 {
     std::ifstream f(input, std::ios::binary);
     if (!f)
     {
         throw FormatError("can't read it");
+    }
+
+    // An extracted disc keeps its main.dol in its sys folder.
+    if (xsflib::AsciiLower(xsflib::Utf8(input.filename())) == "main.dol")
+    {
+        return OpenDisc(input.parent_path().parent_path());
     }
 
     std::vector<uint8_t> header(0x40);
@@ -110,30 +167,16 @@ Game OpenGame(const fs::path& input)
     // image, and says why it refuses the others.
     if (!ntdlib::disc::ContainerFormat(header).empty() || ntdlib::disc::DiscConsole(header))
     {
-        return Game::FromDisc(input);
+        return OpenDisc(input);
     }
     if (header.size() < 4 || std::string(header.begin(), header.begin() + 4) != "AA_<")
     {
-        throw FormatError("not a JAudio2 start-up archive (.baa) or a GameCube disc image");
+        throw FormatError(
+            "not a JAudio2 start-up archive (.baa), a GameCube disc image or an extracted disc's main.dol");
     }
 
-    return Game::FromFolder(input);
+    return std::make_unique<Input>(Game::FromFolder(input));
 }
-
-// An input being converted: the game, the banks that its sequences play, and how many of the banks' errors the
-// conversions have reported.
-struct Input
-{
-    explicit Input(Game opened)
-        : game(std::move(opened)),
-          banks(game.Archive(), [this](const std::string& name) { return game.ReadWaveArchive(name); })
-    {
-    }
-
-    Game game;
-    BankSet banks;
-    std::size_t errors_reported = 0;
-};
 
 // Open `input`, named `name`, and print its warnings. Return nothing if it doesn't exist.
 std::optional<std::unique_ptr<Input>> Open(const fs::path& input, const std::string& name)
@@ -144,38 +187,53 @@ std::optional<std::unique_ptr<Input>> Open(const fs::path& input, const std::str
         return std::nullopt;
     }
 
-    auto opened = std::make_unique<Input>(OpenGame(input));
-    for (const std::string& w : opened->game.Archive().Warnings())
+    std::unique_ptr<Input> opened = OpenGame(input);
+    if (opened->game)
     {
-        std::fprintf(stderr, "warning: %s: %s\n", name.c_str(), w.c_str());
-    }
-    for (const std::string& w : opened->game.Warnings())
-    {
-        std::fprintf(stderr, "warning: %s: %s\n", name.c_str(), w.c_str());
+        for (const std::string& w : opened->game->Archive().Warnings())
+        {
+            std::fprintf(stderr, "warning: %s: %s\n", name.c_str(), w.c_str());
+        }
+        for (const std::string& w : opened->game->Warnings())
+        {
+            std::fprintf(stderr, "warning: %s: %s\n", name.c_str(), w.c_str());
+        }
     }
 
     return opened;
 }
 
-// The game's sequences, in order.
+// The game's sequences, or its songs, in order.
 std::vector<frame::Sequence> Sequences(const std::unique_ptr<Input>& input)
 {
     std::vector<frame::Sequence> sequences;
-    for (std::size_t i = 0; i < input->game.Sequences().size(); i++)
+    if (input->game)
     {
-        sequences.push_back({i, input->game.Sequences()[i].name});
+        for (std::size_t i = 0; i < input->game->Sequences().size(); i++)
+        {
+            sequences.push_back({i, input->game->Sequences()[i].name});
+        }
+    }
+    else
+    {
+        for (std::size_t i = 0; i < input->musyx_game->Songs().size(); i++)
+        {
+            sequences.push_back({i, input->musyx_game->Songs()[i].name});
+        }
     }
 
     return sequences;
 }
 
-// Convert the game's sequence `index`, with the banks' errors since the last conversion as warnings.
+// Convert the game's sequence or song `index`, with the errors of the banks or the voices since the last conversion as
+// warnings.
 Conversion Convert(std::unique_ptr<Input>& input, std::size_t index, const PerformOptions& perform)
 {
-    Conversion c = ConvertSequence(input->game.Sequences()[index], input->banks, perform);
-    for (; input->errors_reported < input->banks.Errors().size(); input->errors_reported++)
+    Conversion c = input->game ? ConvertSequence(input->game->Sequences()[index], *input->banks, perform)
+                               : musyx::ConvertSong(*input->musyx_game, index, *input->voices, perform);
+    for (; input->errors_reported < input->Errors().size(); input->errors_reported++)
     {
-        c.warnings.push_back(input->banks.Errors()[input->errors_reported]);
+        c.warnings.push_back(input->Errors()[input->errors_reported]);
     }
 
     return c;

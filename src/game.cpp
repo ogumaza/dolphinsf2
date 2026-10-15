@@ -153,14 +153,34 @@ Game Game::FromFolder(const fs::path& baa)
     return game;
 }
 
-Game Game::FromDisc(const fs::path& image)
+std::shared_ptr<ntdlib::disc::GameFiles> LoadDisc(const fs::path& path, bool system_files)
 {
-    Game game;
-    game.disc_ = std::make_shared<ntdlib::disc::GameFiles>();
-    if (const std::optional<std::string> error = ntdlib::disc::LoadGame(image, *game.disc_, DiscOptions()))
+    auto disc = std::make_shared<ntdlib::disc::GameFiles>();
+    ntdlib::disc::GameOptions options = DiscOptions();
+    options.system_files = system_files;
+    if (const std::optional<std::string> error = ntdlib::disc::LoadGame(path, *disc, options))
     {
         throw FormatError(*error);
     }
+
+    return disc;
+}
+
+Game Game::FromDisc(const fs::path& image)
+{
+    std::optional<Game> game = FromDiscFiles(LoadDisc(image, false));
+    if (!game)
+    {
+        throw FormatError("no JAudio2 start-up archive (.baa) on the disc");
+    }
+
+    return std::move(*game);
+}
+
+std::optional<Game> Game::FromDiscFiles(std::shared_ptr<ntdlib::disc::GameFiles> disc)
+{
+    Game game;
+    game.disc_ = std::move(disc);
 
     // The disc's files in the order of its file table.
     std::vector<const ntdlib::disc::GameFile*> files;
@@ -186,7 +206,7 @@ Game Game::FromDisc(const fs::path& image)
     }
     if (baa == nullptr)
     {
-        throw FormatError("no JAudio2 start-up archive (.baa) on the disc");
+        return std::nullopt;
     }
 
     game.OpenArchive(game.ReadDiscFile(baa->path));
