@@ -10,9 +10,9 @@
 
 #include "ntdlib/musyx/song.h"
 
+#include "jaudio.h"
 #include "musyx_game.h"
 #include "musyx_voices.h"
-#include "performance.h"
 
 namespace dolphinsf2::musyx
 {

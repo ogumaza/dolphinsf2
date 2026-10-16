@@ -1,41 +1,63 @@
 // SPDX-License-Identifier: MIT
 
-// JAudio2's sound data, from ntdlib's jaudio module: the start-up archive (BAA) with its sound table, sequence
-// collection, wave systems (WSYS) and instrument banks (IBNK), and the sequence archive (an RARC of BMS files) beside
-// it.
+// The conversion of JAudio games, from ntdlib's sequence_export: a game's sound files, the sequence player, the
+// instruments and their envelopes, and the MIDI, SoundFont and SFZ files. The names here are the ones that dolphinsf2
+// uses.
 
 #pragma once
 
-#include "ntdlib/jaudio/archive.h"
-#include "ntdlib/jaudio/bank.h"
-#include "ntdlib/jaudio/rarc.h"
-#include "ntdlib/jaudio/wave_system.h"
-#include "xsflib/binary.h"
+#include "ntdlib/sequence_export/jaudio/convert.h"
+#include "ntdlib/sequence_export/jaudio/envelope.h"
+#include "ntdlib/sequence_export/jaudio/game.h"
+#include "ntdlib/sequence_export/jaudio/instruments.h"
+#include "ntdlib/sequence_export/jaudio/performance.h"
+#include "ntdlib/sequence_export/jaudio/sfz.h"
+#include "ntdlib/sequence_export/jaudio/sound_data.h"
+#include "ntdlib/sequence_export/jaudio/wave.h"
 
 namespace dolphinsf2
 {
 
-// Invalid or unsupported input.
-using xsflib::FormatError;
+// The name that dolphinsf2's messages and files give it.
+inline constexpr char kProgram[] = "dolphinsf2";
 
-using ntdlib::jaudio::ArchiveFile;
-using ntdlib::jaudio::Bank;
-using ntdlib::jaudio::DecodeYaz0;
-using ntdlib::jaudio::Drum;
-using ntdlib::jaudio::DrumSet;
-using ntdlib::jaudio::InstEffect;
-using ntdlib::jaudio::Instrument;
-using ntdlib::jaudio::IsYaz0;
-using ntdlib::jaudio::KeyRegion;
-using ntdlib::jaudio::LayoutOf;
-using ntdlib::jaudio::Oscillator;
-using ntdlib::jaudio::OscPoint;
-using ntdlib::jaudio::ReadRarc;
-using ntdlib::jaudio::SoundArchive;
-using ntdlib::jaudio::SoundEntry;
-using ntdlib::jaudio::VelocityRegion;
-using ntdlib::jaudio::WaveFormat;
-using ntdlib::jaudio::WaveInfo;
-using ntdlib::jaudio::WaveSystem;
+using ntdlib::sequence_export::jaudio::ArchiveFile;
+using ntdlib::sequence_export::jaudio::Bank;
+using ntdlib::sequence_export::jaudio::BankSet;
+using ntdlib::sequence_export::jaudio::Conversion;
+using ntdlib::sequence_export::jaudio::ConvertEnvelope;
+using ntdlib::sequence_export::jaudio::ConvertEnvelopeForSfz;
+using ntdlib::sequence_export::jaudio::ConvertSequence;
+using ntdlib::sequence_export::jaudio::DecodeWave;
+using ntdlib::sequence_export::jaudio::EchoLine;
+using ntdlib::sequence_export::jaudio::EnvelopeCurve;
+using ntdlib::sequence_export::jaudio::EventKind;
+using ntdlib::sequence_export::jaudio::FindSound;
+using ntdlib::sequence_export::jaudio::FormatError;
+using ntdlib::sequence_export::jaudio::Game;
+using ntdlib::sequence_export::jaudio::GameRules;
+using ntdlib::sequence_export::jaudio::kSfzSamplesFolder;
+using ntdlib::sequence_export::jaudio::kSubFrameSeconds;
+using ntdlib::sequence_export::jaudio::MidiReport;
+using ntdlib::sequence_export::jaudio::NoteCount;
+using ntdlib::sequence_export::jaudio::OscillatorState;
+using ntdlib::sequence_export::jaudio::Pcm;
+using ntdlib::sequence_export::jaudio::Perform;
+using ntdlib::sequence_export::jaudio::Performance;
+using ntdlib::sequence_export::jaudio::PerformOptions;
+using ntdlib::sequence_export::jaudio::PreparedWave;
+using ntdlib::sequence_export::jaudio::PrepareForSfz;
+using ntdlib::sequence_export::jaudio::PrepareForSoundFont;
+using ntdlib::sequence_export::jaudio::PresetKey;
+using ntdlib::sequence_export::jaudio::PresetZone;
+using ntdlib::sequence_export::jaudio::RulesOf;
+using ntdlib::sequence_export::jaudio::SequenceSound;
+using ntdlib::sequence_export::jaudio::SfzInstruments;
+using ntdlib::sequence_export::jaudio::SfzSample;
+using ntdlib::sequence_export::jaudio::SoundArchive;
+using ntdlib::sequence_export::jaudio::ToTimecents;
+using ntdlib::sequence_export::jaudio::TraceEnvelope;
+using ntdlib::sequence_export::jaudio::TrackEvent;
+using ntdlib::sequence_export::jaudio::WaveInfo;
 
 } // namespace dolphinsf2

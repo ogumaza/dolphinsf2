@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 # The version is dolphinsf2 --version's, and the one in the file properties of the Windows program and the Info.plist of
 # the macOS app. A release changes it here and adds its notes in docs/release-notes/.
-project(dolphinsf2 VERSION 1.1.0 LANGUAGES CXX)
+project(dolphinsf2 VERSION 1.2.0 LANGUAGES CXX)
 
 # The libraries that dolphinsf2 shares with the other converters and the PSF players: seqlib for MIDI, SoundFont 2
 # and SFZ, xsflib for the common code and the build's templates, and ntdlib for Nintendo's formats. All three are
@@ -19,13 +19,7 @@ set(NTDLIB_SEQUENCE_EXPORT ON) # the converters' layer, with their command line
 xsflib_add_libraries(seqlib xsflib ntdlib)
 
 add_library(dolphinsf2_core STATIC
-  src/wave.cpp
-  src/instruments.cpp
-  src/envelope.cpp
-  src/performance.cpp
-  src/sfz.cpp
-  src/convert.cpp
-  src/game.cpp
+  src/disc.cpp
   src/musyx_game.cpp
   src/musyx_voices.cpp
   src/musyx_player.cpp
@@ -44,10 +38,10 @@ xsflib_add_version(dolphinsf2 VERSION ${PROJECT_VERSION} DEFINE DOLPHINSF2_VERSI
 
 # Finder cannot drop files onto a command-line executable. Package it in a macOS droplet app, with the version in its
 # Info.plist.
-set(app_description "Drop a GameCube game's start-up archive (.baa) or disc image (.iso, .gcm) here to convert its \
-music to MIDI, SoundFont and SFZ. Output goes in a folder beside each file.")
+set(app_description "Drop a GameCube game's start-up archive (.baa, .aaf) or disc image (.iso, .gcm) here to convert \
+its music to MIDI, SoundFont and SFZ. Output goes in a folder beside each file.")
 xsflib_add_droplet_tool(dolphinsf2 APP_NAME Dolphinsf2 VERSION ${PROJECT_VERSION} DESCRIPTION "${app_description}"
-                         PROMPT "Choose GameCube start-up archives (.baa) or disc images (.iso, .gcm) to convert:")
+                         PROMPT "Choose GameCube start-up archives (.baa, .aaf) or disc images (.iso, .gcm) to convert:")
 
 include(CTest)
 if(BUILD_TESTING)

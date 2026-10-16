@@ -8,7 +8,7 @@ one file of ntdlib. That's `src/disc/cp932.h`, a table made from Unicode's data,
 |---|---|---|
 | seqlib, Copyright (c) 2026 the seqlib authors | MIT (`externals/seqlib/LICENSE`) | In `externals/seqlib`, a submodule, compiled into dolphinsf2: the MIDI, SoundFont 2 and SFZ files and their WAV samples. |
 | xsflib, Copyright (c) 2026 the xsflib authors | MIT (`externals/xsflib/LICENSE`) | In `externals/xsflib`, a submodule, compiled into dolphinsf2: bounds-checked reads in either byte order, file input and output with UTF-8 paths, the printable form of names, the console's UTF-8 arguments and output, the Windows version resource and the macOS app's droplet script. |
-| ntdlib, Copyright (c) 2026 the ntdlib authors | MIT (`externals/ntdlib/LICENSE`) | In `externals/ntdlib`, a submodule, compiled into dolphinsf2: the disc reader, the readers of JAudio2's sound data, the wave decoders, the main loop's rules, the steps of a conversion and the command line's frame. |
+| ntdlib, Copyright (c) 2026 the ntdlib authors | MIT (`externals/ntdlib/LICENSE`) | In `externals/ntdlib`, a submodule, compiled into dolphinsf2: the disc reader, the readers of JAudio's sound data in both generations, JAudio's sequence player, the wave decoders, the main loop's rules, the steps of a conversion and the command line's frame. |
 | The code page 932 table in ntdlib's `src/disc/cp932.h`, made from Unicode's CP932.TXT, Copyright © 1991-2026 Unicode, Inc. | Unicode License v3 (`Unicode-3.0`) | Compiled into dolphinsf2 with ntdlib's disc reader. The reader decodes the Shift-JIS text of GameCube discs with it. |
 
 Binary distributions must include the MIT notices of dolphinsf2, seqlib, xsflib and ntdlib, and the Unicode License

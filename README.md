@@ -1,27 +1,34 @@
 # dolphinsf2
 
 dolphinsf2 converts the music and sound effects of Nintendo GameCube games to MIDI, SoundFont 2
-and SFZ. It reads games that play their sound through JAudio2. JAudio2 is the second generation
-of the sound library in Nintendo EAD's JSystem. dolphinsf2 also converts the music of two games
-that play it through Factor 5's MusyX. Each sequence gets a MIDI file and a SoundFont containing
-its instruments. The SFZ files hold the same instruments at the game's level (see
+and SFZ. It reads games that play their sound through JAudio, the sound library in Nintendo
+EAD's JSystem. Both generations convert: the first JAudio and JAudio2. So do the files of Wii
+and Wii U games that use JAudio. dolphinsf2 also converts the music of two games that play it
+through Factor 5's MusyX. Each sequence gets a MIDI file and a SoundFont containing its
+instruments. The SFZ files hold the same instruments at the game's level (see
 [SFZ files](#sfz-files)).
 
 Games known to work:
 
 - The Legend of Zelda: Four Swords Adventures (JAudio2)
+- The Legend of Zelda: Twilight Princess (JAudio2), on the GameCube and the Wii, and Twilight
+  Princess HD (Wii U)
+- Link's Crossbow Training (Wii, JAudio2)
+- The Legend of Zelda: The Wind Waker (the first JAudio), on the GameCube, and The Wind Waker HD
+  (Wii U): the music
+- The Legend of Zelda: Collector's Edition (JAudio2): the menu's sounds
 - Mario Golf: Toadstool Tour (USA, MusyX): the music
 - Mario Power Tennis (USA, MusyX): the music
 
-Other games that use JAudio2 may convert too. Some play music from streamed audio files
-rather than sequences. dolphinsf2 leaves those out. Games with the first JAudio, such as The
-Wind Waker, keep their sound in an `.aaf` file. dolphinsf2 doesn't read those.
+Other games that use JAudio may convert too. Some play music from streamed audio files rather
+than sequences. dolphinsf2 leaves those out. The first JAudio plays a game's sound effects in
+one sequence. The game's code steers that sequence. dolphinsf2 leaves it out too.
 
 A MusyX game lists its songs and their volumes in a table in its code. dolphinsf2 reads that
 table in the two MusyX games above. dolphinsf2 recognizes each of them by its `main.dol`.
 Other MusyX games don't convert. Neither do the sound effects of these two.
 
-dolphinsf2 reads a game's disc image, an extracted disc or a JAudio2 game's start-up archive:
+dolphinsf2 reads a game's disc image, an extracted disc or a JAudio game's start-up archive:
 
 - **A disc image:** a plain `.iso` or `.gcm` file or an NKit image. dolphinsf2 can't read
   compressed images (RVZ, WIA, GCZ and CISO). Convert them to ISO with Dolphin first:
@@ -29,26 +36,32 @@ dolphinsf2 reads a game's disc image, an extracted disc or a JAudio2 game's star
 - **An extracted disc:** its `sys/main.dol`. dolphinsf2 reads the game's other files from the
   `files` folder beside `sys`. To extract a disc in Dolphin, right-click the game and choose
   Properties. On the Filesystem tab, right-click the disc and choose Extract Entire Disc.
-- **A start-up archive:** a JAudio2 game's `.baa` file. dolphinsf2 reads the sequence archive
-  from a `Seqs` folder beside it and the wave archives from a `Waves` folder. An extracted disc
-  has these files.
+- **A start-up archive:** a JAudio2 game's `.baa` file, or the `.aaf` file of a game with the
+  first JAudio. dolphinsf2 reads the sequence archive from a `Seqs` folder beside it. It reads
+  the wave archives from a `Waves` folder (JAudio2) or a `Banks` folder (the first JAudio). An
+  extracted disc has these files.
+
+dolphinsf2 doesn't read Wii discs or Wii U titles. Give it the game's start-up archive instead.
+For a Wii game, Dolphin's Extract Entire Disc writes the game's files to a `files` folder. A Wii
+U title keeps them in its `content` folder. The start-up archive is the `.baa` or `.aaf` file
+among them, with its `Seqs` folder beside it.
 
 Drop inputs onto `dolphinsf2.exe` on Windows or `Dolphinsf2.app` on macOS. Output goes in a
 folder beside each input. From a terminal:
 
 ```
-dolphinsf2 [options] <archive.baa | disc image | main.dol> [...]
+dolphinsf2 [options] <start-up archive | disc image | main.dol> [...]
 
   --output DIR   write to DIR (one input only)
   --only REGEX   convert matching sequence names (for example --only BGM)
   --loops N      repeat the main loop N times (default 1)
                  MIDI loop markers are included for players that support them
-  --seed N       initial game random state (default 0; JAudio2 only)
+  --seed N       initial game random state (default 0; JAudio only)
   --port N=V     set port N (0-15) of each sequence to V before it starts;
-                 repeat for more ports (JAudio2 only)
+                 repeat for more ports (JAudio only)
   --voices N     drop the notes that the game drops for lack of a voice,
                  with N voices (the game has 64). The result only
-                 approximates the game. (JAudio2 only)
+                 approximates the game. (JAudio only)
   --voices off   keep every note (default)
   --list         list sequences without converting
   --quiet        print errors only
@@ -74,6 +87,13 @@ Windows and macOS. The same applies to a sequence named `samples`. That name wou
 the SFZ sample folder. The default output folder is `<input name>_dolphinsf2`. Its name follows
 the same rules. Use `--output` to choose another location.
 
+A game with the first JAudio names its sequences in a name file (`.asn`), where it has one. The
+Wind Waker HD has one beside its start-up archive. Without a name file, a sequence takes the
+name of its file in the sequence archive. A sound without a name can play a file that an earlier
+sound plays at the same volume. Its files would be the same. dolphinsf2 lists the sequence once.
+A sound that plays the file at another volume becomes `SOUND_<section>_<group>_<index>`. The
+files of a sequence table have no names. One that no sound plays becomes `SEQUENCE_<number>`.
+
 ## Downloads
 
 The Releases page has dolphinsf2 for 64-bit Windows. On macOS on Apple Silicon, build it from
@@ -81,7 +101,7 @@ source (see [Building](#building)).
 
 ## Drag and drop
 
-- **Windows:** drop one or more `.baa` files, disc images or `main.dol` files onto
+- **Windows:** drop one or more `.baa` or `.aaf` files, disc images or `main.dol` files onto
   `dolphinsf2.exe`. The console shows the results and waits for Enter before closing.
 - **macOS:** drop them onto `Dolphinsf2.app` or open the app to choose files. The app shows the
   results and can open the output folders. The app wraps the command-line program. Finder can't
@@ -104,6 +124,17 @@ The sound of a JAudio2 game comes in three kinds of file:
 - **The sequence archive** (an RARC archive in `Seqs`) contains the music's sequences (BMS).
 - **The wave archives** (`.aw` files in `Waves`) contain the samples. Each wave system names the
   archives that hold its waves.
+
+A game with the first JAudio has the same kinds of file in another layout:
+
+- **The start-up archive** (`.aaf`) contains the sound table, the instrument banks and the wave
+  systems.
+- **The sequences** are in an RARC archive in `Seqs`. The Wind Waker HD keeps them in a sequence
+  table (`.bdt`) there instead.
+- **The wave archives** (`.aw` files in `Banks`) contain the samples.
+
+The Wind Waker HD also has a name file (`.asn`) beside its start-up archive. It gives the
+sounds' names.
 
 dolphinsf2 reads both versions of JAudio2's banks. Waves can be 4-bit ADPCM, 8-bit PCM or 16-bit
 PCM. dolphinsf2 doesn't decode 2-bit ADPCM. No known game uses it. A missing or damaged wave
@@ -149,6 +180,12 @@ notes and controllers. dolphinsf2 follows these parts of JAudio2's sequence play
   controller, pitch, preset and tempo that the game resets there when the loop ends with another
   value. Without those events, a player that loops on the markers would keep the loop end's
   value.
+
+The first JAudio's sequences use the first command set. dolphinsf2 plays them with the same
+player, by that command set's rules: its gate notes, its registers and conditions, and its
+tracks' tempo and timebase. Three things differ from the game. A track that shares its parent's
+voices gets separate voices. Oscillators that a track sets are left out. So are the tempos of
+child tracks. dolphinsf2 reports all three.
 
 Short loops, such as repeating sound effects, run until the MIDI is at least 10 seconds long.
 Sounds held without end stop 10 seconds after their last change. A wait of 9,600 ticks or more
@@ -334,6 +371,9 @@ in MIDI, SoundFont or SFZ:
   the level of the sequence. dolphinsf2 reports the reduction. SFZ restores the MIDI gain.
 - **Resampling.** Synths resample waves differently from the GameCube's DSP. High frequencies
   can differ as a result.
+- **The Wii's and the Wii U's rate.** JAudio times its music for the GameCube's rate of about
+  32,028 Hz. The Wii and the Wii U play it at 32,000 Hz. There the music plays 0.089% slower and
+  1.5 cents lower than in the files.
 
 For MusyX games, the files differ from the game in these ways too. dolphinsf2 reports the first
 eight where a song has them:
@@ -424,8 +464,11 @@ C++ formatting uses clang-format with the repository's `.clang-format`.
 
 ## Tests and tools
 
-`ctest` runs unit tests without game data. The tests build archives, banks, wave systems,
-sequences and MusyX songs in memory. Coverage includes:
+`ctest` runs unit tests without game data. The tests build MusyX songs in memory. They cover
+song lists and file paths, DLS envelope times, the song's volume and a game's level, tempo
+tables, and a song that loops. The JAudio conversion is part of ntdlib, and ntdlib's tests
+cover it. Those tests build archives, banks, wave systems and sequences in memory. Coverage
+includes:
 
 - Wave decoding, and what banks of both versions play for a note: instruments, drum sets,
   velocity regions and effects.
@@ -433,8 +476,6 @@ sequences and MusyX songs in memory. Coverage includes:
 - The player: tempo and timing, sweeps and ties, loops and their markers, ports and registers,
   drums and volume.
 - SoundFont and MIDI output checked by independent readers, and SFZ output.
-- MusyX: song lists and file paths, DLS envelope times, the song's volume and a game's level,
-  tempo tables, and a song that loops.
 
 Other checks and tools:
 

@@ -8,7 +8,7 @@
 
 #include "ntdlib/musyx/song.h"
 
-#include "convert.h"
+#include "jaudio.h"
 #include "musyx_game.h"
 #include "musyx_voices.h"
 

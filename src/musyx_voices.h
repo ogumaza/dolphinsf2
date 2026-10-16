@@ -17,8 +17,8 @@
 #include "ntdlib/musyx/pool.h"
 #include "ntdlib/musyx/samples.h"
 
+#include "jaudio.h"
 #include "musyx_game.h"
-#include "wave.h"
 
 namespace dolphinsf2::musyx
 {

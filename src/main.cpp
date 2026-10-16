@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 
-// dolphinsf2: convert the music of GameCube games that use JAudio2 or MusyX to MIDI, SoundFont and SFZ.
+// dolphinsf2: convert the music of GameCube games that use JAudio or MusyX to MIDI, SoundFont and SFZ. It converts the
+// files of Wii and Wii U games that use JAudio too.
 //
-//     dolphinsf2 [options] <archive.baa | disc image | main.dol> [...]
+//     dolphinsf2 [options] <start-up archive | disc image | main.dol> [...]
 //
 // Output goes beside each input. Windows accepts files dropped on the executable; macOS uses Dolphinsf2.app.
 
@@ -22,19 +23,17 @@
 
 #include "ntdlib/disc/game.h"
 #include "ntdlib/disc/image.h"
+#include "ntdlib/jaudio/aaf.h"
 #include "ntdlib/sequence_export/frame.h"
 #include "xsflib/ascii.h"
 #include "xsflib/binary.h"
 #include "xsflib/files.h"
 
-#include "convert.h"
-#include "game.h"
-#include "instruments.h"
+#include "disc.h"
+#include "jaudio.h"
 #include "musyx_convert.h"
 #include "musyx_game.h"
 #include "musyx_voices.h"
-#include "performance.h"
-#include "sfz.h"
 
 namespace fs = std::filesystem;
 namespace frame = ntdlib::sequence_export;
@@ -47,30 +46,32 @@ namespace
 void Usage()
 {
     std::puts(
-        "dolphinsf2: convert the music of GameCube games that use JAudio2 or MusyX to\n"
-        "MIDI, SoundFont 2 and SFZ.\n"
+        "dolphinsf2: convert the music of GameCube games that use JAudio or MusyX to\n"
+        "MIDI, SoundFont 2 and SFZ. It converts the files of Wii and Wii U games that\n"
+        "use JAudio too.\n"
         "\n"
-        "usage: dolphinsf2 [options] <archive.baa | disc image | main.dol> [...]\n"
+        "usage: dolphinsf2 [options] <start-up archive | disc image | main.dol> [...]\n"
         "\n"
-        "Give it a game's disc image (.iso or .gcm, NKit included). For a JAudio2 game,\n"
-        "its start-up archive works too: a .baa file, with the Seqs and Waves folders\n"
-        "beside it. For a game extracted with Dolphin, give its sys/main.dol. Each\n"
-        "sequence gets <name>.mid, <name>.sf2, and per-track SFZ files in sfz/<name>.\n"
-        "Shared samples go in sfz/samples. Output is written to <input name>_dolphinsf2\n"
-        "beside the input. You can also drop files onto dolphinsf2.exe on Windows or\n"
-        "Dolphinsf2.app on macOS.\n"
+        "Give it a GameCube game's disc image (.iso or .gcm, NKit included). For a\n"
+        "game extracted with Dolphin, give its sys/main.dol. For a JAudio game, its\n"
+        "start-up archive works too: a .baa file, with the Seqs and Waves folders beside\n"
+        "it, or a .aaf file, with the Seqs and Banks folders. For a Wii or Wii U game,\n"
+        "give its start-up archive. Each sequence gets <name>.mid, <name>.sf2, and\n"
+        "per-track SFZ files in sfz/<name>. Shared samples go in sfz/samples. Output is\n"
+        "written to <input name>_dolphinsf2 beside the input. You can also drop files\n"
+        "onto dolphinsf2.exe on Windows or Dolphinsf2.app on macOS.\n"
         "\n"
         "options:\n"
         "  --output DIR   write to DIR (one input only)\n"
         "  --only REGEX   convert matching sequence names (for example --only BGM)\n"
         "  --loops N      repeat the main loop N times (default 1)\n"
         "                 MIDI loop markers are included for players that support them\n"
-        "  --seed N       initial game random state (default 0; JAudio2 only)\n"
+        "  --seed N       initial game random state (default 0; JAudio only)\n"
         "  --port N=V     set port N (0-15) of each sequence to V before it starts;\n"
-        "                 repeat for more ports (JAudio2 only)\n"
+        "                 repeat for more ports (JAudio only)\n"
         "  --voices N     drop the notes that the game drops for lack of a voice,\n"
         "                 with N voices (the game has 64). The result only\n"
-        "                 approximates the game. (JAudio2 only)\n"
+        "                 approximates the game. (JAudio only)\n"
         "  --voices off   keep every note (default)\n"
         "  --list         list sequences without converting\n"
         "  --quiet        print errors only\n"
@@ -98,7 +99,7 @@ bool ExtraOption(const std::string& option, frame::OptionReader& reader, Perform
     return PortOption(option, reader, perform) || frame::VoicesOption(option, reader, perform);
 }
 
-// An input being converted: a JAudio2 game and the banks that its sequences play, or a MusyX game and the voices of
+// An input being converted: a JAudio game and the banks that its sequences play, or a MusyX game and the voices of
 // its song group. It counts the errors of the banks or the voices that the conversions have reported.
 struct Input
 {
@@ -126,11 +127,11 @@ struct Input
     std::size_t errors_reported = 0;
 };
 
-// Open the game on the disc image or the extracted disc at `path`: a JAudio2 game, or one of the MusyX games that
+// Open the game on the disc image or the extracted disc at `path`: a JAudio game, or one of the MusyX games that
 // dolphinsf2 converts. Only a MusyX game requires the disc's main.dol. Throw FormatError if it's neither.
 std::unique_ptr<Input> OpenDisc(const fs::path& path)
 {
-    if (std::optional<Game> game = Game::FromDiscFiles(LoadDisc(path, false)))
+    if (std::optional<Game> game = Game::FromDiscFiles(LoadDisc(path, false), kProgram))
     {
         return std::make_unique<Input>(std::move(*game));
     }
@@ -140,7 +141,8 @@ std::unique_ptr<Input> OpenDisc(const fs::path& path)
     }
 
     throw FormatError(
-        "no JAudio2 start-up archive (.baa) on the disc, and not one of the MusyX games that dolphinsf2 converts");
+        "no JAudio start-up archive (.baa or .aaf) on the disc, and not one of the MusyX games that dolphinsf2 "
+        "converts");
 }
 
 // Open `input`: a disc image, a start-up archive, or the main.dol of an extracted disc. Throw FormatError, with what to
@@ -169,13 +171,15 @@ std::unique_ptr<Input> OpenGame(const fs::path& input)
     {
         return OpenDisc(input);
     }
-    if (header.size() < 4 || std::string(header.begin(), header.begin() + 4) != "AA_<")
+    // A start-up archive: JAudio2's BAA, or JAudio1's AAF.
+    if ((header.size() < 4 || std::string(header.begin(), header.begin() + 4) != "AA_<") &&
+        !ntdlib::jaudio::IsAaf(header))
     {
         throw FormatError(
-            "not a JAudio2 start-up archive (.baa), a GameCube disc image or an extracted disc's main.dol");
+            "not a JAudio start-up archive (.baa or .aaf), a GameCube disc image or an extracted disc's main.dol");
     }
 
-    return std::make_unique<Input>(Game::FromFolder(input));
+    return std::make_unique<Input>(Game::FromFolder(input, kProgram));
 }
 
 // Open `input`, named `name`, and print its warnings. Return nothing if it doesn't exist.
@@ -229,7 +233,7 @@ std::vector<frame::Sequence> Sequences(const std::unique_ptr<Input>& input)
 // warnings.
 Conversion Convert(std::unique_ptr<Input>& input, std::size_t index, const PerformOptions& perform)
 {
-    Conversion c = input->game ? ConvertSequence(input->game->Sequences()[index], *input->banks, perform)
+    Conversion c = input->game ? ConvertSequence(input->game->Sequences()[index], *input->banks, perform, kProgram)
                                : musyx::ConvertSong(*input->musyx_game, index, *input->voices, perform);
     for (; input->errors_reported < input->Errors().size(); input->errors_reported++)
     {
@@ -247,7 +251,7 @@ int main(int argc, char** argv)
     converter.program = "dolphinsf2";
     converter.version_line = "dolphinsf2 " DOLPHINSF2_VERSION;
     converter.input_word = "input";
-    converter.folder_message = " is a folder: give its .baa file";
+    converter.folder_message = " is a folder: give its .baa or .aaf file";
     converter.samples_folder = kSfzSamplesFolder;
     converter.usage = Usage;
     converter.option = ExtraOption;
