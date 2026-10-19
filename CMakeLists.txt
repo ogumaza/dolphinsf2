@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 # The version is dolphinsf2 --version's, and the one in the file properties of the Windows program and the Info.plist of
 # the macOS app. A release changes it here and adds its notes in docs/release-notes/.
-project(dolphinsf2 VERSION 1.2.0 LANGUAGES CXX)
+project(dolphinsf2 VERSION 1.2.1 LANGUAGES CXX)
 
 # The libraries that dolphinsf2 shares with the other converters and the PSF players: seqlib for MIDI, SoundFont 2
 # and SFZ, xsflib for the common code and the build's templates, and ntdlib for Nintendo's formats. All three are
@@ -20,18 +20,17 @@ xsflib_add_libraries(seqlib xsflib ntdlib)
 
 add_library(dolphinsf2_core STATIC
   src/disc.cpp
+  src/input.cpp
   src/musyx_game.cpp
   src/musyx_voices.cpp
   src/musyx_player.cpp
   src/musyx_convert.cpp)
 target_include_directories(dolphinsf2_core PUBLIC src)
 target_link_libraries(dolphinsf2_core PUBLIC seqlib::seqlib xsflib::common ntdlib::common ntdlib::disc ntdlib::jaudio
-                      ntdlib::musyx ntdlib::wave ntdlib::sequence_export)
+                      ntdlib::musyx ntdlib::wave ntdlib::sequence_export ntdlib::sequence_export_jaudio)
 
 add_executable(dolphinsf2 src/main.cpp)
 target_link_libraries(dolphinsf2 PRIVATE dolphinsf2_core)
-# The version that --version prints, and on Windows a version resource. Explorer shows its version and description in
-# the file's properties.
 xsflib_add_version(dolphinsf2 VERSION ${PROJECT_VERSION} DEFINE DOLPHINSF2_VERSION
                    DESCRIPTION "Nintendo GameCube music converter" PRODUCT dolphinsf2
                    COPYRIGHT "Copyright (c) 2026 the dolphinsf2 authors. MIT licence.")

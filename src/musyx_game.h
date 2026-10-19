@@ -85,6 +85,11 @@ public:
     std::vector<uint8_t> ReadSong(std::size_t index) const;
 
 private:
+    // Read the song group whose first file has number `first_file` (PathOf): the group's pool, project, sample
+    // directory and samples, one file after another. Throw FormatError if they can't be read or the project has no
+    // group of songs.
+    std::shared_ptr<const SongGroup> ReadSongGroup(uint32_t first_file) const;
+
     // Read the disc's file at `path`. Throw FormatError if it can't be read.
     std::vector<uint8_t> ReadFile(const std::string& path) const;
 

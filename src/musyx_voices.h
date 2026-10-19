@@ -159,6 +159,9 @@ public:
     // decoded.
     const Sample* GetSample(uint16_t id);
 
+    // The sample that `voice` starts, as GetSample gives it. Return nullptr for a voice that starts none.
+    const Sample* SampleOf(const MacroVoice& voice);
+
     // The seconds that sample `id` plays when its pitch is `ratio` times its rate, or nothing if it loops. Return 0 for
     // a sample that can't be decoded.
     std::optional<double> SampleSeconds(uint16_t id, double ratio);

@@ -4,6 +4,7 @@
 
 #include "musyx_game.h"
 
+#include <algorithm>
 #include <array>
 #include <iterator>
 #include <span>
@@ -54,49 +55,31 @@ constexpr std::array<Rules, 2> kGames{{
 // The longest name that a list's entry gives.
 constexpr std::size_t kLongestName = 64;
 
-// Reads main.dol's memory as the game loads it.
-class DolMemory
+// The `size` bytes at load address `address` of `dol`, main.dol as the game loads it. Throw FormatError if no section
+// holds them.
+std::span<const uint8_t> DolBytes(const ntdlib::Dol& dol, uint32_t address, uint32_t size)
 {
-public:
-    explicit DolMemory(const ntdlib::Dol& dol) : dol_(dol)
+    const std::span<const uint8_t> bytes = dol.At(address);
+    if (bytes.size() < size)
     {
+        throw FormatError("main.dol has no data at the song list's address");
     }
 
-    // The bytes from `address` to `address` + `size`. Throw FormatError if no section holds them.
-    std::span<const uint8_t> At(uint32_t address, uint32_t size) const;
-
-    uint32_t Word(uint32_t address) const
-    {
-        return xsflib::LoadBe32(At(address, 4).data());
-    }
-
-    // The text that starts at `address`, up to its zero byte, at most `longest` bytes.
-    std::string Text(uint32_t address, std::size_t longest) const;
-
-private:
-    const ntdlib::Dol& dol_;
-};
-
-std::span<const uint8_t> DolMemory::At(uint32_t address, uint32_t size) const
-{
-    for (const ntdlib::Dol::Section& s : dol_.Sections())
-    {
-        if (address >= s.address && address - s.address <= s.data.size() &&
-            size <= s.data.size() - (address - s.address))
-        {
-            return s.data.subspan(address - s.address, size);
-        }
-    }
-
-    throw FormatError("main.dol has no data at the song list's address");
+    return bytes.first(size);
 }
 
-std::string DolMemory::Text(uint32_t address, std::size_t longest) const
+uint32_t DolWord(const ntdlib::Dol& dol, uint32_t address)
+{
+    return xsflib::LoadBe32(DolBytes(dol, address, 4).data());
+}
+
+// The text that starts at load address `address` of `dol`, up to its zero byte, at most `longest` bytes.
+std::string DolText(const ntdlib::Dol& dol, uint32_t address, std::size_t longest)
 {
     std::string text;
     for (std::size_t i = 0; i < longest; i++)
     {
-        const char c = static_cast<char>(At(static_cast<uint32_t>(address + i), 1)[0]);
+        const char c = static_cast<char>(DolBytes(dol, static_cast<uint32_t>(address + i), 1)[0]);
         if (c == '\0')
         {
             break;
@@ -105,6 +88,19 @@ std::string DolMemory::Text(uint32_t address, std::size_t longest) const
     }
 
     return text;
+}
+
+// The rules of the game whose main.dol is `dol`. Return nullptr for a game that dolphinsf2 doesn't convert.
+const Rules* RulesOf(std::span<const uint8_t> dol)
+{
+    const std::string sha1 = xsflib::Sha1::Hex(xsflib::Sha1::Of(dol));
+    const auto matches = [&sha1](const Rules& r)
+    {
+        return r.dol_sha1 == sha1;
+    };
+    const auto rules = std::find_if(kGames.begin(), kGames.end(), matches);
+
+    return rules != kGames.end() ? &*rules : nullptr;
 }
 
 } // namespace
@@ -124,7 +120,6 @@ std::string PathOf(uint32_t number)
 
 std::vector<GameSong> ReadSongList(const ntdlib::Dol& dol, const SongList& list)
 {
-    const DolMemory memory(dol);
     std::vector<GameSong> songs;
     for (uint32_t i = 0; i < list.count; i++)
     {
@@ -132,14 +127,14 @@ std::vector<GameSong> ReadSongList(const ntdlib::Dol& dol, const SongList& list)
         const uint32_t words = entry + list.entry_size - 12;
         GameSong song;
         song.name =
-            list.name_inline ? memory.Text(entry, words - entry) : memory.Text(memory.Word(entry), kLongestName);
+            list.name_inline ? DolText(dol, entry, words - entry) : DolText(dol, DolWord(dol, entry), kLongestName);
         if (song.name.ends_with(".sng"))
         {
             song.name.resize(song.name.size() - 4);
         }
-        song.path = PathOf(memory.Word(words));
-        song.id = static_cast<uint16_t>(memory.Word(words + 4));
-        song.volume = static_cast<uint8_t>(memory.Word(words + 8) >> 24);
+        song.path = PathOf(DolWord(dol, words));
+        song.id = static_cast<uint16_t>(DolWord(dol, words + 4));
+        song.volume = static_cast<uint8_t>(DolWord(dol, words + 8) >> 24);
         songs.push_back(std::move(song));
     }
 
@@ -148,15 +143,7 @@ std::vector<GameSong> ReadSongList(const ntdlib::Dol& dol, const SongList& list)
 
 std::optional<Game> Game::Open(std::shared_ptr<ntdlib::disc::GameFiles> disc)
 {
-    const std::string sha1 = xsflib::Sha1::Hex(xsflib::Sha1::Of(disc->dol));
-    const Rules* rules = nullptr;
-    for (const Rules& r : kGames)
-    {
-        if (r.dol_sha1 == sha1)
-        {
-            rules = &r;
-        }
-    }
+    const Rules* rules = RulesOf(disc->dol);
     if (rules == nullptr)
     {
         return std::nullopt;
@@ -164,40 +151,13 @@ std::optional<Game> Game::Open(std::shared_ptr<ntdlib::disc::GameFiles> disc)
 
     Game game;
     game.disc_ = std::move(disc);
-
-    // The song group: the project's group of songs, with its pool and samples. A file's number goes up by 2 from one
-    // file to the next (PathOf).
-    auto group = std::make_shared<SongGroup>();
-    const std::vector<uint8_t> pool = game.ReadFile(PathOf(rules->group_file));
-    const std::vector<uint8_t> project = game.ReadFile(PathOf(rules->group_file + 2));
-    const std::vector<uint8_t> directory = game.ReadFile(PathOf(rules->group_file + 4));
-    group->sample_data = game.ReadFile(PathOf(rules->group_file + 6));
-    bool found = false;
-    for (ntdlib::musyx::Group& g : ntdlib::musyx::ReadProject(project))
-    {
-        if (g.type == ntdlib::musyx::GroupType::kSongs && !found)
-        {
-            group->group = std::move(g);
-            found = true;
-        }
-    }
-    if (!found)
-    {
-        throw FormatError(PathOf(rules->group_file + 2) + " has no song group");
-    }
-    group->pool = ntdlib::musyx::ReadPool(pool);
-    group->samples = ntdlib::musyx::ReadSampleDirectory(directory);
-    game.group_ = std::move(group);
+    game.group_ = game.ReadSongGroup(rules->group_file);
 
     // The code's lists of songs.
-    const std::optional<ntdlib::Dol> dol = ntdlib::Dol::Parse(game.disc_->dol);
-    if (!dol)
-    {
-        throw FormatError("main.dol isn't a DOL");
-    }
+    const ntdlib::Dol dol = ntdlib::Dol::ParseMain(game.disc_->dol);
     for (const SongList& list : rules->lists)
     {
-        std::vector<GameSong> songs = ReadSongList(*dol, list);
+        std::vector<GameSong> songs = ReadSongList(dol, list);
         for (GameSong& song : songs)
         {
             song.level = rules->level;
@@ -213,6 +173,34 @@ std::optional<Game> Game::Open(std::shared_ptr<ntdlib::disc::GameFiles> disc)
 std::vector<uint8_t> Game::ReadSong(std::size_t index) const
 {
     return ReadFile(songs_.at(index).path);
+}
+
+std::shared_ptr<const SongGroup> Game::ReadSongGroup(uint32_t first_file) const
+{
+    // The group's four files. A file's number goes up by 2 from one file to the next (PathOf).
+    auto group = std::make_shared<SongGroup>();
+    const std::vector<uint8_t> pool = ReadFile(PathOf(first_file));
+    const std::vector<uint8_t> project = ReadFile(PathOf(first_file + 2));
+    const std::vector<uint8_t> directory = ReadFile(PathOf(first_file + 4));
+    group->sample_data = ReadFile(PathOf(first_file + 6));
+
+    // The project's first group of songs, with the pool and the samples.
+    std::vector<ntdlib::musyx::Group> groups = ntdlib::musyx::ReadProject(project);
+    const auto is_songs = [](const ntdlib::musyx::Group& g)
+    {
+        return g.type == ntdlib::musyx::GroupType::kSongs;
+    };
+    const auto songs = std::find_if(groups.begin(), groups.end(), is_songs);
+    if (songs == groups.end())
+    {
+        throw FormatError(PathOf(first_file + 2) + " has no song group");
+    }
+
+    group->group = std::move(*songs);
+    group->pool = ntdlib::musyx::ReadPool(pool);
+    group->samples = ntdlib::musyx::ReadSampleDirectory(directory);
+
+    return group;
 }
 
 std::vector<uint8_t> Game::ReadFile(const std::string& path) const

@@ -7,10 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <filesystem>
-#include <map>
 #include <numbers>
 #include <optional>
 #include <string>
@@ -21,12 +18,12 @@
 #include "ntdlib/musyx/project.h"
 #include "ntdlib/musyx/samples.h"
 #include "ntdlib/musyx/song.h"
-#include "ntdlib/testing/jaudio_files.h"
+#include "ntdlib/testing/big_endian_bytes.h"
+#include "ntdlib/testing/dol_files.h"
 #include "ntdlib/testing/sequence_export_check.h"
-#include "xsflib/binary.h"
 #include "xsflib/testing/check.h"
 
-#include "disc.h"
+#include "input.h"
 #include "jaudio.h"
 #include "musyx_convert.h"
 #include "musyx_game.h"
@@ -37,12 +34,10 @@ namespace
 {
 
 using namespace dolphinsf2;
+using ntdlib::testing::BigEndianBytes;
 using xsflib::testing::Check;
 using xsflib::testing::ErrorOf;
 using xsflib::testing::failures;
-
-namespace files = ntdlib::testing::jaudio_files;
-using files::Bytes;
 
 // Count `perf`'s events of `kind` on MIDI track `slot`.
 int Count(const Performance& perf, std::size_t slot, EventKind kind)
@@ -56,13 +51,12 @@ int Count(const Performance& perf, std::size_t slot, EventKind kind)
     return n;
 }
 
+// A DOL whose first data section holds `data` at load address `address`.
 std::vector<uint8_t> DolWithData(uint32_t address, const std::vector<uint8_t>& data)
 {
     constexpr std::size_t kHeader = 0x100;
     std::vector<uint8_t> dol(kHeader);
-    xsflib::StoreBe32(&dol[0x1c], static_cast<uint32_t>(kHeader));
-    xsflib::StoreBe32(&dol[0x64], address);
-    xsflib::StoreBe32(&dol[0xac], static_cast<uint32_t>(data.size()));
+    ntdlib::testing::SetDolSection(dol, 7, static_cast<uint32_t>(kHeader), address, static_cast<uint32_t>(data.size()));
     dol.insert(dol.end(), data.begin(), data.end());
 
     return dol;
@@ -92,7 +86,7 @@ void TestMusyxPaths()
 void TestMusyxSongLists()
 {
     constexpr uint32_t kBase = 0x80100000;
-    Bytes b;
+    BigEndianBytes b;
     b.U32(kBase + 0x40).U32(8112).U32(3).U32(90u << 24);
     b.U32(kBase + 0x50).U32(8115).U32(7).U32(127u << 24);
     b.PadTo(0x40).Append(TextBytes("opening.sng")).PadTo(0x50).Append(TextBytes("theme")).PadTo(0x60);
@@ -186,7 +180,7 @@ musyx::SongGroup TestSongGroup()
     sample.loop_start = 800;
     sample.loop_length = 2400;
     group.samples.push_back(sample);
-    Bytes data;
+    BigEndianBytes data;
     for (uint32_t i = 0; i < sample.length; i++)
     {
         data.U16(static_cast<uint16_t>(std::lround(8000.0 * std::sin(i * 2.0 * std::numbers::pi / 80.0))));
@@ -302,15 +296,13 @@ void TestMusyxTempoTable()
     Check(ticks == " 0 384 768", "the tempo changes at ticks 0, 384 and 768, the pass's end:" + ticks);
 }
 
-// Convert every sequence of the game at `path`, a start-up archive or a disc image, and validate each file.
+// Open the game at `path` as dolphinsf2 opens its inputs. Convert every sequence, and validate each file.
 void TestGameConvertsEverySequence(const char* path)
 {
-    std::optional<Game> game;
+    std::optional<Input> input;
     try
     {
-        const std::filesystem::path p(path);
-        const std::string ext = p.extension().string();
-        game.emplace(ext == ".baa" || ext == ".aaf" ? Game::FromFolder(p, kProgram) : OpenDiscGame(p));
+        input = Input::Open(std::filesystem::path(path));
     }
     catch (const std::exception& e)
     {
@@ -319,27 +311,27 @@ void TestGameConvertsEverySequence(const char* path)
         return;
     }
 
-    BankSet banks(game->Archive(), [&](const std::string& name) { return game->ReadWaveArchive(name); });
+    const std::vector<ntdlib::sequence_export::Sequence> sequences = input->Sequences();
     int looping = 0;
-    for (const SequenceSound& sound : game->Sequences())
+    for (const ntdlib::sequence_export::Sequence& sequence : sequences)
     {
         Conversion c;
         try
         {
-            c = ConvertSequence(sound, banks, {}, kProgram);
+            c = input->Convert(sequence.index, {});
         }
         catch (const std::exception& e)
         {
-            std::fprintf(stderr, "%s: %s\n", sound.name.c_str(), e.what());
+            std::fprintf(stderr, "%s: %s\n", sequence.name.c_str(), e.what());
             failures++;
             continue;
         }
 
-        failures += ntdlib::testing::CheckConversion(c, sound.name);
+        failures += ntdlib::testing::CheckConversion(c, sequence.name);
         looping += c.performance.loop ? 1 : 0;
     }
 
-    std::printf("%s: %zu sequences converted and checked, %d loop\n", path, game->Sequences().size(), looping);
+    std::printf("%s: %zu sequences converted and checked, %d loop\n", path, sequences.size(), looping);
 }
 
 } // namespace
@@ -352,14 +344,11 @@ int main(int argc, char** argv)
     TestMusyxSongVolume();
     TestMusyxSong();
     TestMusyxTempoTable();
+
     if (argc > 1)
     {
         TestGameConvertsEverySequence(argv[1]);
     }
-    if (failures == 0)
-    {
-        std::puts("all tests passed");
-    }
 
-    return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+    return xsflib::testing::Summary("dolphinsf2");
 }

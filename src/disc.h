@@ -18,8 +18,4 @@ namespace dolphinsf2
 // Throw FormatError if the disc can't be read.
 std::shared_ptr<ntdlib::disc::GameFiles> LoadDisc(const std::filesystem::path& path, bool system_files);
 
-// Open the JAudio game on the GameCube disc image at `image`. Throw FormatError if the image can't be read or has no
-// start-up archive.
-Game OpenDiscGame(const std::filesystem::path& image);
-
 } // namespace dolphinsf2

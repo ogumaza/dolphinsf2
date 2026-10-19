@@ -142,27 +142,82 @@ struct NoteRecord
     std::vector<KeyVoice> voices;
 };
 
+// Where an event goes among a channel's events at one tick: note-offs come first, then settings, then note-ons.
+enum class Rank
+{
+    kNoteOff,
+    kSetting,
+    kNoteOn,
+};
+
+// The rank of an event of `kind`.
+Rank RankOf(EventKind kind)
+{
+    if (kind == EventKind::kNoteOff)
+    {
+        return Rank::kNoteOff;
+    }
+
+    return kind == EventKind::kNoteOn ? Rank::kNoteOn : Rank::kSetting;
+}
+
 // An event of a channel, before the events are put in order.
 struct ChannelEvent
 {
     int64_t tick = 0;
-    int rank = 0; // at one tick, note-offs come first, then settings, then note-ons
+    Rank rank = Rank::kNoteOff;
     uint64_t order = 0;
     TrackEvent event;
 };
 
+// The page that each program plays: its index in `pages`, or 0xff if no page has the program. Of the pages that share a
+// program, the last plays it.
+std::array<uint8_t, 128> PagesByProgram(const std::vector<Page>& pages)
+{
+    std::array<uint8_t, 128> index;
+    index.fill(0xff);
+    for (std::size_t i = 0; i < pages.size() && i < 0xff; i++)
+    {
+        index[pages[i].program & 0x7f] = static_cast<uint8_t>(i);
+    }
+
+    return index;
+}
+
+// The seconds that `ticks` ticks of the performance last at `bpm` beats a minute.
+double TicksToSeconds(int64_t ticks, double bpm)
+{
+    return static_cast<double>(ticks) * 60.0 / (bpm * ntdlib::musyx::kTicksPerBeat);
+}
+
+// The ticks of the performance in `seconds` at `bpm` beats a minute.
+double SecondsToTicks(double seconds, double bpm)
+{
+    return seconds * bpm * ntdlib::musyx::kTicksPerBeat / 60.0;
+}
+
 class Player
 {
 public:
-    Player(const ntdlib::musyx::Song& song, const GameSong& listed, const SongGroup& group, Instruments& instruments);
+    Player(const ntdlib::musyx::Song& song, const GameSong& listed, Instruments& instruments);
 
     // Run until the song ends, the main loop has played `passes` passes, or the time limit.
     void Run(std::size_t passes);
 
-    // Put the recorded events in the performance, from `perf`'s presets, and mark the main loop.
+    // The performance: the recorded events, the presets and the tempo, with the main loop marked.
     Performance Finish(const PerformOptions& options);
 
 private:
+    // The section that plays track `track`. A song without sections plays every track in section 0.
+    std::size_t SectionOf(std::size_t track) const;
+
+    // The tick that the loop of section `section` goes back to.
+    uint32_t LoopStart(std::size_t section) const;
+
+    // Give each channel the program, volume, pan and sends of the song group's MIDI setup for song `song_id`. Without
+    // such a setup, the channels keep MusyX's defaults and play nothing until a program change.
+    void SetUpChannels(uint16_t song_id);
+
     // One run of the sequencer. Return false once the song has ended.
     bool Step();
 
@@ -171,7 +226,16 @@ private:
 
     // Handle the section's events that are due. Return false if the section has none left.
     bool HandleEvents(std::size_t section);
-    void HandleEvent(const Event& e, std::size_t section, bool& loop, uint32_t& loop_time);
+
+    // Send the clock of section `section` back to its loop start, for the loop at `loop_time` of the clock. The tracks
+    // that loop start again.
+    void StartLoop(std::size_t section, uint32_t loop_time);
+
+    // Handle event `e` of section `section`, and put its track's next event in the section's list. For a track's loop,
+    // return the loop's time instead. The section loops once its list is empty. StartLoop then puts the tracks' next
+    // events in it.
+    std::optional<uint32_t> HandleEvent(const Event& e, std::size_t section);
+
     std::optional<Event> NextEvent(std::size_t track);
     static void Insert(SectionState& s, const Event& e);
     bool ReleaseNotes();
@@ -182,12 +246,36 @@ private:
     void ProgramChange(uint8_t channel, uint8_t program, int64_t tick);
     void Controller(uint8_t channel, uint8_t controller, uint8_t value, int64_t tick);
     void NoteOn(uint8_t channel, uint8_t key, uint8_t velocity, uint32_t end, std::size_t section, int64_t tick);
-    void Record(uint8_t channel, int64_t tick, int rank, TrackEvent e);
+
+    // Add `e` to the events of `channel` at `tick`. The event's kind gives its rank among the tick's events.
+    void Record(uint8_t channel, int64_t tick, TrackEvent e);
+
     void SetTempo(int64_t tick, const SectionState& s);
 
     // The seconds at tick `tick` of the performance, and the tick at `seconds`, from the tempo changes so far.
     double SecondsAt(int64_t tick) const;
     int64_t TickAt(double seconds) const;
+
+    // Record each note's note-off where its voices end, and count its voices' approximations in `perf`. A note still
+    // held at the end ends at `last_tick`. Return the seconds where the last sound ends, its release included.
+    double EndNotes(Performance& perf, int64_t last_tick);
+
+    // The seconds where voice `v` ends, for a note from `on_seconds` to `off_seconds`. `key` is the key that the voice
+    // starts with. A voice that ignores the release plays its sample to the end. A voice that stops by itself ends
+    // then. Add to `approximated` what the end approximates.
+    double VoiceEnd(const MacroVoice& v, int key, double on_seconds, double off_seconds,
+                    std::set<std::string>& approximated);
+
+    // Put each channel's events in `perf`, in order, and the tempo changes.
+    void AddEvents(Performance& perf);
+
+    // Mark the main loop of `perf`: the first pass that plays as the next does, played `options.loops` times. Cut the
+    // performance after the last pass that it plays.
+    void MarkLoop(Performance& perf, const PerformOptions& options) const;
+
+    // End `perf`, the performance of a song that doesn't loop, after its last event and after its last sound, which
+    // ends at `sound_end` seconds. A run cut at the time limit ends at `last_tick`.
+    void EndAfterLastSound(Performance& perf, int64_t last_tick, double sound_end) const;
 
     const ntdlib::musyx::Song& song_;
     const SongGroup& group_;
@@ -200,7 +288,7 @@ private:
     std::vector<TrackState> tracks_;
     std::array<SectionState, kSections> sections_{};
     std::size_t master_ = 0; // the section whose clock gives the tempo and the passes
-    std::array<std::optional<std::pair<uint32_t, uint16_t>>, kChannels> channel_page_{}; // bank and object
+    std::array<std::optional<uint16_t>, kChannels> channel_object_{}; // the object that the channel's page plays
     std::vector<ActiveNote> active_;
     std::vector<NoteRecord> notes_;
     std::array<std::vector<ChannelEvent>, kChannels> events_;
@@ -215,22 +303,15 @@ private:
     std::map<std::string, uint32_t> approximations_;
 };
 
-Player::Player(const ntdlib::musyx::Song& song, const GameSong& listed, const SongGroup& group,
-               Instruments& instruments)
-    : song_(song), group_(group), instruments_(instruments), song_volume_(listed.volume), level_(listed.level)
+Player::Player(const ntdlib::musyx::Song& song, const GameSong& listed, Instruments& instruments)
+    : song_(song),
+      group_(instruments.Group()),
+      instruments_(instruments),
+      song_volume_(listed.volume),
+      level_(listed.level),
+      page_of_program_(PagesByProgram(group_.group.pages)),
+      drum_of_program_(PagesByProgram(group_.group.drum_pages))
 {
-    // A program change finds the page of its program: the last of them, if pages share one.
-    page_of_program_.fill(0xff);
-    drum_of_program_.fill(0xff);
-    for (std::size_t i = 0; i < group.group.pages.size() && i < 0xff; i++)
-    {
-        page_of_program_[group.group.pages[i].program & 0x7f] = static_cast<uint8_t>(i);
-    }
-    for (std::size_t i = 0; i < group.group.drum_pages.size() && i < 0xff; i++)
-    {
-        drum_of_program_[group.group.drum_pages[i].program & 0x7f] = static_cast<uint8_t>(i);
-    }
-
     // The tempo starts at the song's, in 1024ths of a beat a minute.
     const uint32_t bpm = song.fine_tempo ? song.tempo : song.tempo << 10;
     for (SectionState& s : sections_)
@@ -238,32 +319,48 @@ Player::Player(const ntdlib::musyx::Song& song, const GameSong& listed, const So
         s.bpm = bpm;
     }
 
-    // Each track's first event waits in its section's list.
+    // Each track's first event waits in its section's list. The first track's section is the master.
+    master_ = song.tracks.empty() ? 0 : SectionOf(0);
     tracks_.resize(song.tracks.size());
-    bool master_found = false;
     for (std::size_t t = 0; t < song.tracks.size(); t++)
     {
-        const std::size_t section = song.sections ? song.tracks[t].section : 0;
+        const std::size_t section = SectionOf(t);
         sections_[section].has_tracks = true;
-        if (!master_found)
-        {
-            master_ = section;
-            master_found = true;
-        }
         if (const std::optional<Event> e = NextEvent(t))
         {
             Insert(sections_[section], *e);
         }
     }
 
-    // The song's MIDI setup gives each channel its program, volume, pan and sends. Without one, the channels keep
-    // MusyX's defaults and play nothing until a program change.
-    const auto setup = std::find_if(group.group.midi_setups.begin(), group.group.midi_setups.end(),
-                                    [&listed](const MidiSetup& m) { return m.song == listed.id; });
+    SetUpChannels(listed.id);
+
+    // The performance starts at the master's tempo, after the tempo table's changes at tick 0.
+    ApplyTempos(sections_[master_], true);
+    SetTempo(0, sections_[master_]);
+}
+
+std::size_t Player::SectionOf(std::size_t track) const
+{
+    return song_.sections ? song_.tracks[track].section : 0;
+}
+
+uint32_t Player::LoopStart(std::size_t section) const
+{
+    return song_.loop_starts[song_.sections ? section : 0];
+}
+
+void Player::SetUpChannels(uint16_t song_id)
+{
+    const std::vector<MidiSetup>& setups = group_.group.midi_setups;
+    const auto is_song = [song_id](const MidiSetup& m)
+    {
+        return m.song == song_id;
+    };
+    const auto setup = std::find_if(setups.begin(), setups.end(), is_song);
     for (uint8_t c = 0; c < kChannels; c++)
     {
-        const ChannelSetup channel = setup != group.group.midi_setups.end() ? setup->channels[c] : ChannelSetup{};
-        if (setup != group.group.midi_setups.end())
+        const ChannelSetup channel = setup != setups.end() ? setup->channels[c] : ChannelSetup{};
+        if (setup != setups.end())
         {
             ProgramChange(c, channel.program, 0);
         }
@@ -273,9 +370,6 @@ Player::Player(const ntdlib::musyx::Song& song, const GameSong& listed, const So
         Controller(c, 91, channel.reverb, 0);
         Controller(c, 93, channel.chorus, 0);
     }
-
-    ApplyTempos(sections_[master_], true);
-    SetTempo(0, sections_[master_]);
 }
 
 void Player::SetTickDelta(SectionState& s)
@@ -394,69 +488,81 @@ int64_t Player::TickOf(std::size_t section, uint32_t time) const
 bool Player::HandleEvents(std::size_t section)
 {
     SectionState& s = sections_[section];
-    bool loop = false;
-    uint32_t loop_time = 0;
+    std::optional<uint32_t> loop_time; // the latest loop of a track since the section's clock last went back
     bool looped = false;
     while (true)
     {
-        auto clock = static_cast<std::size_t>(s.clock);
-        const uint32_t now = static_cast<uint32_t>(s.time[clock] >> 16);
+        const uint32_t now = static_cast<uint32_t>(s.time[static_cast<std::size_t>(s.clock)] >> 16);
         if (!s.pending.empty() && s.pending.front().time > now)
         {
             return true;
         }
         if (s.pending.empty())
         {
-            if (!loop)
+            if (!loop_time)
             {
                 return false;
             }
 
-            // The loop: the other clock starts at the loop start, with this clock's fraction of a tick. The tempo
-            // table starts again, and its changes up to the loop start apply. A loop whose events all come at its
-            // start would loop for ever in one run.
+            // A loop whose events all come at its start would loop for ever in one run.
             if (looped)
             {
                 throw FormatError("the song loops without time passing");
             }
             looped = true;
-            loop = false;
-            const uint32_t loop_start = song_.loop_starts[song_.sections ? section : 0];
-            const auto other = clock ^ 1;
-            s.offset[other] = s.offset[clock] + static_cast<int64_t>(loop_time) - loop_start;
-            s.time[other] = static_cast<uint64_t>(loop_start) << 16 | (s.time[clock] & 0xffff);
-            s.clock = static_cast<int>(other);
-            s.last_run_tick = static_cast<int64_t>(loop_start) - 1;
-            if (!song_.tempo_changes.empty())
-            {
-                s.tempo_at = 0;
-            }
-            ApplyTempos(s, false);
-            if (section == master_)
-            {
-                SetTempo(s.offset[other] + loop_start, s);
-                jumps_.push_back(s.offset[other] + loop_start);
-            }
-            for (std::size_t t = 0; t < song_.tracks.size(); t++)
-            {
-                if ((song_.sections ? song_.tracks[t].section : 0) == section)
-                {
-                    if (const std::optional<Event> e = NextEvent(t))
-                    {
-                        Insert(s, *e);
-                    }
-                }
-            }
+            StartLoop(section, *loop_time);
+            loop_time.reset();
             continue;
         }
 
         const Event e = s.pending.front();
         s.pending.erase(s.pending.begin());
-        HandleEvent(e, section, loop, loop_time);
+        if (const std::optional<uint32_t> loop_at = HandleEvent(e, section))
+        {
+            loop_time = std::max(loop_time.value_or(0), *loop_at);
+        }
     }
 }
 
-void Player::HandleEvent(const Event& e, std::size_t section, bool& loop, uint32_t& loop_time)
+void Player::StartLoop(std::size_t section, uint32_t loop_time)
+{
+    // The other clock starts at the loop start, with this clock's fraction of a tick. The tempo table starts again,
+    // and its changes up to the loop start apply.
+    SectionState& s = sections_[section];
+    const auto clock = static_cast<std::size_t>(s.clock);
+    const auto other = clock ^ 1;
+    const uint32_t loop_start = LoopStart(section);
+    s.offset[other] = s.offset[clock] + static_cast<int64_t>(loop_time) - loop_start;
+    s.time[other] = static_cast<uint64_t>(loop_start) << 16 | (s.time[clock] & 0xffff);
+    s.clock = static_cast<int>(other);
+    s.last_run_tick = static_cast<int64_t>(loop_start) - 1;
+    if (!song_.tempo_changes.empty())
+    {
+        s.tempo_at = 0;
+    }
+    ApplyTempos(s, false);
+    if (section == master_)
+    {
+        SetTempo(s.offset[other] + loop_start, s);
+        jumps_.push_back(s.offset[other] + loop_start);
+    }
+
+    // The section's tracks wait for their next events: those that loop, their loop entries.
+    for (std::size_t t = 0; t < song_.tracks.size(); t++)
+    {
+        if (SectionOf(t) != section)
+        {
+            continue;
+        }
+
+        if (const std::optional<Event> e = NextEvent(t))
+        {
+            Insert(s, *e);
+        }
+    }
+}
+
+std::optional<uint32_t> Player::HandleEvent(const Event& e, std::size_t section)
 {
     TrackState& t = tracks_[e.track];
     const uint8_t channel = song_.tracks[e.track].channel;
@@ -516,7 +622,7 @@ void Player::HandleEvent(const Event& e, std::size_t section, bool& loop, uint32
             const int value = std::clamp(t.pattern->pitch_wheel[e.index].value, 0, 0x3fff);
             TrackEvent ev{.kind = EventKind::kPitch};
             ev.semitones = static_cast<float>(value - 0x2000) * kBendRange / 8192.0f;
-            Record(channel, tick, 1, ev);
+            Record(channel, tick, ev);
             break;
         }
 
@@ -528,15 +634,15 @@ void Player::HandleEvent(const Event& e, std::size_t section, bool& loop, uint32
         }
 
     case EventType::kLoop:
-        loop = true;
-        loop_time = std::max(loop_time, e.time);
-        return;
+        return e.time;
     }
 
     if (const std::optional<Event> next = NextEvent(e.track))
     {
         Insert(sections_[section], *next);
     }
+
+    return std::nullopt;
 }
 
 void Player::ProgramChange(uint8_t channel, uint8_t program, int64_t tick)
@@ -551,10 +657,10 @@ void Player::ProgramChange(uint8_t channel, uint8_t program, int64_t tick)
 
     const Page& page = drums ? group_.group.drum_pages[index] : group_.group.pages[index];
     const PresetKey key{.bank = drums ? kDrumBank : kPageBank, .program = page.program};
-    channel_page_[channel] = std::make_pair(key.bank, page.object);
+    channel_object_[channel] = page.object;
     TrackEvent e{.kind = EventKind::kPreset};
     e.preset = seqlib::midi::PresetIndex(presets_, key);
-    Record(channel, tick, 1, e);
+    Record(channel, tick, e);
 }
 
 void Player::Controller(uint8_t channel, uint8_t controller, uint8_t value, int64_t tick)
@@ -611,13 +717,13 @@ void Player::Controller(uint8_t channel, uint8_t controller, uint8_t value, int6
         break;
     }
 
-    Record(channel, tick, 1, e);
+    Record(channel, tick, e);
 }
 
 void Player::NoteOn(uint8_t channel, uint8_t key, uint8_t velocity, uint32_t end, std::size_t section, int64_t tick)
 {
     // A channel without a program plays no notes.
-    if (!channel_page_[channel])
+    if (!channel_object_[channel])
     {
         return;
     }
@@ -634,10 +740,10 @@ void Player::NoteOn(uint8_t channel, uint8_t key, uint8_t velocity, uint32_t end
     n.key = key;
     n.id = next_note_++;
     n.on = tick;
-    n.voices = VoicesOf(group_.pool, channel_page_[channel]->second, key);
+    n.voices = VoicesOf(group_.pool, *channel_object_[channel], key);
     TrackEvent e{.kind = EventKind::kNoteOn, .key = key, .value = velocity};
     e.note = n.id;
-    Record(channel, tick, 2, e);
+    Record(channel, tick, e);
 
     const SectionState& s = sections_[section];
     active_.push_back({end, section, s.clock, s.offset[static_cast<std::size_t>(s.clock)], notes_.size()});
@@ -666,9 +772,9 @@ bool Player::ReleaseNotes()
     return !active_.empty();
 }
 
-void Player::Record(uint8_t channel, int64_t tick, int rank, TrackEvent e)
+void Player::Record(uint8_t channel, int64_t tick, TrackEvent e)
 {
-    events_[channel].push_back({tick, rank, order_++, e});
+    events_[channel].push_back({tick, RankOf(e.kind), order_++, e});
 }
 
 bool Player::Step()
@@ -727,12 +833,12 @@ double Player::SecondsAt(int64_t tick) const
             break;
         }
 
-        seconds += static_cast<double>(t - at) * 60.0 / (bpm * ntdlib::musyx::kTicksPerBeat);
+        seconds += TicksToSeconds(t - at, bpm);
         at = t;
         bpm = b;
     }
 
-    return seconds + static_cast<double>(tick - at) * 60.0 / (bpm * ntdlib::musyx::kTicksPerBeat);
+    return seconds + TicksToSeconds(tick - at, bpm);
 }
 
 int64_t Player::TickAt(double seconds) const
@@ -742,7 +848,7 @@ int64_t Player::TickAt(double seconds) const
     double bpm = tempo_.empty() ? 120.0 : tempo_.front().second;
     for (const auto& [t, b] : tempo_)
     {
-        const double next = at_seconds + static_cast<double>(t - at) * 60.0 / (bpm * ntdlib::musyx::kTicksPerBeat);
+        const double next = at_seconds + TicksToSeconds(t - at, bpm);
         if (next >= seconds)
         {
             break;
@@ -753,7 +859,7 @@ int64_t Player::TickAt(double seconds) const
         bpm = b;
     }
 
-    return at + static_cast<int64_t>(std::ceil((seconds - at_seconds) * bpm * ntdlib::musyx::kTicksPerBeat / 60.0));
+    return at + static_cast<int64_t>(std::ceil(SecondsToTicks(seconds - at_seconds, bpm)));
 }
 
 Performance Player::Finish(const PerformOptions& options)
@@ -766,9 +872,39 @@ Performance Player::Finish(const PerformOptions& options)
         perf.approximations[what] += n;
     }
 
-    // Each note ends where its voices do. A voice that ignores the release plays its sample to the end. A voice that
-    // stops by itself ends then.
     const int64_t last_tick = TickAt(static_cast<double>(runs_) * kRunSeconds);
+    const double sound_end = EndNotes(perf, last_tick);
+    AddEvents(perf);
+    if (!jumps_.empty())
+    {
+        MarkLoop(perf, options);
+    }
+    else
+    {
+        EndAfterLastSound(perf, last_tick, sound_end);
+    }
+
+    return perf;
+}
+
+// The seconds that voice `v` sounds after its end: its release, or the fade of a voice that stops.
+double TailOf(const MacroVoice& v)
+{
+    if (v.key_off == KeyOff::kRelease && v.envelope)
+    {
+        return v.envelope->release_ms / 1000.0;
+    }
+    if (v.key_off == KeyOff::kCut || v.stop_ms)
+    {
+        return kCutMs / 1000.0;
+    }
+
+    return 0.0;
+}
+
+double Player::EndNotes(Performance& perf, int64_t last_tick)
+{
+    // Each note ends where its voices do.
     double sound_end = 0.0;
     for (NoteRecord& n : notes_)
     {
@@ -782,47 +918,16 @@ Performance Player::Finish(const PerformOptions& options)
         for (const KeyVoice& kv : n.voices)
         {
             const MacroVoice& v = instruments_.Macro(kv.macro);
-            for (const std::string& a : v.approximations)
-            {
-                approximated.insert(a);
-            }
+            approximated.insert(v.approximations.begin(), v.approximations.end());
             if (!v.sample)
             {
                 continue;
             }
 
-            double end = off_seconds;
-            if (v.key_off == KeyOff::kIgnored)
-            {
-                const Sample* sample = instruments_.GetSample(*v.sample);
-                const int key = v.fixed_key.value_or(kv.key + v.key_shift);
-                const double ratio =
-                    sample != nullptr ? std::pow(2.0, (key - sample->key) / 12.0 + v.detune_cents / 1200.0) : 1.0;
-                const std::optional<double> length = instruments_.SampleSeconds(*v.sample, ratio);
-                if (length)
-                {
-                    end = on_seconds + *length;
-                }
-                else
-                {
-                    approximated.insert("voices that loop and ignore the release stop at their note's end");
-                }
-            }
-            if (v.stop_ms)
-            {
-                end = std::min(end, on_seconds + *v.stop_ms / 1000.0);
-            }
-
+            const double end = VoiceEnd(v, kv.key, on_seconds, off_seconds, approximated);
             latest = std::max(latest.value_or(end), end);
             earliest = std::min(earliest.value_or(end), end);
-            if (v.key_off == KeyOff::kRelease && v.envelope)
-            {
-                tail = std::max(tail, v.envelope->release_ms / 1000.0);
-            }
-            else if (v.key_off == KeyOff::kCut || v.stop_ms)
-            {
-                tail = std::max(tail, kCutMs / 1000.0);
-            }
+            tail = std::max(tail, TailOf(v));
         }
         for (const std::string& a : approximated)
         {
@@ -837,10 +942,43 @@ Performance Player::Finish(const PerformOptions& options)
         const int64_t end = std::max(n.on, end_seconds == off_seconds ? off : TickAt(end_seconds));
         TrackEvent e{.kind = EventKind::kNoteOff, .key = n.key};
         e.note = n.id;
-        Record(n.channel, end, 0, e);
+        Record(n.channel, end, e);
         sound_end = std::max(sound_end, end_seconds + tail);
     }
 
+    return sound_end;
+}
+
+double Player::VoiceEnd(const MacroVoice& v, int key, double on_seconds, double off_seconds,
+                        std::set<std::string>& approximated)
+{
+    double end = off_seconds;
+    if (v.key_off == KeyOff::kIgnored)
+    {
+        // The voice's key, moved by the macro, against the sample's.
+        const Sample* sample = instruments_.GetSample(*v.sample);
+        const int voice_key = v.fixed_key.value_or(key + v.key_shift);
+        const double ratio =
+            sample != nullptr ? std::pow(2.0, (voice_key - sample->key) / 12.0 + v.detune_cents / 1200.0) : 1.0;
+        if (const std::optional<double> length = instruments_.SampleSeconds(*v.sample, ratio))
+        {
+            end = on_seconds + *length;
+        }
+        else
+        {
+            approximated.insert("voices that loop and ignore the release stop at their note's end");
+        }
+    }
+    if (v.stop_ms)
+    {
+        end = std::min(end, on_seconds + *v.stop_ms / 1000.0);
+    }
+
+    return end;
+}
+
+void Player::AddEvents(Performance& perf)
+{
     // The events of each channel, in order, without settings that repeat the last value.
     for (std::size_t c = 0; c < kChannels; c++)
     {
@@ -874,77 +1012,80 @@ Performance Player::Finish(const PerformOptions& options)
             perf.tracks[c].push_back(e);
         }
     }
+
     for (const auto& [tick, bpm] : tempo_)
     {
         perf.tempo.push_back({static_cast<uint32_t>(tick), bpm});
     }
+}
 
-    // The main loop: the first pass that plays as the next does, played `options.loops` times.
-    const ntdlib::sequence_export::LoopRules rules;
-    std::optional<std::size_t> marked;
+void Player::MarkLoop(Performance& perf, const PerformOptions& options) const
+{
+    // The passes of the main loop, from the loop start to each jump back.
     std::vector<std::pair<int64_t, int64_t>> passes;
-    if (!jumps_.empty())
+    int64_t start = LoopStart(master_);
+    for (const int64_t jump : jumps_)
     {
-        const std::size_t section = master_;
-        const uint32_t loop_start = song_.loop_starts[song_.sections ? section : 0];
-        int64_t start = loop_start;
-        for (const int64_t jump : jumps_)
-        {
-            passes.emplace_back(start, jump);
-            start = jump;
-        }
-        const auto loops = static_cast<std::size_t>(std::max(options.loops, 1));
-        for (std::size_t k = 0; k + 1 < passes.size() && k + loops <= passes.size(); k++)
-        {
-            const auto [s, e] = passes[k];
-            if (ntdlib::sequence_export::RepeatsAsTheGame(perf, {}, static_cast<uint32_t>(s), static_cast<uint32_t>(e),
-                                                          rules))
-            {
-                marked = k;
-                break;
-            }
-        }
-
-        const std::size_t last = marked ? *marked + loops - 1 : std::min(loops, passes.size()) - 1;
-        const auto end = static_cast<uint32_t>(passes[last].second);
-        if (marked)
-        {
-            const auto [s, e] = passes[*marked];
-            perf.loop = Performance::Loop{static_cast<uint32_t>(s), static_cast<uint32_t>(e)};
-            perf.loops = static_cast<int>(loops);
-            const ntdlib::sequence_export::PassStart next =
-                ntdlib::sequence_export::PassStartAt(perf, {}, static_cast<uint32_t>(e));
-            ntdlib::sequence_export::RestoreAtLoopStart(perf, {}, next, rules);
-        }
-        // The run went on past the end to find the loop. CutAt leaves out the tracks' events after the end. The tempo
-        // changes after it go too. A tempo table that starts again in each pass makes some.
-        seqlib::midi::ClampNoteOffs(perf, end);
-        seqlib::midi::CutAt(perf, end);
-        std::erase_if(perf.tempo, [end](const Performance::Tempo& t) { return t.tick > end; });
-        perf.end_tick = end;
-        perf.seconds = SecondsAt(end);
+        passes.emplace_back(start, jump);
+        start = jump;
     }
-    else
+
+    // The first pass that plays as the next does.
+    const ntdlib::sequence_export::LoopRules rules;
+    const auto loops = static_cast<std::size_t>(std::max(options.loops, 1));
+    std::optional<std::size_t> marked;
+    for (std::size_t k = 0; k + 1 < passes.size() && k + loops <= passes.size(); k++)
     {
-        perf.truncated = truncated_;
-        uint32_t last_event = 0;
-        for (const std::vector<TrackEvent>& events : perf.tracks)
+        const auto [s, e] = passes[k];
+        if (ntdlib::sequence_export::RepeatsAsTheGame(perf, {}, static_cast<uint32_t>(s), static_cast<uint32_t>(e),
+                                                      rules))
         {
-            for (const TrackEvent& e : events)
-            {
-                last_event = std::max(last_event, e.tick);
-            }
-        }
-        perf.seconds = truncated_ ? SecondsAt(last_tick) : std::max(sound_end, SecondsAt(last_event));
-        perf.end_tick = std::max(last_event, static_cast<uint32_t>(TickAt(perf.seconds)));
-        if (truncated_)
-        {
-            seqlib::midi::ClampNoteOffs(perf, static_cast<uint32_t>(last_tick));
-            perf.end_tick = static_cast<uint32_t>(last_tick);
+            marked = k;
+            break;
         }
     }
 
-    return perf;
+    // That pass is the loop, played `options.loops` times. Without one, the performance plays as many passes.
+    const std::size_t last = marked ? *marked + loops - 1 : std::min(loops, passes.size()) - 1;
+    const auto end = static_cast<uint32_t>(passes[last].second);
+    if (marked)
+    {
+        const auto [s, e] = passes[*marked];
+        perf.loop = Performance::Loop{static_cast<uint32_t>(s), static_cast<uint32_t>(e)};
+        perf.loops = static_cast<int>(loops);
+        const ntdlib::sequence_export::PassStart next =
+            ntdlib::sequence_export::PassStartAt(perf, {}, static_cast<uint32_t>(e));
+        ntdlib::sequence_export::RestoreAtLoopStart(perf, {}, next, rules);
+    }
+
+    // The run went on past the end to find the loop. CutAt leaves out the tracks' events after the end. The tempo
+    // changes after it go too. A tempo table that starts again in each pass makes some.
+    seqlib::midi::ClampNoteOffs(perf, end);
+    seqlib::midi::CutAt(perf, end);
+    std::erase_if(perf.tempo, [end](const Performance::Tempo& t) { return t.tick > end; });
+    perf.end_tick = end;
+    perf.seconds = SecondsAt(end);
+}
+
+void Player::EndAfterLastSound(Performance& perf, int64_t last_tick, double sound_end) const
+{
+    perf.truncated = truncated_;
+    uint32_t last_event = 0;
+    for (const std::vector<TrackEvent>& events : perf.tracks)
+    {
+        for (const TrackEvent& e : events)
+        {
+            last_event = std::max(last_event, e.tick);
+        }
+    }
+
+    perf.seconds = truncated_ ? SecondsAt(last_tick) : std::max(sound_end, SecondsAt(last_event));
+    perf.end_tick = std::max(last_event, static_cast<uint32_t>(TickAt(perf.seconds)));
+    if (truncated_)
+    {
+        seqlib::midi::ClampNoteOffs(perf, static_cast<uint32_t>(last_tick));
+        perf.end_tick = static_cast<uint32_t>(last_tick);
+    }
 }
 
 } // namespace
@@ -967,7 +1108,7 @@ std::optional<uint16_t> PresetObject(const SongGroup& group, const PresetKey& pr
 Performance PlaySong(const ntdlib::musyx::Song& song, const GameSong& listed, Instruments& instruments,
                      const PerformOptions& options)
 {
-    Player player(song, listed, instruments.Group(), instruments);
+    Player player(song, listed, instruments);
 
     // The passes that mark the loop: the loops asked for, and more to find one that repeats as the next.
     player.Run(static_cast<std::size_t>(std::max(options.loops, 1)) + kMorePasses + 1);

@@ -247,6 +247,11 @@ regions become zones with:
   whose high velocity is at or above it. A drum set gives each key a zone.
 - The region's wave, root key, tuning, volume and pan. A drum plays its wave at the wave's rate.
   The drum's key is the zone's root key.
+- The DSP's pitch limit. The DSP reads at most just under 8 samples of a wave for each sample of
+  its output. Keys whose notes start past that limit play at the limit, as in the game. A
+  separate zone plays them all at the limit, with a scale tuning of 0. A bend or a vibrato still
+  moves such a note. In the game, the note stays at the limit for as long as its pitch would
+  pass it.
 - The instrument's effects. Effects that follow the key get a zone per key. Random effects keep
   their base value. Effects that follow the velocity keep their value at the top of each
   velocity region.
@@ -260,7 +265,7 @@ regions become zones with:
   rate. The SFZ files keep the game's rate.
 - A vibrato LFO at the track's speed and delay. CC1 sets its depth.
 - Loops repeated as needed to meet SoundFont padding rules: 8 samples before, at least 32
-  within, and 8 after. Playback doesn't change.
+  within, and 32 after. Playback doesn't change.
 
 An ADPCM wave's loop repeats from the decoder history that the wave system stores. Where that
 history differs from the decoder's state at the loop start, dolphinsf2 unrolls the loop once.
@@ -407,6 +412,11 @@ eight where a song has them:
 
 SoundFont output follows the specification and targets FluidSynth. Player differences remain:
 
+- **Level.** FluidSynth runs the SoundFont low-pass filter on every note. dolphinsf2's zones
+  leave that filter open. The filter still divides the level by the square root of its Q.
+  FluidSynth converts the default resonance of 0 dB to a Q of 0.707. Every note therefore plays
+  1.5 dB louder than the SoundFont specifies. Multiplying FluidSynth's gain by 0.84 gives the
+  specified level.
 - **Pan.** JAudio2's pan law is FluidSynth's sin/cos law. TinySoundFont uses a square-root law.
   Its pans come out slightly narrower.
 - **Envelopes.** Times follow the specification's 100 dB range. FluidSynth uses 96 dB. Decays
@@ -435,7 +445,7 @@ converters and the PSF players share: seqlib (MIDI, SoundFont 2 and SFZ), xsflib
 and ntdlib (Nintendo's formats). They're submodules in `externals/`. Clone with
 `git clone --recursive`, or run `git submodule update --init` in a checkout. There are no other
 build dependencies. dolphinsf2 supports macOS on Apple Silicon and Windows x64 with clang-cl.
-CI builds and tests both.
+CI builds both. It runs the tests on Windows.
 
 - **Windows:** install Visual Studio 2022 with "Desktop development with C++". That workload
   includes CMake. Add the "C++ Clang tools for Windows" component. Use Developer PowerShell or

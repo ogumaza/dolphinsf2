@@ -4,9 +4,10 @@
 //
 // A voice runs its macro's steps until a step waits. A wait's flags say when the wait ends: after a time, when the note
 // is released, or when the sample ends. A trap sends the voice to another step when the note is released. FollowMacro
-// runs the steps twice on a clock in milliseconds: for a note that the player holds, and for a note that the player
-// releases after every wait of a fixed time. The first run gives the voice's settings and any stop of its own. The
-// second gives what the release does.
+// runs the steps three times on a clock in milliseconds: for a note that the player holds, for a note that the player
+// releases after every wait of a fixed time, and for a note that the player releases 1 ms after its start. The first
+// run gives the voice's settings and any stop of its own. The second gives what the release does. The third checks that
+// an early release does the same.
 
 #include "musyx_voices.h"
 
@@ -130,361 +131,454 @@ struct Run
     bool envelope_before_sample = false;
 };
 
-// Run `macro`'s steps for a note that the player releases `release_ms` after its start: kNever for a note that it
-// holds.
-Run RunMacro(const Pool& pool, uint16_t macro, double release_ms)
+// The wait of a step: its time, in ticks or milliseconds, and what else ends it.
+struct Wait
 {
-    Run run;
-    MacroVoice& v = run.voice;
-    const auto note = [&v](const std::string& what)
-    {
-        if (std::find(v.approximations.begin(), v.approximations.end(), what) == v.approximations.end())
-        {
-            v.approximations.push_back(what);
-        }
-    };
+    uint16_t time = 0;
+    bool ms = false;
+    bool absolute = false;      // the time counts from the note's start, not from the step
+    bool on_release = false;    // the note's release ends the wait
+    bool on_sample_end = false; // the sample's end ends the wait
+    bool random = false;        // MusyX waits a random time, up to `time`
+};
 
-    auto macro_it = pool.macros.find(macro);
-    if (macro_it == pool.macros.end())
+// The wait of WaitTicks or WaitMs step `s`.
+Wait WaitOf(const MacroStep& s)
+{
+    return {.time = s.Half(6),
+            .ms = s.Op() == MacroOp::kWaitMs || (s.Byte(5) & 1) != 0,
+            .absolute = (s.Byte(4) & 1) != 0,
+            .on_release = (s.Byte(1) & 1) != 0,
+            .on_sample_end = (s.Byte(3) & 1) != 0,
+            .random = (s.Byte(2) & 1) != 0};
+}
+
+// The wait of AddKey or SetKey step `s`. The key commands wait without flags.
+Wait KeyWaitOf(const MacroStep& s)
+{
+    return {.time = s.Half(6), .ms = (s.Byte(5) & 1) != 0, .absolute = (s.Byte(4) & 1) != 0};
+}
+
+// A run of a macro's steps for a note that the player releases `release_ms` after its start: kNever for a note that it
+// holds.
+class MacroRun
+{
+public:
+    MacroRun(const Pool& pool, double release_ms) : pool_(pool), release_ms_(release_ms), released_(release_ms <= 0.0)
     {
-        return run;
     }
 
-    const std::vector<MacroStep>* steps = &macro_it->second;
-    std::size_t at = 0;
-    double now = 0.0;
-    bool released = release_ms <= 0.0;
-    std::optional<std::pair<uint16_t, uint16_t>> trap;
-    std::optional<uint8_t> tremolo_lfo;
-    double lfo_period_ms[2] = {0.0, 0.0};
-    double tremolo_scale = 0.0, tremolo_mod_add = 0.0;
-    bool tremolo_set = false;
-    double mod_vibrato_cents = 0.0;
+    // Run macro `macro` from its first step. A macro that the pool lacks starts nothing.
+    Run Follow(uint16_t macro);
 
-    // Jump to step `step` of macro `id`. A macro that the pool lacks ends the voice.
-    const auto jump = [&](uint16_t id, uint16_t step)
+private:
+    // Whether the run goes on after a step.
+    enum class Next
     {
-        const auto target = pool.macros.find(id);
-        if (target == pool.macros.end())
-        {
-            return false;
-        }
-
-        steps = &target->second;
-        at = step;
-        return true;
+        kStep,
+        kEnd,
     };
 
-    for (int count = 0; count < kMostSteps && at < steps->size(); count++)
+    // A step in a macro.
+    struct Place
     {
-        const MacroStep s = (*steps)[at++];
-        switch (s.Op())
+        const std::vector<MacroStep>* steps = nullptr;
+        std::size_t at = 0;
+    };
+
+    // Run step `s`.
+    Next Step(const MacroStep& s);
+
+    // Go on at step `step` of macro `macro`. Return false if the pool lacks the macro.
+    bool Jump(uint16_t macro, uint16_t step);
+
+    // Release the note. The run goes on where the trap of the release points.
+    void TakeTrap();
+
+    // Let the time of `wait` pass. A release during the wait takes the trap of the release. Return kEnd if the voice
+    // waits for ever.
+    Next Pass(const Wait& wait);
+
+    // Set up the vibrato of Vibrato step `s`, or turn it off.
+    void SetVibrato(const MacroStep& s);
+
+    // Add `what` to the voice's approximations, once.
+    void Note(const std::string& what);
+
+    const Pool& pool_;
+    const double release_ms_;
+    Run run_;
+    Place place_;
+    double now_ = 0.0;
+    bool released_;
+    std::optional<Place> trap_; // where the trap of the release goes on
+
+    // The tremolo's setup: the LFO that it follows, the two LFOs' periods, and SetupTremolo's scale and addition.
+    std::optional<uint8_t> tremolo_lfo_;
+    double lfo_period_ms_[2] = {0.0, 0.0};
+    double tremolo_scale_ = 0.0;
+    double tremolo_mod_add_ = 0.0;
+    bool tremolo_set_ = false;
+
+    double mod_vibrato_cents_ = 0.0; // the vibrato depth that the mod wheel adds at its top (ModulationToVibrato)
+};
+
+Run MacroRun::Follow(uint16_t macro)
+{
+    if (!Jump(macro, 0))
+    {
+        return std::move(run_);
+    }
+
+    for (int count = 0; count < kMostSteps && place_.at < place_.steps->size(); count++)
+    {
+        if (Step((*place_.steps)[place_.at++]) == Next::kEnd)
         {
-        case MacroOp::kEnd:
-        case MacroOp::kStop:
-            return run;
-
-        case MacroOp::kGoto:
-            if (!jump(s.Half(2), s.Half(4)))
-            {
-                return run;
-            }
-            break;
-
-        case MacroOp::kTrapEvent:
-            if (s.Byte(1) == kReleaseTrap && pool.macros.contains(s.Half(2)))
-            {
-                trap = std::make_pair(s.Half(2), s.Half(4));
-            }
-            else if (s.Byte(1) != kReleaseTrap)
-            {
-                note("traps of a sample's end or of messages left out");
-            }
-            break;
-
-        case MacroOp::kUntrapEvent:
-            if (s.Byte(1) == kReleaseTrap)
-            {
-                trap.reset();
-            }
-            break;
-
-        case MacroOp::kWaitTicks:
-        case MacroOp::kWaitMs:
-        case MacroOp::kAddKey:
-        case MacroOp::kSetKey:
-            {
-                const MacroOp op = s.Op();
-                if (op == MacroOp::kAddKey)
-                {
-                    const auto add = static_cast<int8_t>(s.Byte(1));
-                    v.key_shift = s.Byte(3) != 0 ? add : v.key_shift + add;
-                    v.detune_cents = static_cast<int8_t>(s.Byte(2));
-                    if (v.fixed_key)
-                    {
-                        v.fixed_key = s.Byte(3) != 0 ? std::nullopt : std::optional<int>(*v.fixed_key + add);
-                    }
-                }
-                else if (op == MacroOp::kSetKey)
-                {
-                    v.fixed_key = s.Byte(1) & 0x7f;
-                    v.detune_cents = static_cast<int8_t>(s.Byte(2));
-                }
-
-                // The key commands wait without flags.
-                const bool key_command = op == MacroOp::kAddKey || op == MacroOp::kSetKey;
-                const bool on_release = !key_command && (s.Byte(1) & 1) != 0;
-                const bool on_sample_end = !key_command && (s.Byte(3) & 1) != 0;
-                const bool absolute = (s.Byte(4) & 1) != 0;
-                const bool ms = op == MacroOp::kWaitMs || (s.Byte(5) & 1) != 0;
-                const uint16_t time = s.Half(6);
-                if (time == 0)
-                {
-                    break;
-                }
-                if (!key_command && (s.Byte(2) & 1) != 0)
-                {
-                    note("random waits take their longest time");
-                }
-                if (!ms)
-                {
-                    note("waits in ticks take a tempo of 120");
-                }
-
-                // A wait for the release ends at once after the release, and one for the sample's end at once when the
-                // sample isn't playing.
-                if ((on_release && released) || (on_sample_end && !run.sample_started))
-                {
-                    break;
-                }
-
-                // A tick at 120 beats a minute lasts 1000 / 768 ms.
-                const double length = time == kWaitForever ? kNever : (ms ? time : time * 1000.0 / 768.0);
-                double end = absolute ? length : now + length;
-                if (on_release)
-                {
-                    end = std::min(end, std::max(now, release_ms));
-                }
-
-                // A trap of the release jumps when the note is released during the wait.
-                if (trap && !released && release_ms <= end)
-                {
-                    now = std::max(now, release_ms);
-                    released = true;
-                    const auto [id, step] = *trap;
-                    trap.reset();
-                    jump(id, step);
-                    break;
-                }
-                if (end == kNever)
-                {
-                    // The voice waits for ever, or for its sample's end. Nothing it does later changes its sound.
-                    return run;
-                }
-
-                now = std::max(now, end);
-                released = released || release_ms <= now;
-                break;
-            }
-
-        case MacroOp::kStartSample:
-            if (s.Byte(3) != 0 || s.word1 != 0)
-            {
-                note("samples that start after their first sample play from their start");
-            }
-            if (!run.sample_started)
-            {
-                v.sample = s.Half(1);
-                run.sample_started = true;
-                run.envelope_before_sample = v.envelope.has_value();
-            }
-            else
-            {
-                note("a second sample of a voice left out");
-            }
-            break;
-
-        case MacroOp::kStopSample:
-            if (!run.stop_at)
-            {
-                run.stop_at = now;
-            }
-            break;
-
-        case MacroOp::kKeyOff:
-            if (!run.release_at)
-            {
-                run.release_at = now;
-            }
-            break;
-
-        case MacroOp::kSetAdsr:
-            v.envelope = EnvelopeOf(pool, s.Half(1), s.Byte(3) != 0);
-            if (v.envelope && !v.envelope->dls && (v.envelope->decay_ms > 0.0 || v.envelope->release_ms > 0.0))
-            {
-                note("linear envelopes' decays and releases fall in decibels");
-            }
-            break;
-
-        case MacroOp::kSetPitchAdsr:
-            {
-                if (const std::optional<Envelope> e = EnvelopeOf(pool, s.Half(1), true))
-                {
-                    note("pitch envelopes fall in a line, not in decibels");
-                    const auto keys = static_cast<int8_t>(s.Byte(4));
-                    const auto cents = static_cast<int8_t>(s.Byte(5));
-                    const double range = keys * 100.0 + (keys >= 0 ? cents : -cents);
-                    v.pitch_envelope = PitchEnvelope{*e, range};
-                }
-                break;
-            }
-
-        case MacroOp::kScaleVolumeDls:
-            v.volume = (s.Byte(3) != 0 ? 1.0 : v.volume) * s.Half(1) / 4096.0;
-            break;
-
-        case MacroOp::kScaleVolume:
-            v.volume = (s.Byte(5) != 0 ? 1.0 : v.volume) * s.Byte(1) / 127.0;
-            if (s.Byte(2) != 0 || s.Byte(3) != 0 || s.Byte(4) != 0)
-            {
-                note("volume curves and volume additions left out");
-            }
-            break;
-
-        case MacroOp::kModeSelect:
-            v.dls_volume = s.Byte(1) != 0;
-            v.itd = s.Byte(2) == 0;
-            break;
-
-        case MacroOp::kVibrato:
-            {
-                const uint16_t time = s.Half(6);
-                if (time == 0)
-                {
-                    v.vibrato.reset();
-                    break;
-                }
-
-                // A negative key range turns the vibrato's phase. A negative cent range with no keys does too.
-                auto keys = static_cast<int8_t>(s.Byte(1));
-                auto cents = static_cast<int8_t>(s.Byte(2));
-                int key_range = keys;
-                int cent_range = cents;
-                if (keys < 0)
-                {
-                    key_range = -keys;
-                    cent_range = cents < 0 ? -cents : cents;
-                }
-                else if (cents < 0)
-                {
-                    key_range = keys == 0 ? 0 : keys - 1;
-                    cent_range = keys == 0 ? -cents : 100 - cents;
-                }
-                if (keys < 0 || (keys == 0 && cents < 0))
-                {
-                    note("vibratos that start at the bottom of their sine start at the top");
-                }
-
-                Vibrato vib;
-                vib.delay_ms = now;
-                vib.period_ms = (s.Byte(5) & 1) != 0 ? time : time * 1000.0 / 768.0;
-                vib.depth_cents = key_range * 100.0 + cent_range;
-                vib.mod_depth_cents = mod_vibrato_cents;
-                vib.mod_scales_depth = (s.Byte(3) & 3) != 0;
-                v.vibrato = vib;
-                break;
-            }
-
-        case MacroOp::kModulationToVibrato:
-            {
-                // MusyX keeps the depth in 256ths of a semitone.
-                const auto keys = static_cast<int8_t>(s.Byte(1));
-                const auto cents = static_cast<int8_t>(s.Byte(2));
-                const int scale = keys * 256 + (keys >= 0 ? cents * 256 / 100 : -(cents * 256 / 100));
-                mod_vibrato_cents = scale * 100.0 / 256.0;
-                if (v.vibrato)
-                {
-                    v.vibrato->mod_depth_cents = mod_vibrato_cents;
-                }
-                break;
-            }
-
-        case MacroOp::kSetupLfo:
-            if (s.Byte(1) < 2)
-            {
-                lfo_period_ms[s.Byte(1)] = s.Half(2);
-            }
-            break;
-
-        case MacroOp::kTremoloSelect:
-            // Controllers 0x82 and 0x83 are the voice's two LFOs.
-            if (s.Byte(1) == 0x82 || s.Byte(1) == 0x83)
-            {
-                tremolo_lfo = static_cast<uint8_t>(s.Byte(1) - 0x82);
-                if (static_cast<int16_t>(s.Half(2)) != 100)
-                {
-                    note("tremolos at other than 100% of their LFO take 100%");
-                }
-            }
-            else
-            {
-                note("tremolos from controllers other than an LFO left out");
-            }
-            break;
-
-        case MacroOp::kSetupTremolo:
-            tremolo_scale = s.Half(1) / 4096.0;
-            tremolo_mod_add = (s.word1 & 0xffff) / 4096.0;
-            tremolo_set = true;
-            break;
-
-        case MacroOp::kSetKeyGroup:
-            // A voice that sets a key group stops the group's other voices at once, or releases them. A SoundFont's
-            // exclusive class stops them.
-            v.key_group = s.Byte(1);
-            if (v.key_group != 0 && s.Byte(2) == 0)
-            {
-                note("key groups that release their voices stop them");
-            }
-            break;
-
-        // The voice's priority and age only decide which voice to take when the voices run out. The resampler's
-        // filter and the priority of the channel change nothing a SoundFont plays.
-        case MacroOp::kSetPriority:
-        case MacroOp::kAddPriority:
-        case MacroOp::kAddAgeCounter:
-        case MacroOp::kSetAgeCounter:
-        case MacroOp::kAgeCounterSpeed:
-        case MacroOp::kAgeCounterByVolume:
-        case MacroOp::kSrcModeSelect:
-            break;
-
-        default:
-            note("SoundMacro commands that dolphinsf2 doesn't follow left out");
-            break;
+            return std::move(run_);
         }
 
         // A release can come while a step runs: a trap then takes the voice on from the next step.
-        if (trap && !released && release_ms <= now)
+        if (trap_ && !released_ && release_ms_ <= now_)
         {
-            released = true;
-            const auto [id, step] = *trap;
-            trap.reset();
-            if (!jump(id, step))
-            {
-                return run;
-            }
+            TakeTrap();
         }
     }
 
     // The tremolo: its LFO swings between 0 and 1, and the volume drops by that times its depth. Without the mod wheel,
     // the depth is 1 minus the tremolo's scale. The mod wheel at its top multiplies the scale by the addition.
-    if (tremolo_set && tremolo_lfo && lfo_period_ms[*tremolo_lfo] > 0.0)
+    if (tremolo_set_ && tremolo_lfo_ && lfo_period_ms_[*tremolo_lfo_] > 0.0)
     {
-        v.tremolo = Tremolo{lfo_period_ms[*tremolo_lfo], 1.0 - tremolo_scale, 1.0 - tremolo_scale * tremolo_mod_add};
+        run_.voice.tremolo =
+            Tremolo{lfo_period_ms_[*tremolo_lfo_], 1.0 - tremolo_scale_, 1.0 - tremolo_scale_ * tremolo_mod_add_};
     }
 
-    return run;
+    return std::move(run_);
+}
+
+MacroRun::Next MacroRun::Step(const MacroStep& s)
+{
+    MacroVoice& v = run_.voice;
+    switch (s.Op())
+    {
+    case MacroOp::kEnd:
+    case MacroOp::kStop:
+        return Next::kEnd;
+
+    case MacroOp::kGoto:
+        return Jump(s.Half(2), s.Half(4)) ? Next::kStep : Next::kEnd;
+
+    case MacroOp::kTrapEvent:
+        if (s.Byte(1) != kReleaseTrap)
+        {
+            Note("traps of a sample's end or of messages left out");
+        }
+        else if (const auto target = pool_.macros.find(s.Half(2)); target != pool_.macros.end())
+        {
+            trap_ = Place{&target->second, s.Half(4)};
+        }
+        break;
+
+    case MacroOp::kUntrapEvent:
+        if (s.Byte(1) == kReleaseTrap)
+        {
+            trap_.reset();
+        }
+        break;
+
+    case MacroOp::kWaitTicks:
+    case MacroOp::kWaitMs:
+        return Pass(WaitOf(s));
+
+    case MacroOp::kAddKey:
+        {
+            const auto add = static_cast<int8_t>(s.Byte(1));
+            v.key_shift = s.Byte(3) != 0 ? add : v.key_shift + add;
+            v.detune_cents = static_cast<int8_t>(s.Byte(2));
+            if (v.fixed_key)
+            {
+                v.fixed_key = s.Byte(3) != 0 ? std::nullopt : std::optional<int>(*v.fixed_key + add);
+            }
+            return Pass(KeyWaitOf(s));
+        }
+
+    case MacroOp::kSetKey:
+        v.fixed_key = s.Byte(1) & 0x7f;
+        v.detune_cents = static_cast<int8_t>(s.Byte(2));
+        return Pass(KeyWaitOf(s));
+
+    case MacroOp::kStartSample:
+        if (s.Byte(3) != 0 || s.word1 != 0)
+        {
+            Note("samples that start after their first sample play from their start");
+        }
+        if (!run_.sample_started)
+        {
+            v.sample = s.Half(1);
+            run_.sample_started = true;
+            run_.envelope_before_sample = v.envelope.has_value();
+        }
+        else
+        {
+            Note("a second sample of a voice left out");
+        }
+        break;
+
+    case MacroOp::kStopSample:
+        if (!run_.stop_at)
+        {
+            run_.stop_at = now_;
+        }
+        break;
+
+    case MacroOp::kKeyOff:
+        if (!run_.release_at)
+        {
+            run_.release_at = now_;
+        }
+        break;
+
+    case MacroOp::kSetAdsr:
+        v.envelope = EnvelopeOf(pool_, s.Half(1), s.Byte(3) != 0);
+        if (v.envelope && !v.envelope->dls && (v.envelope->decay_ms > 0.0 || v.envelope->release_ms > 0.0))
+        {
+            Note("linear envelopes' decays and releases fall in decibels");
+        }
+        break;
+
+    case MacroOp::kSetPitchAdsr:
+        if (const std::optional<Envelope> e = EnvelopeOf(pool_, s.Half(1), true))
+        {
+            Note("pitch envelopes fall in a line, not in decibels");
+            const auto keys = static_cast<int8_t>(s.Byte(4));
+            const auto cents = static_cast<int8_t>(s.Byte(5));
+            const double range = keys * 100.0 + (keys >= 0 ? cents : -cents);
+            v.pitch_envelope = PitchEnvelope{*e, range};
+        }
+        break;
+
+    case MacroOp::kScaleVolumeDls:
+        v.volume = (s.Byte(3) != 0 ? 1.0 : v.volume) * s.Half(1) / 4096.0;
+        break;
+
+    case MacroOp::kScaleVolume:
+        v.volume = (s.Byte(5) != 0 ? 1.0 : v.volume) * s.Byte(1) / 127.0;
+        if (s.Byte(2) != 0 || s.Byte(3) != 0 || s.Byte(4) != 0)
+        {
+            Note("volume curves and volume additions left out");
+        }
+        break;
+
+    case MacroOp::kModeSelect:
+        v.dls_volume = s.Byte(1) != 0;
+        v.itd = s.Byte(2) == 0;
+        break;
+
+    case MacroOp::kVibrato:
+        SetVibrato(s);
+        break;
+
+    case MacroOp::kModulationToVibrato:
+        {
+            // MusyX keeps the depth in 256ths of a semitone.
+            const auto keys = static_cast<int8_t>(s.Byte(1));
+            const auto cents = static_cast<int8_t>(s.Byte(2));
+            const int scale = keys * 256 + (keys >= 0 ? cents * 256 / 100 : -(cents * 256 / 100));
+            mod_vibrato_cents_ = scale * 100.0 / 256.0;
+            if (v.vibrato)
+            {
+                v.vibrato->mod_depth_cents = mod_vibrato_cents_;
+            }
+            break;
+        }
+
+    case MacroOp::kSetupLfo:
+        if (s.Byte(1) < 2)
+        {
+            lfo_period_ms_[s.Byte(1)] = s.Half(2);
+        }
+        break;
+
+    case MacroOp::kTremoloSelect:
+        // Controllers 0x82 and 0x83 are the voice's two LFOs.
+        if (s.Byte(1) == 0x82 || s.Byte(1) == 0x83)
+        {
+            tremolo_lfo_ = static_cast<uint8_t>(s.Byte(1) - 0x82);
+            if (static_cast<int16_t>(s.Half(2)) != 100)
+            {
+                Note("tremolos at other than 100% of their LFO take 100%");
+            }
+        }
+        else
+        {
+            Note("tremolos from controllers other than an LFO left out");
+        }
+        break;
+
+    case MacroOp::kSetupTremolo:
+        tremolo_scale_ = s.Half(1) / 4096.0;
+        tremolo_mod_add_ = (s.word1 & 0xffff) / 4096.0;
+        tremolo_set_ = true;
+        break;
+
+    case MacroOp::kSetKeyGroup:
+        // A voice that sets a key group stops the group's other voices at once, or releases them. A SoundFont's
+        // exclusive class stops them.
+        v.key_group = s.Byte(1);
+        if (v.key_group != 0 && s.Byte(2) == 0)
+        {
+            Note("key groups that release their voices stop them");
+        }
+        break;
+
+    // The voice's priority and age only decide which voice to take when the voices run out. The resampler's filter and
+    // the priority of the channel change nothing a SoundFont plays.
+    case MacroOp::kSetPriority:
+    case MacroOp::kAddPriority:
+    case MacroOp::kAddAgeCounter:
+    case MacroOp::kSetAgeCounter:
+    case MacroOp::kAgeCounterSpeed:
+    case MacroOp::kAgeCounterByVolume:
+    case MacroOp::kSrcModeSelect:
+        break;
+
+    default:
+        Note("SoundMacro commands that dolphinsf2 doesn't follow left out");
+        break;
+    }
+
+    return Next::kStep;
+}
+
+bool MacroRun::Jump(uint16_t macro, uint16_t step)
+{
+    const auto target = pool_.macros.find(macro);
+    if (target == pool_.macros.end())
+    {
+        return false;
+    }
+
+    place_ = {&target->second, step};
+
+    return true;
+}
+
+void MacroRun::TakeTrap()
+{
+    released_ = true;
+    place_ = *trap_;
+    trap_.reset();
+}
+
+MacroRun::Next MacroRun::Pass(const Wait& wait)
+{
+    if (wait.time == 0)
+    {
+        return Next::kStep;
+    }
+
+    if (wait.random)
+    {
+        Note("random waits take their longest time");
+    }
+    if (!wait.ms)
+    {
+        Note("waits in ticks take a tempo of 120");
+    }
+
+    // A wait for the release ends at once after the release, and one for the sample's end at once when the sample isn't
+    // playing.
+    if ((wait.on_release && released_) || (wait.on_sample_end && !run_.sample_started))
+    {
+        return Next::kStep;
+    }
+
+    // A tick at 120 beats a minute lasts 1000 / 768 ms.
+    const double length = wait.time == kWaitForever ? kNever : (wait.ms ? wait.time : wait.time * 1000.0 / 768.0);
+    double end = wait.absolute ? length : now_ + length;
+    if (wait.on_release)
+    {
+        end = std::min(end, std::max(now_, release_ms_));
+    }
+
+    // A trap of the release jumps when the note is released during the wait.
+    if (trap_ && !released_ && release_ms_ <= end)
+    {
+        now_ = std::max(now_, release_ms_);
+        TakeTrap();
+        return Next::kStep;
+    }
+    if (end == kNever)
+    {
+        // The voice waits for ever, or for its sample's end. Nothing it does later changes its sound.
+        return Next::kEnd;
+    }
+
+    now_ = std::max(now_, end);
+    released_ = released_ || release_ms_ <= now_;
+
+    return Next::kStep;
+}
+
+void MacroRun::SetVibrato(const MacroStep& s)
+{
+    MacroVoice& v = run_.voice;
+    const uint16_t time = s.Half(6);
+    if (time == 0)
+    {
+        v.vibrato.reset();
+        return;
+    }
+
+    // A negative key range turns the vibrato's phase. A negative cent range with no keys does too.
+    const auto keys = static_cast<int8_t>(s.Byte(1));
+    const auto cents = static_cast<int8_t>(s.Byte(2));
+    int key_range = keys;
+    int cent_range = cents;
+    if (keys < 0)
+    {
+        key_range = -keys;
+        cent_range = cents < 0 ? -cents : cents;
+    }
+    else if (cents < 0)
+    {
+        key_range = keys == 0 ? 0 : keys - 1;
+        cent_range = keys == 0 ? -cents : 100 - cents;
+    }
+    if (keys < 0 || (keys == 0 && cents < 0))
+    {
+        Note("vibratos that start at the bottom of their sine start at the top");
+    }
+
+    Vibrato vib;
+    vib.delay_ms = now_;
+    vib.period_ms = (s.Byte(5) & 1) != 0 ? time : time * 1000.0 / 768.0;
+    vib.depth_cents = key_range * 100.0 + cent_range;
+    vib.mod_depth_cents = mod_vibrato_cents_;
+    vib.mod_scales_depth = (s.Byte(3) & 3) != 0;
+    v.vibrato = vib;
+}
+
+void MacroRun::Note(const std::string& what)
+{
+    std::vector<std::string>& notes = run_.voice.approximations;
+    if (std::find(notes.begin(), notes.end(), what) == notes.end())
+    {
+        notes.push_back(what);
+    }
+}
+
+// Run `macro`'s steps for a note that the player releases `release_ms` after its start: kNever for a note that it
+// holds.
+Run RunMacro(const Pool& pool, uint16_t macro, double release_ms)
+{
+    return MacroRun(pool, release_ms).Follow(macro);
+}
+
+// The pan of a voice that an entry of a keymap or a layer starts, under the pan `pan` of the objects before it. The
+// entry's pan `entry_pan` moves `pan` by its distance from the centre. A pan of 0x80 or more leaves `pan` as it is.
+int EntryPan(uint8_t entry_pan, int pan)
+{
+    return entry_pan < 0x80 ? std::clamp(entry_pan - 64 + pan, 0, 127) : pan;
 }
 
 // Add the voices that `key` starts on `object` to `out`, with `pan` and `volume` from the layers and keymaps before it.
@@ -507,7 +601,7 @@ void AddVoices(const Pool& pool, uint16_t object, int key, int pan, double volum
 
     case ObjectKind::kKeymap:
         {
-            // A key of a keymap that plays a keymap plays nothing. Its pan moves the note's from the centre.
+            // A key of a keymap that plays a keymap plays nothing.
             const auto keymap = pool.keymaps.find(object);
             if (keymap == pool.keymaps.end())
             {
@@ -520,8 +614,8 @@ void AddVoices(const Pool& pool, uint16_t object, int key, int pan, double volum
                 break;
             }
 
-            const int entry_pan = e.pan < 0x80 ? std::clamp(e.pan - 64 + pan, 0, 127) : pan;
-            AddVoices(pool, e.object, std::clamp(key + e.transpose, 0, 127), entry_pan, volume, level + 1, out);
+            AddVoices(pool, e.object, std::clamp(key + e.transpose, 0, 127), EntryPan(e.pan, pan), volume, level + 1,
+                      out);
             break;
         }
 
@@ -540,9 +634,8 @@ void AddVoices(const Pool& pool, uint16_t object, int key, int pan, double volum
                     continue;
                 }
 
-                const int entry_pan = e.pan < 0x80 ? std::clamp(e.pan - 64 + pan, 0, 127) : pan;
-                AddVoices(pool, e.object, std::clamp(key + e.transpose, 0, 127), entry_pan, volume * e.volume / 127.0,
-                          level + 1, out);
+                AddVoices(pool, e.object, std::clamp(key + e.transpose, 0, 127), EntryPan(e.pan, pan),
+                          volume * e.volume / 127.0, level + 1, out);
             }
             break;
         }
@@ -666,6 +759,11 @@ const Sample* Instruments::GetSample(uint16_t id)
     }
 
     return samples_.emplace(id, std::move(sample)).first->second.get();
+}
+
+const Sample* Instruments::SampleOf(const MacroVoice& voice)
+{
+    return voice.sample ? GetSample(*voice.sample) : nullptr;
 }
 
 std::optional<double> Instruments::SampleSeconds(uint16_t id, double ratio)

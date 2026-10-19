@@ -6,15 +6,13 @@
 
 #include <optional>
 #include <string>
-#include <utility>
 
 namespace dolphinsf2
 {
 namespace
 {
 
-// The settings of ntdlib's disc reader for dolphinsf2: its messages, and only the plain images that it reads (ISO and
-// NKit), with no system files but the header and the file table.
+// The messages of ntdlib's disc reader for dolphinsf2, and only the plain images that it reads (ISO and NKit).
 ntdlib::disc::GameOptions DiscOptions()
 {
     const std::string kConvert = "Convert it to an ISO image with Dolphin: right-click the game, then Convert File";
@@ -34,7 +32,6 @@ ntdlib::disc::GameOptions DiscOptions()
     {
         return path + " runs past the end of the disc image";
     };
-    options.system_files = false;
 
     return options;
 }
@@ -52,17 +49,6 @@ std::shared_ptr<ntdlib::disc::GameFiles> LoadDisc(const std::filesystem::path& p
     }
 
     return disc;
-}
-
-Game OpenDiscGame(const std::filesystem::path& image)
-{
-    std::optional<Game> game = Game::FromDiscFiles(LoadDisc(image, false), kProgram);
-    if (!game)
-    {
-        throw FormatError("no JAudio start-up archive (.baa or .aaf) on the disc");
-    }
-
-    return std::move(*game);
 }
 
 } // namespace dolphinsf2

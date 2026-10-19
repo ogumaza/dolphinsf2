@@ -64,7 +64,6 @@ jobs:
         with:
           program: dolphinsf2
           version: ${{ needs.version.outputs.version }}
-          documents: README.md LICENSE THIRD-PARTY-NOTICES.md
 
       - uses: ./externals/xsflib/ci/release-publish
         with:
