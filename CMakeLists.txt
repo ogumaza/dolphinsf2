@@ -3,7 +3,9 @@
 cmake_minimum_required(VERSION 3.20)
 # The version is dolphinsf2 --version's, and the one in the file properties of the Windows program and the Info.plist of
 # the macOS app. A release changes it here and adds its notes in docs/release-notes/.
-project(dolphinsf2 VERSION 1.2.1 LANGUAGES CXX)
+# C is for the compression libraries below. A build that doesn't find them installed compiles them from their C
+# sources.
+project(dolphinsf2 VERSION 1.3.0 LANGUAGES C CXX)
 
 # The libraries that dolphinsf2 shares with the other converters and the PSF players: seqlib for MIDI, SoundFont 2
 # and SFZ, xsflib for the common code and the build's templates, and ntdlib for Nintendo's formats. All three are
@@ -16,18 +18,29 @@ endif()
 include(externals/xsflib/cmake/XsflibProject.cmake)
 xsflib_project(WARNINGS_ON_EVERY_TARGET)
 set(NTDLIB_SEQUENCE_EXPORT ON) # the converters' layer, with their command line
+# ntdlib's disc_containers reads RVZ, WIA, GCZ and CISO images. xsflib provides the libraries that disc_containers
+# requires: zlib (GCZ), Zstandard (RVZ), liblzma (LZMA and LZMA2 in WIA and RVZ) and bzip2 (WIA and RVZ). xsflib takes
+# the installed copies where it finds them. Otherwise xsflib downloads each library when configuring. The build then
+# compiles it with dolphinsf2.
+set(XSFLIB_DISC_LIBRARIES ON)
+set(NTDLIB_DISC ON)
 xsflib_add_libraries(seqlib xsflib ntdlib)
 
 add_library(dolphinsf2_core STATIC
   src/disc.cpp
   src/input.cpp
   src/musyx_game.cpp
+  src/musyx_msm.cpp
+  src/musyx_puzzle.cpp
   src/musyx_voices.cpp
   src/musyx_player.cpp
-  src/musyx_convert.cpp)
+  src/musyx_convert.cpp
+  src/rel_module.cpp
+  src/yay0.cpp)
 target_include_directories(dolphinsf2_core PUBLIC src)
-target_link_libraries(dolphinsf2_core PUBLIC seqlib::seqlib xsflib::common ntdlib::common ntdlib::disc ntdlib::jaudio
-                      ntdlib::musyx ntdlib::wave ntdlib::sequence_export ntdlib::sequence_export_jaudio)
+target_link_libraries(dolphinsf2_core PUBLIC seqlib::seqlib xsflib::common ntdlib::common ntdlib::disc
+                      ntdlib::disc_containers ntdlib::jaudio ntdlib::musyx ntdlib::wave ntdlib::sequence_export
+                      ntdlib::sequence_export_jaudio)
 
 add_executable(dolphinsf2 src/main.cpp)
 target_link_libraries(dolphinsf2 PRIVATE dolphinsf2_core)
@@ -37,10 +50,11 @@ xsflib_add_version(dolphinsf2 VERSION ${PROJECT_VERSION} DEFINE DOLPHINSF2_VERSI
 
 # Finder cannot drop files onto a command-line executable. Package it in a macOS droplet app, with the version in its
 # Info.plist.
-set(app_description "Drop a GameCube game's start-up archive (.baa, .aaf) or disc image (.iso, .gcm) here to convert \
-its music to MIDI, SoundFont and SFZ. Output goes in a folder beside each file.")
+set(app_description "Drop a GameCube game's start-up archive (.baa, .aaf) or disc image (.iso, .gcm, .rvz, .wia, \
+.gcz, .ciso) here to convert its music to MIDI, SoundFont and SFZ. Output goes in a folder beside each file.")
 xsflib_add_droplet_tool(dolphinsf2 APP_NAME Dolphinsf2 VERSION ${PROJECT_VERSION} DESCRIPTION "${app_description}"
-                         PROMPT "Choose GameCube start-up archives (.baa, .aaf) or disc images (.iso, .gcm) to convert:")
+                         PROMPT "Choose GameCube start-up archives (.baa, .aaf) or disc images (.iso, .gcm, .rvz, \
+.wia, .gcz, .ciso) to convert:")
 
 include(CTest)
 if(BUILD_TESTING)

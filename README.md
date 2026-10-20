@@ -3,7 +3,7 @@
 dolphinsf2 converts the music and sound effects of Nintendo GameCube games to MIDI, SoundFont 2
 and SFZ. It reads games that play their sound through JAudio, the sound library in Nintendo
 EAD's JSystem. Both generations convert: the first JAudio and JAudio2. So do the files of Wii
-and Wii U games that use JAudio. dolphinsf2 also converts the music of two games that play it
+and Wii U games that use JAudio. dolphinsf2 also converts the music of a few games that play it
 through Factor 5's MusyX. Each sequence gets a MIDI file and a SoundFont containing its
 instruments. The SFZ files hold the same instruments at the game's level (see
 [SFZ files](#sfz-files)).
@@ -19,20 +19,37 @@ Games known to work:
 - The Legend of Zelda: Collector's Edition (JAudio2): the menu's sounds
 - Mario Golf: Toadstool Tour (USA, MusyX): the music
 - Mario Power Tennis (USA, MusyX): the music
+- Mario Party 4 (USA, disc version 1, MusyX): the music of the sound test
+- Pokémon Colosseum (USA, MusyX): the music
+- WarioWare, Inc.: Mega Party Game$! (USA, MusyX): the music
+- Nintendo Puzzle Collection (Japan, MusyX): the music of the menu, Dr. Mario, Panel de Pon and
+  Yoshi's Cookie
+- The NDDEMO disc (MusyX): the music. The disc's header names it NDDEMO. It never went on sale.
 
 Other games that use JAudio may convert too. Some play music from streamed audio files rather
 than sequences. dolphinsf2 leaves those out. The first JAudio plays a game's sound effects in
 one sequence. The game's code steers that sequence. dolphinsf2 leaves it out too.
 
-A MusyX game lists its songs and their volumes in a table in its code. dolphinsf2 reads that
-table in the two MusyX games above. dolphinsf2 recognizes each of them by its `main.dol`.
-Other MusyX games don't convert. Neither do the sound effects of these two.
+A MusyX game lists its songs in a table in its code. dolphinsf2 reads that table in Mario Golf:
+Toadstool Tour, Mario Power Tennis and Pokémon Colosseum. Mario Party 4 keeps its songs and
+their volumes in the file of Hudson's sound manager. dolphinsf2 converts the songs that the
+game's sound test lists and gives them the sound test's names. The sound test's streams are
+recorded audio, not songs. dolphinsf2 leaves them out. WarioWare, Inc.: Mega Party Game$! lists
+its music in its sound room. dolphinsf2 converts those songs and gives them the sound room's
+names. Nintendo Puzzle Collection keeps its music in the modules of its code: one for the menu
+and one for each game. dolphinsf2 converts the songs that the modules hold. Each song's name
+starts with its module's name. Dr. Mario's and Panel de Pon's songs take the names that the
+games' debug modules give them. The menu's songs take their numbers. Yoshi's Cookie's songs take
+the names of their files. The NDDEMO disc's code lists the paths of its songs' files. dolphinsf2
+names each song after its file. It recognizes each of these games by its `main.dol`. Other MusyX
+games don't convert. Neither do the sound effects of these games.
 
 dolphinsf2 reads a game's disc image, an extracted disc or a JAudio game's start-up archive:
 
-- **A disc image:** a plain `.iso` or `.gcm` file or an NKit image. dolphinsf2 can't read
-  compressed images (RVZ, WIA, GCZ and CISO). Convert them to ISO with Dolphin first:
-  right-click the game and choose Convert File.
+- **A disc image:** a plain `.iso` or `.gcm` file, an NKit image, or a compressed image in one
+  of four formats: RVZ (`.rvz`), WIA (`.wia`), GCZ (`.gcz`) or CISO (`.ciso`). Dolphin reads
+  all of them. Some discs that never went on sale leave the magic word out of their header.
+  dolphinsf2 reads such a disc when the rest of it is intact.
 - **An extracted disc:** its `sys/main.dol`. dolphinsf2 reads the game's other files from the
   `files` folder beside `sys`. To extract a disc in Dolphin, right-click the game and choose
   Properties. On the Filesystem tab, right-click the disc and choose Extract Entire Disc.
@@ -276,30 +293,62 @@ attenuates every zone equally and reports it. SFZ keeps the level.
 
 ### MusyX
 
-Mario Golf: Toadstool Tour and Mario Power Tennis play their music through MusyX 2, Factor 5's
-sound system. A song group holds the instruments. The group's pool holds the SoundMacros,
-keymaps, layers and tables. The group's project gives the programs and each song's MIDI setup. A
-sample directory and a sample file hold the samples. A song holds tracks of patterns: notes,
-controllers, program changes and the pitch and mod wheels on 16 MIDI channels. dolphinsf2
-follows these parts of MusyX:
+Mario Golf: Toadstool Tour, Mario Power Tennis and Pokémon Colosseum play their music through
+MusyX 2, Factor 5's sound system. Mario Party 4 plays its music through MusyX under Hudson's
+sound manager. WarioWare, Inc.: Mega Party Game$!, Nintendo Puzzle Collection and the NDDEMO
+disc play their music through MusyX too. The NDDEMO disc links an early build. A song group
+holds the instruments. The group's pool holds the SoundMacros, keymaps, layers and tables.
+The group's project gives the programs and each song's MIDI setup. A sample directory and a
+sample file hold the samples. A song holds tracks of patterns: notes, controllers, program
+changes and the pitch and mod wheels on 16 MIDI channels. dolphinsf2 follows these parts of
+MusyX:
 
 - The song table in the game's code. The table gives each song's file, MIDI setup and volume.
-  The songs keep the table's order and names.
+  The songs keep the table's order and names. Pokémon Colosseum's table gives each song's song
+  group instead of a volume. The game keeps its songs and song groups in FSYS archives. LZSS
+  compresses some of the archives' files. dolphinsf2 names each song after its file in the
+  archive.
+- Mario Party 4's sound manager. One file holds every group and song. The sound manager's
+  table gives each song's group, MIDI setup and volume. The sound test gives the songs' order
+  and names. The sound manager keeps its base groups loaded. A song's macros can start their
+  samples. dolphinsf2 adds those samples to the song's group.
+- WarioWare's sound room. One file holds all of the game's songs. The game loads every song
+  group of its MusyX project at once. The sound room's list gives each song's group, volume
+  and name. The songs keep the list's order.
+- Nintendo Puzzle Collection's modules. Yay0 packs each module of the game's code. A module
+  holds its songs and the files of its song groups, or a table of where another file holds
+  them. dolphinsf2 follows the module's relocations to the songs and the files. The menu gives
+  each song a volume from a table. So does Panel de Pon's table of songs. Yoshi's Cookie plays
+  its songs at the music volume that its options start at.
+- The NDDEMO disc's table of paths. The disc's code lists the paths of its nine songs' files.
+  One song group plays them all.
+- The master volume. Mario Power Tennis sets MusyX's master volume for music to 101 of 127.
+  WarioWare sets it to 100. MusyX multiplies each voice's volume by it, inside the volume
+  curve. dolphinsf2 puts it in each CC7 the same way.
+- The volume table. MusyX plays a voice's volume through a table of levels in the game's code.
+  A macro can pick the DLS curve instead: the volume squared. The table lies a little below
+  that curve. dolphinsf2 reads the table from the game's code. For the voices on the table, it
+  writes values of CC7, CC11 and the velocity whose squares follow the table.
+- The pitch wheel's range. A macro can set the range over which the pitch wheel bends its
+  voice. It's two semitones each way otherwise.
 - The MIDI setup: each channel's program, volume, pan, reverb send and chorus send at the
   song's start.
 - The sequencer. dolphinsf2 runs MusyX's sequencer once a millisecond, like the game. The
   sequencer follows the tracks and their patterns, the loops, the tempo table and the wheels.
-  dolphinsf2 marks the main loop as it does for JAudio2.
+  dolphinsf2 marks the main loop as it does for JAudio2. The NDDEMO disc's early build moves
+  the sequencer's clock on in whole 65536ths of a tick. Its songs play 0.8% slower than their
+  tempo says. dolphinsf2 plays them at the same speed.
 - The song's volume. MusyX multiplies each channel's volume by it, inside the volume curve.
-  dolphinsf2 scales each CC7 by it.
+  dolphinsf2 puts it in each CC7 the same way.
 - Timing and pitch. MusyX counts time and tunes its samples for an output of 32,000 Hz. The
   DSP's output runs at 32,028 Hz. In the game, songs therefore play 0.089% fast and 1.54 cents
   sharp. dolphinsf2 follows the output rate.
 - The SoundMacros. A program's keymaps and layers start macros on a note. A macro is a small
   program that the voice runs. The macro's steps set up the voice: the sample, volume, pan,
-  envelopes, vibrato, tremolo and key group, and what the release does. Each run of keys that
-  starts the same voice the same way becomes a zone. A macro's envelope is either a DLS envelope
-  or a linear one. A DLS envelope's decay and release fall in decibels.
+  envelopes, vibrato, tremolo and key group, and what the release does. A macro can pan its
+  voice by the key. Each run of keys that starts the same voice the same way becomes a zone. A
+  macro's envelope is either a DLS envelope or a linear one. A DLS envelope's decay and release
+  fall in decibels.
 - Drums. MusyX plays MIDI channel 10 from the song group's drum programs. dolphinsf2 copies
   that channel's presets to bank 128. SoundFont synths play channel 10 from that bank.
 - DSPADPCM and PCM samples, with their loops.
@@ -381,7 +430,7 @@ in MIDI, SoundFont or SFZ:
   1.5 cents lower than in the files.
 
 For MusyX games, the files differ from the game in these ways too. dolphinsf2 reports the first
-eight where a song has them:
+nine where a song has them:
 
 - **Linear envelopes.** A linear envelope's decay and release fall in a straight line in
   amplitude. SoundFont and SFZ envelopes fall in decibels. A fall to silence is fitted to reach
@@ -389,28 +438,33 @@ eight where a song has them:
   the game. The fitted fall goes on after the game's note has fallen silent.
 - **Pitch envelopes** fall in a straight line in SoundFont and SFZ. MusyX's pitch envelopes fall
   in decibels of their range. The fit reaches half the range at the same time.
-- **Volume curves.** Some voices play on MusyX's volume curve rather than the DLS curve.
-  dolphinsf2 plays them on the DLS curve. Below full volume, they play at somewhat different
-  levels.
+- **Volume curves.** MusyX looks up the product of a voice's volumes in its volume table.
+  SoundFont and SFZ players square the velocity, CC7 and CC11 one by one and multiply the
+  results. dolphinsf2 maps those values so that a note on the table starts at the table's level
+  of its velocity times the channel's volumes. The zone takes the table's level of the macro's
+  volume. The two levels multiply. Their product can differ slightly from the table's level of
+  the whole product. Volume changes during a note follow the players' squares. In a channel
+  whose notes play on both curves, CC7 and CC11 follow the DLS curve. There only the velocities
+  of the notes on the table follow the table.
 - **Key groups.** In MusyX, a note of a key group releases the group's sounding voices.
   SoundFont and SFZ stop them at once.
 - **Early releases.** A macro's steps can do something different for a note released before
   the macro's waits are over. dolphinsf2 plays every release as a late one.
 - **Layers.** A MIDI channel holds one note per key. Overlapping notes of the same key take
   extra channels. When all 16 channels are in use, such notes end early.
+- **Pitch wheel ranges.** In MusyX, each voice bends over its range. A MIDI channel bends all
+  its notes over one range. dolphinsf2 gives a channel the range of its latest note. A note
+  that still sounds then bends over the new range.
 - **Controllers that no voice reads.** A song can send controllers that MusyX's voices ignore.
   dolphinsf2 sends them as MIDI controllers. A synth may act on them.
 - **Other macro steps.** dolphinsf2 leaves out some rarer steps of a macro and approximates
   others. The report names each one.
 - **A song's end.** In the game, a song's voices stop when the song ends. In MIDI, the last
   notes play their releases. These tails are quiet.
-- **Mario Power Tennis's level.** The game plays its songs more quietly than MusyX's volume
-  model gives. The cause isn't known. dolphinsf2 scales every channel volume of the game's
-  songs by a fixed factor to match.
 - **Effect sends.** CC91 and CC93 hold each channel's reverb and chorus sends. Synths play them
   as reverb and chorus. In the game, the sends reach the effects that the game sets up.
 
-SoundFont output follows the specification and targets FluidSynth. Player differences remain:
+SoundFont output follows the specification. Player differences remain:
 
 - **Level.** FluidSynth runs the SoundFont low-pass filter on every note. dolphinsf2's zones
   leave that filter open. The filter still divides the level by the square root of its Q.
@@ -423,12 +477,20 @@ SoundFont output follows the specification and targets FluidSynth. Player differ
   and releases then fall 4% slower in decibels. Sustain levels are 4% shallower: -11.9 dB plays
   as -11.4 dB. FluidSynth also slows any release faster than 15.6 ms (-7200 timecents) to that
   time.
-- **Attenuation.** Like E-mu hardware, FluidSynth applies 0.4 of a zone's initial attenuation.
-  The specification applies all of it.
+- **Attenuation.** Like E-mu hardware, FluidSynth and BASSMIDI apply 0.4 of a zone's initial
+  attenuation. The specification applies all of it. dolphinsf2 therefore puts the attenuation of
+  a MusyX game's zones in a modulator without a source. The specification counts a missing
+  source as 1. The modulator then adds its whole amount to the attenuation. FluidSynth 2.4.5 and
+  later do the same. BASSMIDI and earlier versions of FluidSynth ignore such a modulator. The
+  zones then lose their attenuation. The zones of the JAudio games keep their attenuation in the
+  generator.
 - **Pitch.** FluidSynth rounds pitch down to whole cents. Fractional bends can be almost a cent
   flat. The beating of notes detuned by less than a cent changes too.
-- **Modulators.** TinySoundFont lacks SoundFont modulator support. CC1 vibrato depth has no
-  effect there.
+- **Modulators.** BASSMIDI 2.4.16 applies only some SoundFont modulators. TinySoundFont applies
+  none. Neither applies the CC1 and CC10 modulators. MusyX songs then pan wider than the
+  SoundFont sets. In BASSMIDI, CC1 gives the specification's default vibrato: 50 cents at CC1
+  127. In TinySoundFont, CC1 vibrato depth has no effect. The zones of the MusyX games lose their
+  attenuation there too.
 - **Tempo changes.** FluidSynth rounds its position to the nearest MIDI tick at each change and
   restarts its clock there. This can advance playback by half a tick per change: 1/30 ms at 120
   BPM with 7680 ticks per quarter note. TinySoundFont rounds tempo-change times down to
@@ -443,15 +505,19 @@ SoundFont output follows the specification and targets FluidSynth. Player differ
 Building requires C++20 and CMake 3.20 or later. It also requires three libraries that the
 converters and the PSF players share: seqlib (MIDI, SoundFont 2 and SFZ), xsflib (common code)
 and ntdlib (Nintendo's formats). They're submodules in `externals/`. Clone with
-`git clone --recursive`, or run `git submodule update --init` in a checkout. There are no other
-build dependencies. dolphinsf2 supports macOS on Apple Silicon and Windows x64 with clang-cl.
-CI builds both. It runs the tests on Windows.
+`git clone --recursive`, or run `git submodule update --init` in a checkout. Compressed disc
+images require four more libraries: zlib, Zstandard, liblzma and bzip2. CMake uses the installed
+copies where it finds them. It downloads the others when it configures the build. The build then
+compiles them and links them into dolphinsf2. The download requires an internet connection.
+dolphinsf2 supports macOS on Apple Silicon and Windows x64 with clang-cl. CI builds both. It
+runs the tests on Windows.
 
 - **Windows:** install Visual Studio 2022 with "Desktop development with C++". That workload
   includes CMake. Add the "C++ Clang tools for Windows" component. Use Developer PowerShell or
-  Developer Command Prompt.
+  Developer Command Prompt. CMake usually downloads all four compression libraries.
 - **macOS:** install Xcode command line tools (`xcode-select --install`) and CMake
-  (`brew install cmake` or the installer from cmake.org).
+  (`brew install cmake` or the installer from cmake.org). macOS includes zlib and bzip2.
+  CMake downloads Zstandard and liblzma unless they come from Homebrew (`brew install zstd xz`).
 
 From the repository root:
 
@@ -475,10 +541,11 @@ C++ formatting uses clang-format with the repository's `.clang-format`.
 ## Tests and tools
 
 `ctest` runs unit tests without game data. The tests build MusyX songs in memory. They cover
-song lists and file paths, DLS envelope times, the song's volume and a game's level, tempo
-tables, and a song that loops. The JAudio conversion is part of ntdlib, and ntdlib's tests
-cover it. Those tests build archives, banks, wave systems and sequences in memory. Coverage
-includes:
+song lists and file paths, DLS envelope times, the song's volume and a game's master volume,
+MusyX's volume table, tempo tables, the early build's clock, and a song that loops. They also
+unpack Yay0 data and read a module of code. The JAudio conversion is part of
+ntdlib, and ntdlib's tests cover it. Those tests build archives, banks, wave systems and
+sequences in memory. Coverage includes:
 
 - Wave decoding, and what banks of both versions play for a note: instruments, drum sets,
   velocity regions and effects.
@@ -500,5 +567,7 @@ The conversion test requires game files supplied separately. dolphinsf2 doesn't 
 
 [MIT](LICENSE). The program contains the libraries seqlib, xsflib and ntdlib. They're
 MIT-licensed too. The one exception is a table in ntdlib made from Unicode's data. It's under
-the Unicode License v3. `THIRD-PARTY-NOTICES.md` gives their licence texts, and the release zip
+the Unicode License v3. For compressed disc images, the program uses zlib (zlib licence),
+Zstandard (BSD-3-Clause), liblzma (0BSD) and bzip2 (a BSD-style licence). The Windows program
+contains them. `THIRD-PARTY-NOTICES.md` gives their licence texts, and the release zip
 includes it. Game data is not covered by this licence.

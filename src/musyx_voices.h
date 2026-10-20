@@ -93,6 +93,21 @@ struct PitchEnvelope
     double range_cents = 0.0;
 };
 
+// A pan that follows the voice's key (PianoPan). The pan is `centre_pan` at `centre_key`. It moves by `scale` 128ths of
+// a step for each key above the centre key. MusyX takes the voice's key when the macro reaches the step. `key_shift`
+// and `fixed_key` hold the macro's changes to the key up to that step.
+struct PianoPan
+{
+    int scale = 0;
+    int centre_key = 60;
+    int centre_pan = 64;
+    int key_shift = 0;
+    std::optional<int> fixed_key;
+};
+
+// The pan of a voice that starts with `key` and follows `pan`: 0 to 127, 64 the centre.
+double PianoPanAt(const PianoPan& pan, int key);
+
 // What a SoundMacro does with a note.
 struct MacroVoice
 {
@@ -103,6 +118,8 @@ struct MacroVoice
     double volume = 1.0;     // the scale of the note's volume (ScaleVolumeDLS, ScaleVolume)
     bool dls_volume = false; // the voice's level is the square of its volume (ModeSelect)
     bool itd = false;        // the pan narrows to 0.766 of its range (ModeSelect)
+    // A pan that follows the key, in place of the pan of the keymap or the layer.
+    std::optional<PianoPan> piano_pan;
     std::optional<Envelope> envelope;
     KeyOff key_off = KeyOff::kIgnored;
     std::optional<double> stop_ms; // the voice stops itself this long after its start, unless released before
@@ -110,6 +127,8 @@ struct MacroVoice
     std::optional<Tremolo> tremolo;
     std::optional<PitchEnvelope> pitch_envelope;
     uint8_t key_group = 0; // the voice stops the group's other voices when it starts
+    int bend_up = 2;       // the pitch wheel's range in semitones above the note (PitchWheelRange)
+    int bend_down = 2;     // and below it
 
     // What the macro does that a SoundFont doesn't play, for the conversion's report.
     std::vector<std::string> approximations;
@@ -131,6 +150,13 @@ struct KeyVoice
 // The voices that `key` starts on object `object` of `pool`: a macro, a keymap or a layer.
 std::vector<KeyVoice> VoicesOf(const ntdlib::musyx::Pool& pool, uint16_t object, int key);
 
+// The amplitude that MusyX's volume table `volumes` gives `volume`. MusyX takes the volume in 127ths and interpolates
+// between the table's entries. It plays a volume above 1 at full level.
+double TableLevel(const VolumeTable& volumes, double volume);
+
+// The volume from 0 to 1 to which `volumes` gives the amplitude `level`: TableLevel's inverse.
+double TableVolume(const VolumeTable& volumes, double level);
+
 // A decoded sample, with its key and rate.
 struct Sample
 {
@@ -144,16 +170,25 @@ struct Sample
 class Instruments
 {
 public:
-    // Read `group`. `group` must outlive the instruments.
-    explicit Instruments(const SongGroup& group);
+    // Read `group`. The group's voices play on the game's volume table `volumes` unless they pick the DLS curve.
+    // `group` must outlive the instruments.
+    Instruments(const SongGroup& group, const VolumeTable& volumes);
 
     const SongGroup& Group() const
     {
         return group_;
     }
 
+    const VolumeTable& Volumes() const
+    {
+        return volumes_;
+    }
+
     // Macro `macro` as a voice, followed once.
     const MacroVoice& Macro(uint16_t macro);
+
+    // The amplitude of `voice` at `volume`: the volume squared on the DLS curve, else the volume table's level.
+    double Level(const MacroVoice& voice, double volume) const;
 
     // Sample `id`, decoded once. Return nullptr if the sample directory lacks it, or record why if it can't be
     // decoded.
@@ -173,6 +208,7 @@ public:
 
 private:
     const SongGroup& group_;
+    VolumeTable volumes_;
     std::map<uint16_t, MacroVoice> macros_;
     std::map<uint16_t, std::unique_ptr<Sample>> samples_;
     std::vector<std::string> errors_;

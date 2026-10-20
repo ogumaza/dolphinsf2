@@ -306,6 +306,15 @@ MacroRun::Next MacroRun::Step(const MacroStep& s)
         v.detune_cents = static_cast<int8_t>(s.Byte(2));
         return Pass(KeyWaitOf(s));
 
+    case MacroOp::kPianoPan:
+        // Byte 1 holds the scale, byte 2 the centre key and byte 3 the centre pan.
+        v.piano_pan = PianoPan{.scale = static_cast<int8_t>(s.Byte(1)),
+                               .centre_key = s.Byte(2),
+                               .centre_pan = s.Byte(3),
+                               .key_shift = v.key_shift,
+                               .fixed_key = v.fixed_key};
+        break;
+
     case MacroOp::kStartSample:
         if (s.Byte(3) != 0 || s.word1 != 0)
         {
@@ -418,6 +427,11 @@ MacroRun::Next MacroRun::Step(const MacroStep& s)
         tremolo_scale_ = s.Half(1) / 4096.0;
         tremolo_mod_add_ = (s.word1 & 0xffff) / 4096.0;
         tremolo_set_ = true;
+        break;
+
+    case MacroOp::kPitchWheelRange:
+        v.bend_up = s.Byte(1);
+        v.bend_down = s.Byte(2);
         break;
 
     case MacroOp::kSetKeyGroup:
@@ -653,6 +667,13 @@ double DlsMilliseconds(double timecents)
     return static_cast<double>(whole & 0xffff);
 }
 
+double PianoPanAt(const PianoPan& pan, int key)
+{
+    // MusyX works the pan out in 16.16 fixed point. The division by 128 there loses nothing.
+    const int voice_key = pan.fixed_key ? *pan.fixed_key : key + pan.key_shift;
+    return std::clamp(pan.centre_pan + (voice_key - pan.centre_key) * pan.scale / 128.0, 0.0, 127.0);
+}
+
 MacroVoice FollowMacro(const Pool& pool, uint16_t macro)
 {
     // The held note gives the settings, and any stop that the voice makes by itself.
@@ -670,10 +691,6 @@ MacroVoice FollowMacro(const Pool& pool, uint16_t macro)
     if (voice.envelope && !held.envelope_before_sample)
     {
         voice.approximations.push_back("envelopes set after their sample starts apply from its start");
-    }
-    if (voice.sample && !voice.dls_volume)
-    {
-        voice.approximations.push_back("voices on MusyX's volume curve play on the DLS curve");
     }
 
     // A release late in the note: after every wait of a fixed time, or halfway to the voice's stop of its own.
@@ -711,7 +728,35 @@ std::vector<KeyVoice> VoicesOf(const Pool& pool, uint16_t object, int key)
     return voices;
 }
 
-Instruments::Instruments(const SongGroup& group) : group_(group)
+double TableLevel(const VolumeTable& volumes, double volume)
+{
+    const double x = std::clamp(volume, 0.0, 1.0) * 127.0;
+    const auto i = static_cast<std::size_t>(x);
+    const double fraction = x - static_cast<double>(i);
+    const double next = volumes[std::min(i + 1, volumes.size() - 1)];
+
+    return volumes[i] + fraction * (next - volumes[i]);
+}
+
+double TableVolume(const VolumeTable& volumes, double level)
+{
+    // The entries up to 127 rise. The first above `level` ends the step that holds it.
+    const auto end = volumes.begin() + 128;
+    const auto above = std::upper_bound(volumes.begin(), end, level);
+    if (above == volumes.begin())
+    {
+        return 0.0;
+    }
+    if (above == end)
+    {
+        return 1.0;
+    }
+
+    const auto i = static_cast<std::size_t>(above - volumes.begin()) - 1;
+    return (static_cast<double>(i) + (level - volumes[i]) / (volumes[i + 1] - volumes[i])) / 127.0;
+}
+
+Instruments::Instruments(const SongGroup& group, const VolumeTable& volumes) : group_(group), volumes_(volumes)
 {
 }
 
@@ -724,6 +769,11 @@ const MacroVoice& Instruments::Macro(uint16_t macro)
     }
 
     return it->second;
+}
+
+double Instruments::Level(const MacroVoice& voice, double volume) const
+{
+    return voice.dls_volume ? volume * volume : TableLevel(volumes_, volume);
 }
 
 const Sample* Instruments::GetSample(uint16_t id)

@@ -20,6 +20,25 @@
 
 namespace dolphinsf2
 {
+namespace
+{
+
+// Whether the disc reader takes the file at `path` for a GameCube disc image.
+bool ReadsAsDisc(const std::filesystem::path& path)
+{
+    try
+    {
+        LoadDisc(path, false);
+    }
+    catch (const FormatError&)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+} // namespace
 
 Input Input::Open(const std::filesystem::path& path)
 {
@@ -46,16 +65,23 @@ Input Input::Open(const std::filesystem::path& path)
         return OpenDisc(path);
     }
     // A start-up archive: JAudio2's BAA, or JAudio1's AAF.
-    if (!IsStartUpArchive(header))
+    if (IsStartUpArchive(header))
     {
-        throw FormatError(
-            "not a JAudio start-up archive (.baa or .aaf), a GameCube disc image or an extracted disc's main.dol");
+        Input input;
+        input.jaudio_ = std::make_unique<GameInput>(Game::FromFolder(path, kProgram));
+
+        return input;
     }
 
-    Input input;
-    input.jaudio_ = std::make_unique<GameInput>(Game::FromFolder(path, kProgram));
+    // Some GameCube discs that never went on sale leave the magic word out of their header. The disc reader takes such
+    // a disc when the rest of it is intact.
+    if (ReadsAsDisc(path))
+    {
+        return OpenDisc(path);
+    }
 
-    return input;
+    throw FormatError(
+        "not a JAudio start-up archive (.baa or .aaf), a GameCube disc image or an extracted disc's main.dol");
 }
 
 void Input::PrintWarnings(const std::string& name) const

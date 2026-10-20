@@ -35,7 +35,6 @@ namespace
 
 namespace sf2 = seqlib::sf2;
 
-using ntdlib::musyx::Pool;
 using seqlib::sfz::Number;
 
 // The rate of a fall that falls at once.
@@ -83,12 +82,13 @@ struct Zone
     int high_key = 0;
     uint16_t macro = 0;
     int key_offset = 0;  // the voice's key minus the note's
-    int pan = 64;        // 0 to 127, 64 the centre
+    double pan = 64.0;   // 0 to 127, 64 the centre
     double volume = 1.0; // the share of the note's volume that the layers give the voice
 };
 
-// The zones of the preset that plays `object`, in order of their lowest keys.
-std::vector<Zone> ZonesOf(const Pool& pool, uint16_t object)
+// The zones of the preset that plays `object`, in order of their lowest keys. A macro's PianoPan replaces the pan of
+// the keymap or the layer.
+std::vector<Zone> ZonesOf(Instruments& instruments, uint16_t object)
 {
     std::vector<Zone> zones;
     std::vector<Zone> open; // the runs that the last key extended
@@ -96,13 +96,14 @@ std::vector<Zone> ZonesOf(const Pool& pool, uint16_t object)
     {
         std::vector<Zone> next;
         std::vector<bool> extended(open.size());
-        for (const KeyVoice& v : VoicesOf(pool, object, key))
+        for (const KeyVoice& v : VoicesOf(instruments.Group().pool, object, key))
         {
+            const std::optional<PianoPan>& piano_pan = instruments.Macro(v.macro).piano_pan;
             Zone z{.low_key = key,
                    .high_key = key,
                    .macro = v.macro,
                    .key_offset = v.key - key,
-                   .pan = v.pan,
+                   .pan = piano_pan ? PianoPanAt(*piano_pan, v.key) : v.pan,
                    .volume = v.volume};
             for (std::size_t i = 0; i < open.size(); i++)
             {
@@ -131,12 +132,14 @@ std::vector<Zone> ZonesOf(const Pool& pool, uint16_t object)
 }
 
 // The amplitude of a zone at full velocity and full controllers. MusyX multiplies the velocity, the controllers, the
-// song's volume, the macro's and the layers', and squares the product: the DLS volume curve. SoundFont's and SFZ's
-// default curves square the velocity and the controllers too. The player puts the song's volume in CC7.
-double ZoneGain(const MacroVoice& voice, const Zone& zone)
+// song's volume, the game's master volume, the macro's volume and the layers' volumes. MusyX plays the product on the
+// voice's curve: the DLS curve or MusyX's volume table. SoundFont's and SFZ's default curves square the velocity and
+// the controllers. The player maps the velocities and the controllers of voices on the table to those curves. The
+// player puts the song's volume and the master volume in CC7. The zone takes the level that the voice's curve gives
+// the macro's volume times the layers' volumes.
+double ZoneGain(const Instruments& instruments, const MacroVoice& voice, const Zone& zone)
 {
-    const double v = voice.volume * zone.volume;
-    return v * v;
+    return instruments.Level(voice, voice.volume * zone.volume);
 }
 
 // The tuning of a zone in cents at its sample's key, and whether its pitch follows the key. MusyX plays the voice's
@@ -406,10 +409,25 @@ void AddTremolo(sf2::Zone& zone, const TremoloShape& tremolo)
     }
 }
 
-// Build the SoundFont zone of `z`. The zone plays `voice` with `sample`, at `index` in the SoundFont's samples. Add
-// `quieter` centibels of attenuation.
-sf2::Zone SoundFontZone(const Zone& z, const MacroVoice& voice, const Sample& sample, uint16_t index, bool loop,
-                        double quieter)
+// Add `centibels` of attenuation to `zone` through a modulator without a source, rounded into the generator's range.
+// SoundFont 2.04 treats a source of No Controller as 1 (section 8.2.1). A modulator's output adds to the value of its
+// destination (section 9.5.1). A player that follows the specification therefore gets the same attenuation as from
+// the initialAttenuation generator. FluidSynth applies only 0.4 of that generator, like E-mu's hardware. FluidSynth
+// 2.4.5 and later apply the modulator in full. Earlier versions ignore a modulator without a source.
+void AddAttenuation(sf2::Zone& zone, double centibels)
+{
+    const int amount = std::clamp(static_cast<int>(std::lround(centibels)), 0, kSilentCentibels);
+    if (amount != 0)
+    {
+        zone.modulators.push_back(
+            {sf2::kNoController, sf2::kInitialAttenuation, static_cast<int16_t>(amount), sf2::kNoController});
+    }
+}
+
+// Build the SoundFont zone of `z`. The zone plays `voice` at amplitude `gain` (ZoneGain) with `sample`, at `index` in
+// the SoundFont's samples. Add `quieter` centibels of attenuation.
+sf2::Zone SoundFontZone(const Zone& z, const MacroVoice& voice, double gain, const Sample& sample, uint16_t index,
+                        bool loop, double quieter)
 {
     // SoundFont's key scales leave key 60 as it is. The envelopes therefore take the voice's key at the note's key 60.
     const int key60 = 60 + z.key_offset;
@@ -420,11 +438,6 @@ sf2::Zone SoundFontZone(const Zone& z, const MacroVoice& voice, const Sample& sa
 
     sf2::ZoneValues values;
     values.keys = {z.low_key, z.high_key};
-    values.attenuation = -200.0 * std::log10(ZoneGain(voice, z)) + quieter;
-    if (tremolo)
-    {
-        values.attenuation += tremolo->half_range_db * 10.0;
-    }
     values.pan = static_cast<int>(std::lround(ZonePan(voice, z) * kPanRange));
     values.attack = ToTimecents(shape.attack_ms, -12000, kLongestTimecents);
     values.decay = FallTimecents(shape.decay_db_per_ms);
@@ -438,7 +451,10 @@ sf2::Zone SoundFontZone(const Zone& z, const MacroVoice& voice, const Sample& sa
     values.sample = index;
     sf2::Zone zone = sf2::RegionZone(values);
 
-    // The generators and modulators that RegionZone doesn't write. A voice with ITD follows less of the channel's pan.
+    // The generators and modulators that RegionZone doesn't write. The attenuation comes first (AddAttenuation). A
+    // tremolo swings about the middle of its range, half the range down (TremoloShape). A voice with ITD follows less
+    // of the channel's pan.
+    AddAttenuation(zone, -200.0 * std::log10(gain) + quieter + (tremolo ? tremolo->half_range_db * 10.0 : 0.0));
     if (!tuning.follows_key)
     {
         AddGenerator(zone, sf2::kScaleTuning, 0);
@@ -524,7 +540,8 @@ void SoundFontBuilder::Add(uint32_t index, const std::string& name, const std::v
 
         const SoundFontSamples::Sample added =
             samples_.Get(SampleName(*sample), sample->key, [sample] { return &sample->pcm; }).value();
-        inst.zones.push_back(SoundFontZone(z, voice, *sample, added.id, added.loop, quieter_));
+        inst.zones.push_back(
+            SoundFontZone(z, voice, ZoneGain(instruments_, voice, z), *sample, added.id, added.loop, quieter_));
     }
 
     sf2::AddInstrumentPreset(sf_, index, name, std::move(inst));
@@ -576,8 +593,9 @@ std::string SfzTremolo(const TremoloShape& tremolo)
     return s;
 }
 
-// The SFZ region of keys `low` to `high` of `z`. The region plays `voice` with `wave`. Add `gain_db` to its volume.
-std::string SfzRegion(const Zone& z, int low, int high, const MacroVoice& voice, const Sample& sample,
+// The SFZ region of keys `low` to `high` of `z`. The region plays `voice` at amplitude `zone_gain` (ZoneGain) with
+// `wave`. Add `gain_db` to its volume.
+std::string SfzRegion(const Zone& z, int low, int high, const MacroVoice& voice, double zone_gain, const Sample& sample,
                       const SfzSamples::Wave& wave, double gain_db)
 {
     // A voice whose envelope follows the key has a region for each key.
@@ -595,7 +613,7 @@ std::string SfzRegion(const Zone& z, int low, int high, const MacroVoice& voice,
     }
     s += seqlib::sfz::TuneOpcodes(Cents(tuning.cents));
 
-    double volume = 20.0 * std::log10(ZoneGain(voice, z)) + gain_db;
+    double volume = 20.0 * std::log10(zone_gain) + gain_db;
     if (tremolo)
     {
         volume -= tremolo->half_range_db;
@@ -674,16 +692,17 @@ std::string SfzGroup(const std::vector<Zone>& zones, Instruments& instruments, S
         }
 
         const SfzSamples::Wave& wave = samples.Get(SampleName(*sample), [sample] { return &sample->pcm; });
+        const double zone_gain = ZoneGain(instruments, voice, z);
         if (FollowsKey(voice))
         {
             for (int key = z.low_key; key <= z.high_key; key++)
             {
-                s += SfzRegion(z, key, key, voice, *sample, wave, gain_db);
+                s += SfzRegion(z, key, key, voice, zone_gain, *sample, wave, gain_db);
             }
         }
         else
         {
-            s += SfzRegion(z, z.low_key, z.high_key, voice, *sample, wave, gain_db);
+            s += SfzRegion(z, z.low_key, z.high_key, voice, zone_gain, *sample, wave, gain_db);
         }
     }
 
@@ -723,20 +742,20 @@ SfzInstruments BuildSfz(const Performance& perf, const MidiReport& midi, Instrum
 
 // The zones of each preset of `perf`, from the song group's pages. A preset whose page the song group lacks has none.
 // Add a warning for it to `warnings`, after its name in `names`.
-std::vector<std::vector<Zone>> PresetZones(const Performance& perf, const SongGroup& group,
+std::vector<std::vector<Zone>> PresetZones(const Performance& perf, Instruments& instruments,
                                            const std::vector<std::string>& names, std::vector<std::string>& warnings)
 {
     std::vector<std::vector<Zone>> zones(perf.presets.size());
     for (std::size_t i = 0; i < zones.size(); i++)
     {
-        const std::optional<uint16_t> object = PresetObject(group, perf.presets[i]);
+        const std::optional<uint16_t> object = PresetObject(instruments.Group(), perf.presets[i]);
         if (!object)
         {
             warnings.push_back(names[i] + ": the song group has no page for it");
             continue;
         }
 
-        zones[i] = ZonesOf(group.pool, *object);
+        zones[i] = ZonesOf(instruments, *object);
     }
 
     return zones;
@@ -753,7 +772,7 @@ double LoudestZone(const std::vector<std::vector<Zone>>& zones, Instruments& ins
             const MacroVoice& voice = instruments.Macro(z.macro);
             if (instruments.SampleOf(voice) != nullptr)
             {
-                loudest = std::max(loudest, ZoneGain(voice, z));
+                loudest = std::max(loudest, ZoneGain(instruments, voice, z));
             }
         }
     }
@@ -772,7 +791,7 @@ Conversion ConvertSong(const ntdlib::musyx::Song& song, const GameSong& listed, 
 
     const std::vector<std::string> names = PresetNames(c.performance.presets);
     std::vector<std::string> warnings;
-    const std::vector<std::vector<Zone>> zones = PresetZones(c.performance, instruments.Group(), names, warnings);
+    const std::vector<std::vector<Zone>> zones = PresetZones(c.performance, instruments, names, warnings);
 
     // SoundFont zones can't amplify their samples. A zone above full level makes every zone quieter. SFZ keeps the
     // levels.
@@ -797,17 +816,26 @@ Conversion ConvertSong(const ntdlib::musyx::Song& song, const GameSong& listed, 
     return c;
 }
 
-GameInput::GameInput(Game game) : game_(std::move(game)), instruments_(game_.Group())
+GameInput::GameInput(Game game)
+    : game_(std::move(game)), instruments_(game_.Groups().size()), errors_reported_(game_.Groups().size())
 {
 }
 
 Conversion GameInput::Convert(std::size_t index, const PerformOptions& perform)
 {
-    const std::vector<uint8_t> file = game_.ReadSong(index);
-    Conversion c = ConvertSong(ntdlib::musyx::ReadSong(file), game_.Songs()[index], instruments_, perform);
-    for (; errors_reported_ < instruments_.Errors().size(); errors_reported_++)
+    const GameSong& listed = game_.Songs().at(index);
+    std::unique_ptr<Instruments>& instruments = instruments_.at(listed.group);
+    if (!instruments)
     {
-        c.warnings.push_back(instruments_.Errors()[errors_reported_]);
+        instruments = std::make_unique<Instruments>(*game_.Groups()[listed.group], game_.Volumes());
+    }
+
+    const std::vector<uint8_t> file = game_.ReadSong(index);
+    Conversion c = ConvertSong(ntdlib::musyx::ReadSong(file), listed, *instruments, perform);
+    std::size_t& reported = errors_reported_[listed.group];
+    for (; reported < instruments->Errors().size(); reported++)
+    {
+        c.warnings.push_back(instruments->Errors()[reported]);
     }
 
     return c;

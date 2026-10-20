@@ -5,6 +5,8 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
+#include <vector>
 
 #include "ntdlib/musyx/song.h"
 
@@ -20,9 +22,9 @@ namespace dolphinsf2::musyx
 Conversion ConvertSong(const ntdlib::musyx::Song& song, const GameSong& listed, Instruments& instruments,
                        const PerformOptions& options);
 
-// A MusyX game being converted, and the instruments of its song group. It counts the instruments' errors that the
+// A MusyX game being converted, and the instruments of its song groups. It counts the instruments' errors that the
 // conversions have reported. ntdlib's GameInput does the same for a JAudio game. The instruments read the game's song
-// group in place. The input therefore can't be copied or moved.
+// groups in place. The input therefore can't be copied or moved.
 class GameInput
 {
 public:
@@ -41,8 +43,11 @@ public:
 
 private:
     Game game_;
-    Instruments instruments_;
-    std::size_t errors_reported_ = 0;
+
+    // The instruments of each song group and the number of their errors that the conversions have reported. A group's
+    // instruments are made when its first song is converted.
+    std::vector<std::unique_ptr<Instruments>> instruments_;
+    std::vector<std::size_t> errors_reported_;
 };
 
 } // namespace dolphinsf2::musyx

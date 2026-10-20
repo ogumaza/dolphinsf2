@@ -7,21 +7,19 @@
 #include <optional>
 #include <string>
 
+#include "ntdlib/disc/containers.h"
+
 namespace dolphinsf2
 {
 namespace
 {
 
-// The messages of ntdlib's disc reader for dolphinsf2, and only the plain images that it reads (ISO and NKit).
+// The messages of ntdlib's disc reader for dolphinsf2, and the checks of a plain image's size (ISO and NKit). The
+// reader opens RVZ, WIA, GCZ and CISO images with disc_containers' OpenContainer.
 ntdlib::disc::GameOptions DiscOptions()
 {
-    const std::string kConvert = "Convert it to an ISO image with Dolphin: right-click the game, then Convert File";
     ntdlib::disc::GameOptions options{ntdlib::disc::Console::kGameCube, kProgram};
-    options.image.refuse_container = [kConvert](const std::string& format)
-    {
-        return "it's " + std::string(format == "RVZ" ? "an " : "a ") + format +
-               " disc image. dolphinsf2 can't read those. " + kConvert;
-    };
+    options.image.open_container = ntdlib::disc::OpenContainer;
     options.not_this_console = "not a GameCube disc image";
     options.other_console =
         "it's a Wii disc. dolphinsf2 can't read those. Extract the game's files with Dolphin, and convert its .baa "

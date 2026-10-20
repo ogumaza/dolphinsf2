@@ -13,6 +13,15 @@
 // keep the old clock and end by it. The old clock runs on beside the new one.
 //
 // The performance's ticks run on from pass to pass. A pass of the main loop starts where a section's clock went back.
+//
+// MusyX multiplies a note's velocity, its channel's volume and expression, the song's volume and the game's master
+// volume. MusyX plays the product on the curve of the note's voice. SoundFont's and SFZ's default curves square the
+// velocity, CC7 and CC11 each. The DLS curve squares the product too. A note on the DLS curve keeps its velocity. CC7
+// takes the channel's volume times the song's volume and the master volume. In a channel whose notes all play on
+// MusyX's volume table, CC7 and CC11 take the values whose squares follow the table. The velocity of a note on the
+// table then gives the note the table's level of the product of its velocity and the volumes that CC7 and CC11 stand
+// for, at the note's start. A channel whose notes play on both curves keeps the DLS curve's CC7 and CC11. Only the
+// velocities of the channel's notes on the table follow the table.
 
 #include "musyx_player.h"
 
@@ -60,8 +69,9 @@ constexpr std::size_t kSections = 16;
 // A time that never comes, for a stream with no more points.
 constexpr uint32_t kNoTime = 0x7fffffff;
 
-// The pitch wheel's range in semitones each way: MusyX's default for every channel.
-constexpr float kBendRange = 2.0f;
+// The pitch wheel's centre and MusyX's default range in semitones each way. A voice's macro can set another range.
+constexpr int kWheelCentre = 0x2000;
+constexpr int kBendRange = 2;
 
 // The passes of the main loop that the performance tries to mark, beyond the first.
 constexpr std::size_t kMorePasses = 2;
@@ -74,6 +84,12 @@ constexpr uint8_t kPriorityHigh = 0x6a;
 constexpr uint8_t kController130 = 0x82;
 constexpr uint8_t kResetControllers = 0x79;
 constexpr uint8_t kAllNotesOff = 0x7b;
+
+// The report's names for what the volume curves approximate.
+constexpr char kBothCurves[] = "notes whose voices play on both volume curves follow the curve of their first voice";
+constexpr char kScaledAttacks[] = "velocity scales of attacks on MusyX's volume table take the MIDI velocity";
+constexpr char kMixedChannels[] =
+    "notes on MusyX's volume table follow volume changes on the DLS curve in channels with both curves";
 
 // What a track waits for.
 enum class EventType
@@ -140,7 +156,25 @@ struct NoteRecord
     int64_t on = 0;
     std::optional<int64_t> off;
     std::vector<KeyVoice> voices;
+    std::pair<int, int> bend_range{kBendRange, kBendRange}; // the first voice's pitch wheel ranges up and down
+    bool other_range = false;                               // the wheel has bent the note over another note's range
+    bool sounds = false;                                    // a voice plays a sample
+    bool on_table = false;                                  // the first such voice plays on MusyX's volume table
 };
+
+// A channel's CC7 and CC11 in the MIDI file.
+struct ChannelLevels
+{
+    int volume = 127;
+    int expression = 127;
+};
+
+// The MIDI value from 0 to 127 whose square is `amplitude`. SoundFont's and SFZ's default curves square the
+// velocity, CC7 and CC11.
+int SquaredValue(double amplitude)
+{
+    return static_cast<int>(std::lround(127.0 * std::sqrt(std::clamp(amplitude, 0.0, 1.0))));
+}
 
 // Where an event goes among a channel's events at one tick: note-offs come first, then settings, then note-ons.
 enum class Rank
@@ -222,7 +256,9 @@ private:
     bool Step();
 
     void ApplyTempos(SectionState& s, bool record);
-    static void SetTickDelta(SectionState& s);
+
+    // Set the ticks that a run adds to the clock of `s` at its tempo, as the game's build of MusyX works them out.
+    void SetTickDelta(SectionState& s) const;
 
     // Handle the section's events that are due. Return false if the section has none left.
     bool HandleEvents(std::size_t section);
@@ -244,11 +280,40 @@ private:
     int64_t TickOf(std::size_t section, uint32_t time) const;
 
     void ProgramChange(uint8_t channel, uint8_t program, int64_t tick);
+
+    // The semitones by which pitch-wheel value `value` bends the notes of `channel` over the channel's range.
+    float Semitones(uint8_t channel, int value) const;
+
+    // Give `channel` the pitch wheel's range `range` of a note that starts at `tick`. MusyX bends each voice over the
+    // voice's range. A MIDI channel bends its notes over one range: its latest note's.
+    void SetBendRange(uint8_t channel, std::pair<int, int> range, int64_t tick);
+
+    // Count the held notes of `channel` that the wheel now bends over another note's range. Each note counts once.
+    void CountOtherRanges(uint8_t channel);
+
     void Controller(uint8_t channel, uint8_t controller, uint8_t value, int64_t tick);
     void NoteOn(uint8_t channel, uint8_t key, uint8_t velocity, uint32_t end, std::size_t section, int64_t tick);
 
     // Add `e` to the events of `channel` at `tick`. The event's kind gives its rank among the tick's events.
     void Record(uint8_t channel, int64_t tick, TrackEvent e);
+
+    // Find the volume curve that note `n` follows, from its voices. Count what that approximates.
+    void SetCurve(NoteRecord& n);
+
+    // Pick the curve of each channel's CC7 and CC11: MusyX's volume table for a channel whose sounding notes all play
+    // on it, else the DLS curve.
+    void ChooseCurves();
+
+    // The product of the channel's volume `value`, the song's volume and the master volume.
+    double ChannelVolume(int value) const;
+
+    // The MIDI value of `volume` on channel `channel`'s curve, and the volume that MIDI value `value` stands for.
+    int WrittenValue(std::size_t channel, double volume) const;
+    double WrittenVolume(std::size_t channel, int value) const;
+
+    // Map `e`, an event of channel `channel`, to the voices' curves: its CC7 and CC11, and the velocity of a note on
+    // MusyX's volume table. `levels` holds the channel's CC7 and CC11 before `e`. Keep them up to date.
+    void MapLevel(std::size_t channel, TrackEvent& e, ChannelLevels& levels) const;
 
     void SetTempo(int64_t tick, const SectionState& s);
 
@@ -280,8 +345,9 @@ private:
     const ntdlib::musyx::Song& song_;
     const SongGroup& group_;
     Instruments& instruments_;
-    uint8_t song_volume_ = 127; // the volume that the game's song table gives the song
-    double level_ = 1.0;        // the game's factor on every channel volume
+    uint8_t song_volume_ = 127;   // the volume that the game's song table gives the song
+    uint8_t master_volume_ = 127; // the game's master volume for music
+    TickStep tick_step_ = TickStep::kFloat;
     std::array<uint8_t, 128> page_of_program_{};
     std::array<uint8_t, 128> drum_of_program_{};
 
@@ -289,6 +355,9 @@ private:
     std::array<SectionState, kSections> sections_{};
     std::size_t master_ = 0; // the section whose clock gives the tempo and the passes
     std::array<std::optional<uint16_t>, kChannels> channel_object_{}; // the object that the channel's page plays
+    std::array<int, kChannels> wheel_{};                              // the channel's latest pitch-wheel value
+    std::array<std::pair<int, int>, kChannels> bend_range_{};         // the channel's range up and down
+    std::array<bool, kChannels> on_table_{}; // the channel's CC7 and CC11 follow MusyX's volume table (ChooseCurves)
     std::vector<ActiveNote> active_;
     std::vector<NoteRecord> notes_;
     std::array<std::vector<ChannelEvent>, kChannels> events_;
@@ -308,10 +377,14 @@ Player::Player(const ntdlib::musyx::Song& song, const GameSong& listed, Instrume
       group_(instruments.Group()),
       instruments_(instruments),
       song_volume_(listed.volume),
-      level_(listed.level),
+      master_volume_(listed.master_volume),
+      tick_step_(listed.tick_step),
       page_of_program_(PagesByProgram(group_.group.pages)),
       drum_of_program_(PagesByProgram(group_.group.drum_pages))
 {
+    wheel_.fill(kWheelCentre);
+    bend_range_.fill({kBendRange, kBendRange});
+
     // The tempo starts at the song's, in 1024ths of a beat a minute.
     const uint32_t bpm = song.fine_tempo ? song.tempo : song.tempo << 10;
     for (SectionState& s : sections_)
@@ -372,13 +445,24 @@ void Player::SetUpChannels(uint16_t song_id)
     }
 }
 
-void Player::SetTickDelta(SectionState& s)
+void Player::SetTickDelta(SectionState& s) const
 {
+    const auto clock = static_cast<std::size_t>(s.clock);
+
+    // An early build adds the tempo's ticks in 65/65536 of a second, in whole 65536ths of a tick. It multiplies the
+    // tempo in beats a minute by 3072 / 60, then by 65 / 8, and rounds down each time.
+    if (tick_step_ == TickStep::kInteger)
+    {
+        const uint64_t bpm = s.bpm >> 10;
+        s.delta[clock] = bpm * 3072 / 60 * 65 / 8;
+        return;
+    }
+
     // A run adds the tempo's ticks in a millisecond, in single precision, kept in 65536ths.
     const float ticks = static_cast<float>(s.bpm) * 256.0f * (1.0f / 40960000.0f);
     const auto low = static_cast<uint64_t>(std::fmod(ticks * 65536.0f, 65536.0f));
     const auto high = static_cast<uint64_t>(std::floor(ticks));
-    s.delta[static_cast<std::size_t>(s.clock)] = high << 16 | low;
+    s.delta[clock] = high << 16 | low;
 }
 
 void Player::ApplyTempos(SectionState& s, bool record)
@@ -618,11 +702,15 @@ std::optional<uint32_t> Player::HandleEvent(const Event& e, std::size_t section)
 
     case EventType::kPitchWheel:
         {
-            // 8192 is the centre, and the range is MusyX's two semitones each way.
             const int value = std::clamp(t.pattern->pitch_wheel[e.index].value, 0, 0x3fff);
+            wheel_[channel] = value;
             TrackEvent ev{.kind = EventKind::kPitch};
-            ev.semitones = static_cast<float>(value - 0x2000) * kBendRange / 8192.0f;
+            ev.semitones = Semitones(channel, value);
             Record(channel, tick, ev);
+            if (value != kWheelCentre)
+            {
+                CountOtherRanges(channel);
+            }
             break;
         }
 
@@ -672,10 +760,9 @@ void Player::Controller(uint8_t channel, uint8_t controller, uint8_t value, int6
     case 1:
         e.kind = EventKind::kModulation;
         break;
-    // The song's volume and the game's level multiply the channel's volume, inside the DLS curve.
+    // The channel's volume as the song sets it. AddEvents maps it to the voices' curve (MapLevel).
     case 7:
         e.kind = EventKind::kVolume;
-        e.value = static_cast<uint8_t>(std::lround(value * song_volume_ / 127.0 * level_));
         break;
     case 10:
         e.kind = EventKind::kPan;
@@ -741,6 +828,17 @@ void Player::NoteOn(uint8_t channel, uint8_t key, uint8_t velocity, uint32_t end
     n.id = next_note_++;
     n.on = tick;
     n.voices = VoicesOf(group_.pool, *channel_object_[channel], key);
+
+    // The channel bends over the range of the note's first voice.
+    if (!n.voices.empty())
+    {
+        const MacroVoice& voice = instruments_.Macro(n.voices.front().macro);
+        n.bend_range = {voice.bend_up, voice.bend_down};
+        SetBendRange(channel, n.bend_range, tick);
+    }
+
+    SetCurve(n);
+
     TrackEvent e{.kind = EventKind::kNoteOn, .key = key, .value = velocity};
     e.note = n.id;
     Record(channel, tick, e);
@@ -748,6 +846,44 @@ void Player::NoteOn(uint8_t channel, uint8_t key, uint8_t velocity, uint32_t end
     const SectionState& s = sections_[section];
     active_.push_back({end, section, s.clock, s.offset[static_cast<std::size_t>(s.clock)], notes_.size()});
     notes_.push_back(std::move(n));
+}
+
+float Player::Semitones(uint8_t channel, int value) const
+{
+    const auto [up, down] = bend_range_[channel];
+    return static_cast<float>((value - kWheelCentre) * (value >= kWheelCentre ? up : down)) / kWheelCentre;
+}
+
+void Player::SetBendRange(uint8_t channel, std::pair<int, int> range, int64_t tick)
+{
+    if (range == bend_range_[channel])
+    {
+        return;
+    }
+
+    // A wheel off its centre bends by the new range from the note on.
+    bend_range_[channel] = range;
+    if (wheel_[channel] != kWheelCentre)
+    {
+        TrackEvent ev{.kind = EventKind::kPitch};
+        ev.semitones = Semitones(channel, wheel_[channel]);
+        Record(channel, tick, ev);
+        CountOtherRanges(channel);
+    }
+}
+
+void Player::CountOtherRanges(uint8_t channel)
+{
+    // In the game, a note that still sounds keeps its voice's range. In MIDI, it takes the channel's.
+    for (const ActiveNote& a : active_)
+    {
+        NoteRecord& n = notes_[a.record];
+        if (n.channel == channel && !n.voices.empty() && n.bend_range != bend_range_[channel] && !n.other_range)
+        {
+            n.other_range = true;
+            approximations_["pitch wheel ranges that differ among a channel's notes take the latest note's"]++;
+        }
+    }
 }
 
 bool Player::ReleaseNotes()
@@ -775,6 +911,123 @@ bool Player::ReleaseNotes()
 void Player::Record(uint8_t channel, int64_t tick, TrackEvent e)
 {
     events_[channel].push_back({tick, RankOf(e.kind), order_++, e});
+}
+
+void Player::SetCurve(NoteRecord& n)
+{
+    // The note follows the curve of its first voice that plays a sample.
+    const MacroVoice* first = nullptr;
+    for (const KeyVoice& kv : n.voices)
+    {
+        const MacroVoice& voice = instruments_.Macro(kv.macro);
+        if (!voice.sample)
+        {
+            continue;
+        }
+
+        if (first == nullptr)
+        {
+            first = &voice;
+        }
+        else if (voice.dls_volume != first->dls_volume)
+        {
+            approximations_[kBothCurves]++;
+            break;
+        }
+    }
+    n.sounds = first != nullptr;
+    n.on_table = first != nullptr && !first->dls_volume;
+
+    // A note on the table gets another velocity. A SoundFont's attack that the velocity scales takes that one.
+    const auto scales_attack = [this](const KeyVoice& kv)
+    {
+        const MacroVoice& voice = instruments_.Macro(kv.macro);
+        return voice.envelope && voice.envelope->dls && voice.envelope->attack_tc_per_velocity != 0.0;
+    };
+    if (n.on_table && std::any_of(n.voices.begin(), n.voices.end(), scales_attack))
+    {
+        approximations_[kScaledAttacks]++;
+    }
+}
+
+void Player::ChooseCurves()
+{
+    std::array<std::size_t, kChannels> table_notes{};
+    std::array<std::size_t, kChannels> dls_notes{};
+    for (const NoteRecord& n : notes_)
+    {
+        if (n.sounds)
+        {
+            (n.on_table ? table_notes : dls_notes)[n.channel]++;
+        }
+    }
+
+    for (std::size_t c = 0; c < kChannels; c++)
+    {
+        on_table_[c] = table_notes[c] > 0 && dls_notes[c] == 0;
+        if (table_notes[c] > 0 && dls_notes[c] > 0)
+        {
+            approximations_[kMixedChannels] += static_cast<uint32_t>(table_notes[c]);
+        }
+    }
+}
+
+double Player::ChannelVolume(int value) const
+{
+    return value / 127.0 * song_volume_ / 127.0 * master_volume_ / 127.0;
+}
+
+int Player::WrittenValue(std::size_t channel, double volume) const
+{
+    if (on_table_[channel])
+    {
+        return SquaredValue(TableLevel(instruments_.Volumes(), volume));
+    }
+
+    return static_cast<int>(std::lround(127.0 * std::min(volume, 1.0)));
+}
+
+double Player::WrittenVolume(std::size_t channel, int value) const
+{
+    const double amplitude = value / 127.0;
+    if (on_table_[channel])
+    {
+        return TableVolume(instruments_.Volumes(), amplitude * amplitude);
+    }
+
+    return amplitude;
+}
+
+void Player::MapLevel(std::size_t channel, TrackEvent& e, ChannelLevels& levels) const
+{
+    if (e.kind == EventKind::kVolume)
+    {
+        levels.volume = WrittenValue(channel, ChannelVolume(e.value));
+        e.value = static_cast<uint8_t>(levels.volume);
+    }
+    else if (e.kind == EventKind::kExpression)
+    {
+        levels.expression = WrittenValue(channel, e.value / 127.0);
+        e.value = static_cast<uint8_t>(levels.expression);
+    }
+    else if (e.kind == seqlib::midi::ControlKind(kResetControllers))
+    {
+        // A synth's reset of all controllers sets CC11 to 127.
+        levels.expression = 127;
+    }
+    else if (e.kind == EventKind::kNoteOn && notes_[e.note - 1].on_table)
+    {
+        // The velocity whose square times the squares of CC7 and CC11 is the table's level of the product. The
+        // product takes the volumes that the written CC7 and CC11 stand for. Two passes that write the same CC7 and
+        // CC11 therefore give a note the same velocity.
+        const VolumeTable& table = instruments_.Volumes();
+        const double volume =
+            e.value / 127.0 * WrittenVolume(channel, levels.volume) * WrittenVolume(channel, levels.expression);
+        const double written = levels.volume / 127.0 * levels.expression / 127.0;
+        const int velocity = written > 0.0 ? SquaredValue(TableLevel(table, volume) / (written * written))
+                                           : SquaredValue(TableLevel(table, e.value / 127.0));
+        e.value = static_cast<uint8_t>(std::max(velocity, 1));
+    }
 }
 
 bool Player::Step()
@@ -864,6 +1117,8 @@ int64_t Player::TickAt(double seconds) const
 
 Performance Player::Finish(const PerformOptions& options)
 {
+    ChooseCurves();
+
     Performance perf;
     perf.timebase = ntdlib::musyx::kTicksPerBeat;
     perf.presets = presets_;
@@ -979,7 +1234,7 @@ double Player::VoiceEnd(const MacroVoice& v, int key, double on_seconds, double 
 
 void Player::AddEvents(Performance& perf)
 {
-    // The events of each channel, in order, without settings that repeat the last value.
+    // The events of each channel, in order, mapped to the voices' curves, without settings that repeat the last value.
     for (std::size_t c = 0; c < kChannels; c++)
     {
         std::vector<ChannelEvent>& events = events_[c];
@@ -987,10 +1242,12 @@ void Player::AddEvents(Performance& perf)
                   { return std::tie(a.tick, a.rank, a.order) < std::tie(b.tick, b.rank, b.order); });
         std::map<EventKind, int> last;
         float pitch = 0.0f;
+        ChannelLevels levels;
         for (ChannelEvent& ce : events)
         {
             TrackEvent e = ce.event;
             e.tick = static_cast<uint32_t>(std::max<int64_t>(ce.tick, 0));
+            MapLevel(c, e, levels);
             if (e.kind == EventKind::kPitch)
             {
                 if (e.semitones == pitch)
