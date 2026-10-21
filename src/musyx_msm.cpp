@@ -5,9 +5,16 @@
 #include "musyx_msm.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <iterator>
 #include <optional>
+#include <span>
+#include <string>
 #include <utility>
+#include <vector>
+
+#include "xsflib/binary.h"
 
 namespace dolphinsf2::musyx
 {
@@ -220,9 +227,9 @@ MsmGroup MsmFile::PartsOf(std::size_t index) const
     head.Sub(0, kGroupHeadSize);
     const auto part = [&head, &data](std::size_t word)
     {
-        const uint32_t at = head.U32(word);
-        head.Sub(at, 0);
-        return data.subspan(at);
+        const uint32_t offset = head.U32(word);
+        head.Sub(offset, 0);
+        return data.subspan(offset);
     };
 
     return {part(0), part(4), part(8), r.Sub(r.U32(kGroupSamples) + std::size_t{r.U32(entry + 12)}, r.U32(entry + 16))};

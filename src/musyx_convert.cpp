@@ -12,21 +12,29 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
+#include <memory>
+#include <numbers>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "ntdlib/musyx/song.h"
 #include "ntdlib/sequence_export/conversion.h"
+#include "ntdlib/sequence_export/jaudio/convert.h"
 #include "seqlib/sf2/presets.h"
 #include "seqlib/sf2/soundfont.h"
-#include "seqlib/sf2/units.h"
 #include "seqlib/sfz/opcodes.h"
 #include "seqlib/sfz/text.h"
 #include "seqlib/sfz/track_file.h"
 
+#include "jaudio.h"
+#include "musyx_game.h"
 #include "musyx_player.h"
+#include "musyx_voices.h"
 
 namespace dolphinsf2::musyx
 {
@@ -43,9 +51,14 @@ constexpr double kAtOnce = std::numeric_limits<double>::infinity();
 // MusyX's milliseconds in real ones. Its clock counts the output's samples as if they came at kNominalRate.
 constexpr double kMsScale = kNominalRate / kOutputRate;
 
-// The decibels that SoundFont's decays and releases fall in their time, and sfizz's: a factor of e^-9.
+// The decibels that decays and releases fall in their time. In SoundFont, they fall 100 dB. In SFZ, they fall by a
+// factor of e^-8: 8 × 20 / ln 10 dB. sfzformat.com gives that curve on its page on ampeg_attack.
 constexpr double kSoundFontFallDb = 100.0;
-constexpr double kSfizzFallDb = 78.17;
+constexpr double kSfzFallDb = 8.0 * 20.0 / std::numbers::ln10;
+
+// The lowest volume that sfzformat.com documents for an SFZ region, in decibels. Every quieter region takes it. A
+// region at a gain of 0 would otherwise get -inf. sfizz 1.2 can't read that.
+constexpr double kSfzLowestVolumeDb = -144.0;
 
 // A linear fall that ends in silence is fitted to reach the level that it reaches 20 dB down. A fall to a level less
 // than twice as far down is fitted halfway down in decibels.
@@ -62,13 +75,9 @@ constexpr int kWidestCents = 12000;
 // The share of its range that the pan of a voice with ITD keeps.
 constexpr double kItdPan = 0.76604;
 
-// The pan in tenths of a percent at either side, in SoundFont's pan generator and its default CC10 modulator.
+// The pan in tenths of a percent at either side: in SoundFont's pan generator, and in the CC10 modulator of each global
+// zone (kCc10ToPan).
 constexpr double kPanRange = 500.0;
-
-// Sources of SoundFont modulators: the note's velocity, and CC10 as SoundFont's default pan modulator reads it (linear
-// and bipolar).
-constexpr uint16_t kSrcVelocity = 0x0002;
-constexpr uint16_t kSrcPan = 0x028A;
 
 // A run of keys of a preset that start the same voice the same way.
 struct Zone
@@ -152,13 +161,13 @@ struct Tuning
 
 Tuning TuningOf(const MacroVoice& voice, const Zone& zone, const Sample& sample)
 {
-    const double rate_cents = 1200.0 * std::log2(kOutputRate / kNominalRate);
+    const double kRateCents = 1200.0 * std::log2(kOutputRate / kNominalRate);
     if (voice.fixed_key)
     {
-        return {(*voice.fixed_key - sample.key) * 100.0 + voice.detune_cents + rate_cents, false};
+        return {(*voice.fixed_key - sample.key) * 100.0 + voice.detune_cents + kRateCents, false};
     }
 
-    return {(zone.key_offset + voice.key_shift) * 100.0 + voice.detune_cents + rate_cents, true};
+    return {(zone.key_offset + voice.key_shift) * 100.0 + voice.detune_cents + kRateCents, true};
 }
 
 // The pan of a zone, -1 (left) to 1 (right), before the channel's. MusyX adds the channel's pan to the voice's, then
@@ -236,8 +245,8 @@ VolumeShape VolumeOf(const MacroVoice& voice, int key, int velocity)
 
 // A pitch envelope in SoundFont's and SFZ's terms, in real milliseconds. MusyX's decay and release fall linearly in
 // decibels of their range. SoundFont's fall in a line, fitted to reach half the range at the same time as MusyX's.
-// sfizz's fall by a factor of e^-9 in their time. MusyX's fall by the same factor in kSfizzFallDb / kDlsFallDb of
-// their time.
+// SFZ's decays and releases fall by a factor of e^-8 in their time. MusyX's decays and releases fall by the same factor
+// in kSfzFallDb / kDlsFallDb of their time.
 struct PitchShape
 {
     double attack_ms = 0.0;
@@ -265,8 +274,8 @@ PitchShape PitchOf(const PitchEnvelope& envelope, int key)
     const double db = -20.0 * std::log10(middle);
     p.decay_ms = decay_ms * db / kDlsFallDb / (1.0 - middle);
     p.release_ms = release_ms * 20.0 * std::log10(2.0) / kDlsFallDb * 2.0;
-    p.sfz_decay_ms = decay_ms * kSfizzFallDb / kDlsFallDb;
-    p.sfz_release_ms = release_ms * kSfizzFallDb / kDlsFallDb;
+    p.sfz_decay_ms = decay_ms * kSfzFallDb / kDlsFallDb;
+    p.sfz_release_ms = release_ms * kSfzFallDb / kDlsFallDb;
 
     return p;
 }
@@ -323,13 +332,13 @@ int LfoFrequency(double hz)
     return std::clamp(static_cast<int>(std::lround(1200.0 * std::log2(hz / 8.176))), -16000, 4500);
 }
 
-// The instrument's global zone. MusyX doesn't filter by velocity, and its pitch wheel has its full range: seqlib's
-// kNoVelocityFilterFullBend. The mod wheel gives no vibrato but the macros'. SoundFont's default modulator gives it 50
-// cents.
+// The instrument's global zone holds seqlib's kGlobalZoneModulators. MusyX doesn't filter by velocity. Its pitch wheel
+// has its full range. CC10 pans at the amount of 500 that most synthesizers play (kCc10ToPan). The mod wheel gives only
+// the macros' vibrato. SoundFont's default CC1 modulator would add 50 cents.
 sf2::Zone GlobalZone()
 {
     sf2::Zone global;
-    global.modulators.assign(sf2::kNoVelocityFilterFullBend.begin(), sf2::kNoVelocityFilterFullBend.end());
+    global.modulators.assign(sf2::kGlobalZoneModulators.begin(), sf2::kGlobalZoneModulators.end());
     global.modulators.push_back({sf2::kSrcModWheel, sf2::kVibLfoToPitch, 0, 0});
 
     return global;
@@ -352,7 +361,8 @@ void AddDlsScales(sf2::Zone& zone, const Envelope& e, double attack_ms)
     }
     if (e.attack_tc_per_velocity != 0.0 && attack_ms > 0.0)
     {
-        zone.modulators.push_back({kSrcVelocity, sf2::kAttackVolEnv, Amount(e.attack_tc_per_velocity * 128.0), 0});
+        zone.modulators.push_back(
+            {sf2::kNoteOnVelocity, sf2::kAttackVolEnv, Amount(e.attack_tc_per_velocity * 128.0), 0});
     }
 }
 
@@ -409,21 +419,6 @@ void AddTremolo(sf2::Zone& zone, const TremoloShape& tremolo)
     }
 }
 
-// Add `centibels` of attenuation to `zone` through a modulator without a source, rounded into the generator's range.
-// SoundFont 2.04 treats a source of No Controller as 1 (section 8.2.1). A modulator's output adds to the value of its
-// destination (section 9.5.1). A player that follows the specification therefore gets the same attenuation as from
-// the initialAttenuation generator. FluidSynth applies only 0.4 of that generator, like E-mu's hardware. FluidSynth
-// 2.4.5 and later apply the modulator in full. Earlier versions ignore a modulator without a source.
-void AddAttenuation(sf2::Zone& zone, double centibels)
-{
-    const int amount = std::clamp(static_cast<int>(std::lround(centibels)), 0, kSilentCentibels);
-    if (amount != 0)
-    {
-        zone.modulators.push_back(
-            {sf2::kNoController, sf2::kInitialAttenuation, static_cast<int16_t>(amount), sf2::kNoController});
-    }
-}
-
 // Build the SoundFont zone of `z`. The zone plays `voice` at amplitude `gain` (ZoneGain) with `sample`, at `index` in
 // the SoundFont's samples. Add `quieter` centibels of attenuation.
 sf2::Zone SoundFontZone(const Zone& z, const MacroVoice& voice, double gain, const Sample& sample, uint16_t index,
@@ -436,8 +431,11 @@ sf2::Zone SoundFontZone(const Zone& z, const MacroVoice& voice, double gain, con
     const int cents = Cents(tuning.cents);
     const std::optional<TremoloShape> tremolo = TremoloOf(voice);
 
+    // RegionZone writes the attenuation in the form that seqlib's ToZoneAttenuation gives. A tremolo swings about the
+    // middle of its range, half the range down (TremoloShape).
     sf2::ZoneValues values;
     values.keys = {z.low_key, z.high_key};
+    values.attenuation = -200.0 * std::log10(gain) + quieter + (tremolo ? tremolo->half_range_db * 10.0 : 0.0);
     values.pan = static_cast<int>(std::lround(ZonePan(voice, z) * kPanRange));
     values.attack = ToTimecents(shape.attack_ms, -12000, kLongestTimecents);
     values.decay = FallTimecents(shape.decay_db_per_ms);
@@ -451,10 +449,7 @@ sf2::Zone SoundFontZone(const Zone& z, const MacroVoice& voice, double gain, con
     values.sample = index;
     sf2::Zone zone = sf2::RegionZone(values);
 
-    // The generators and modulators that RegionZone doesn't write. The attenuation comes first (AddAttenuation). A
-    // tremolo swings about the middle of its range, half the range down (TremoloShape). A voice with ITD follows less
-    // of the channel's pan.
-    AddAttenuation(zone, -200.0 * std::log10(gain) + quieter + (tremolo ? tremolo->half_range_db * 10.0 : 0.0));
+    // The generators and modulators that RegionZone doesn't write. A voice with ITD follows less of the channel's pan.
     if (!tuning.follows_key)
     {
         AddGenerator(zone, sf2::kScaleTuning, 0);
@@ -465,7 +460,7 @@ sf2::Zone SoundFontZone(const Zone& z, const MacroVoice& voice, double gain, con
     }
     if (voice.itd)
     {
-        zone.modulators.push_back({kSrcPan, sf2::kPan, Amount(kPanRange * kItdPan), 0});
+        zone.modulators.push_back({sf2::kSrcPan, sf2::kPan, Amount(kPanRange * kItdPan), 0});
     }
     if (voice.vibrato)
     {
@@ -618,6 +613,7 @@ std::string SfzRegion(const Zone& z, int low, int high, const MacroVoice& voice,
     {
         volume -= tremolo->half_range_db;
     }
+    volume = std::max(volume, kSfzLowestVolumeDb);
     if (std::abs(volume) >= 0.005)
     {
         s += " volume=" + Number(volume, 2);
@@ -633,10 +629,10 @@ std::string SfzRegion(const Zone& z, int low, int high, const MacroVoice& voice,
         s += " pan_oncc10=" + Number(100.0 * kItdPan, 3);
     }
 
-    // sfizz's decays and releases fall kSfizzFallDb in their time.
+    // SFZ's decays and releases fall kSfzFallDb in their time.
     const auto fall_seconds = [](double db_per_ms)
     {
-        return db_per_ms == kAtOnce ? 0.0 : kSfizzFallDb / db_per_ms / 1000.0;
+        return db_per_ms == kAtOnce ? 0.0 : kSfzFallDb / db_per_ms / 1000.0;
     };
     s += seqlib::sfz::AmpEnvelopeOpcodes({.attack = slow.attack_ms / 1000.0,
                                           .decay = fall_seconds(slow.decay_db_per_ms),

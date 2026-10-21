@@ -3,14 +3,17 @@
 // Unit tests for dolphinsf2, without game data. The tests build small MusyX song groups, Yay0 data and modules of code
 // in memory. ntdlib's tests cover the conversion of JAudio's sound data.
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <exception>
 #include <filesystem>
 #include <map>
 #include <numbers>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -20,11 +23,13 @@
 #include "ntdlib/musyx/project.h"
 #include "ntdlib/musyx/samples.h"
 #include "ntdlib/musyx/song.h"
+#include "ntdlib/sequence_export/frame.h"
 #include "ntdlib/testing/big_endian_bytes.h"
 #include "ntdlib/testing/dol_files.h"
 #include "ntdlib/testing/sequence_export_check.h"
 #include "seqlib/sf2/reader.h"
 #include "seqlib/sf2/soundfont.h"
+#include "seqlib/sfz/track_file.h"
 #include "xsflib/bytes.h"
 #include "xsflib/testing/check.h"
 
@@ -218,10 +223,11 @@ void TestSoundTest()
         ErrorOf([&] { musyx::ReadSoundTest(module.Data(), "dll/test.rel", 4, 5, messages.Data(), "mess/test.dat"); }) ==
             "dll/test.rel's sound test runs past the file's end",
         "an entry past the module's end fails");
-    Check(ErrorOf([&]
-                  { musyx::ReadSoundTest(missing.Data(), "dll/test.rel", 0, 1, messages.Data(), "mess/test.dat"); }) ==
-              "mess/test.dat's message 47-2 is missing",
-          "a name that the bank lacks fails");
+    const auto read_missing = [&]
+    {
+        musyx::ReadSoundTest(missing.Data(), "dll/test.rel", 0, 1, messages.Data(), "mess/test.dat");
+    };
+    Check(ErrorOf(read_missing) == "mess/test.dat's message 47-2 is missing", "a name that the bank lacks fails");
 }
 
 // A module's table of sounds lists songs and sound effects in entries of 12 bytes. A song's entry gives its song group,
@@ -662,26 +668,26 @@ void TestMusyxTableLevels()
     const Performance table = musyx::PlaySong(song, {"table", "G/A/A", 5, 127, 100}, table_instruments, {});
     const Performance mixed = musyx::PlaySong(mixed_song, {"mixed", "G/A/A", 5, 127, 100}, mixed_instruments, {});
 
-    const double channel = 100.0 / 127.0 * 100.0 / 127.0;
+    constexpr double kChannel = 100.0 / 127.0 * 100.0 / 127.0;
     const auto written = [](double volume)
     {
         return static_cast<int>(std::lround(127.0 * std::sqrt(musyx::TableLevel(TestVolumes(), volume))));
     };
     const std::vector<int> volumes = VolumesOf(table);
-    Check(volumes == std::vector<int>{written(channel), written(64.0 / 127.0 * 100.0 / 127.0)},
+    Check(volumes == std::vector<int>{written(kChannel), written(64.0 / 127.0 * 100.0 / 127.0)},
           "CC7 takes the square root of the table's level of the channel's volume times the master volume");
     const std::vector<int> velocities = VelocitiesOf(table);
     Check(velocities.size() == 1 && !volumes.empty() &&
               std::abs(velocities[0] - TableVelocity(100, volumes[0], true)) <= 0.5,
           "the velocity gives the note the table's level of the velocity times the volume that CC7 stands for");
     Check(velocities.size() == 1 && !volumes.empty() &&
-              std::abs(TableMiss(velocities[0], volumes[0], 100.0 / 127.0 * channel)) < 0.15,
+              std::abs(TableMiss(velocities[0], volumes[0], 100.0 / 127.0 * kChannel)) < 0.15,
           "the note plays within 0.15 dB of the table's level of the whole product");
     Check(table.approximations.empty(), "a channel on the table reports no approximation");
 
     const std::vector<int> mixed_volumes = VolumesOf(mixed);
     const std::vector<int> mixed_velocities = VelocitiesOf(mixed);
-    Check(mixed_volumes == std::vector<int>{static_cast<int>(std::lround(127.0 * channel))},
+    Check(mixed_volumes == std::vector<int>{static_cast<int>(std::lround(127.0 * kChannel))},
           "a channel with both curves keeps the DLS curve's CC7");
     Check(mixed_velocities.size() == 2 && mixed_velocities[0] == 100, "the note on the DLS curve keeps its velocity");
     Check(mixed_velocities.size() == 2 && !mixed_volumes.empty() &&
@@ -701,8 +707,8 @@ void TestMusyxSong()
     const Conversion c = musyx::ConvertSong(TestSong(true, false), {"loop", "G/A/A", 5, 127}, instruments, {});
 
     const Performance& perf = c.performance;
-    const double bpm = 120.0 * musyx::kOutputRate / musyx::kNominalRate;
-    Check(!perf.tempo.empty() && std::abs(perf.tempo[0].bpm - bpm) < 0.01,
+    constexpr double kBpm = 120.0 * musyx::kOutputRate / musyx::kNominalRate;
+    Check(!perf.tempo.empty() && std::abs(perf.tempo[0].bpm - kBpm) < 0.01,
           "the song plays 0.089% fast, at the output's rate: " +
               (perf.tempo.empty() ? std::string("no tempo") : std::to_string(perf.tempo[0].bpm)));
     Check(perf.loop && perf.loop->start == 0 && perf.loop->end == 768 && perf.end_tick == 768,
@@ -727,8 +733,8 @@ void TestMusyxIntegerTickStep()
 
     const Performance perf = musyx::PlaySong(TestSong(true, false), listed, instruments, {});
 
-    const double bpm = 49920.0 / 65536.0 * 1000.0 * 60.0 / 384.0 * musyx::kOutputRate / musyx::kNominalRate;
-    Check(!perf.tempo.empty() && std::abs(perf.tempo[0].bpm - bpm) < 0.01,
+    constexpr double kBpm = 49920.0 / 65536.0 * 1000.0 * 60.0 / 384.0 * musyx::kOutputRate / musyx::kNominalRate;
+    Check(!perf.tempo.empty() && std::abs(perf.tempo[0].bpm - kBpm) < 0.01,
           "the song plays at 119.02 beats a minute, at the output's rate: " +
               (perf.tempo.empty() ? std::string("no tempo") : std::to_string(perf.tempo[0].bpm)));
     Check(perf.loop && perf.loop->start == 0 && perf.loop->end == 768, "the loop still runs from tick 0 to 768");
@@ -751,18 +757,15 @@ std::vector<std::array<int, 5>> ZoneModulators(const seqlib::sf2::Records& recor
     return modulators;
 }
 
-// A zone's attenuation goes into a modulator without a source, not into the initialAttenuation generator. FluidSynth
-// applies only 0.4 of the generator. Program 1 plays a copy of the macro with a ScaleVolume of 64/127. On the DLS
-// curve, the zone of the copy then plays at (64/127)², 119 centibels down. The zone of program 0 plays at full level
-// and gets no such modulator.
-void TestMusyxZoneAttenuation()
+// Convert a song whose second note plays program 1: a copy of the test's macro with a ScaleVolume of `scale`/127.
+Conversion ConvertScaledCopy(uint32_t scale, const std::string& name)
 {
     using ntdlib::musyx::MacroOp;
     using ntdlib::musyx::PatternEventKind;
     musyx::SongGroup group = TestSongGroup();
     group.pool.macros[2] = group.pool.macros[1];
     std::vector<ntdlib::musyx::MacroStep>& macro = group.pool.macros[2];
-    macro.insert(macro.begin() + 1, Step(MacroOp::kScaleVolume, {64, 0, 0, 0, 1}));
+    macro.insert(macro.begin() + 1, Step(MacroOp::kScaleVolume, {scale, 0, 0, 0, 1}));
     group.group.pages.push_back({.object = 2, .priority = 0, .max_voices = 8, .program = 1});
     musyx::Instruments instruments(group, TestVolumes());
     ntdlib::musyx::Song song = TestSong(false, false);
@@ -770,12 +773,22 @@ void TestMusyxZoneAttenuation()
     events.push_back({.tick = 240, .kind = PatternEventKind::kProgram, .value = 1});
     events.push_back({.tick = 288, .kind = PatternEventKind::kNote, .key = 62, .velocity = 100, .length = 96});
 
-    const Conversion c = musyx::ConvertSong(song, {"quiet", "G/A/A", 5, 127}, instruments, {});
-    const seqlib::sf2::Records records = seqlib::sf2::Read(c.sf2);
+    return musyx::ConvertSong(song, {name, "G/A/A", 5, 127}, instruments, {});
+}
 
-    std::size_t sample_zones = 0;
-    std::size_t generators = 0;
-    std::vector<int> amounts;
+// The attenuation of the zones that play a sample in a SoundFont: the number of such zones, the values of their
+// initialAttenuation generators, and their modulators to initialAttenuation.
+struct SampleZoneAttenuation
+{
+    std::size_t zones = 0;
+    std::vector<int> generators;
+    std::vector<std::array<int, 5>> modulators;
+};
+
+SampleZoneAttenuation AttenuationOf(const std::vector<uint8_t>& sf2)
+{
+    const seqlib::sf2::Records records = seqlib::sf2::Read(sf2);
+    SampleZoneAttenuation a;
     for (std::size_t zone = 0; zone + 1 < records.Count("ibag", 4); zone++)
     {
         const std::map<uint16_t, uint16_t> gens = records.ZoneGens(zone);
@@ -784,23 +797,125 @@ void TestMusyxZoneAttenuation()
             continue;
         }
 
-        sample_zones++;
-        generators += gens.count(seqlib::sf2::kInitialAttenuation);
+        a.zones++;
+        if (gens.contains(seqlib::sf2::kInitialAttenuation))
+        {
+            a.generators.push_back(gens.at(seqlib::sf2::kInitialAttenuation));
+        }
         for (const std::array<int, 5>& m : ZoneModulators(records, zone))
         {
-            if (m[0] == seqlib::sf2::kNoController && m[1] == seqlib::sf2::kInitialAttenuation)
+            if (m[1] == seqlib::sf2::kInitialAttenuation)
             {
-                Check(m[3] == seqlib::sf2::kNoController && m[4] == seqlib::sf2::kLinear,
-                      "the modulator has no amount source and a linear transform");
-                amounts.push_back(m[2]);
+                a.modulators.push_back(m);
             }
         }
     }
 
-    Check(sample_zones == 2, "each program has a zone: " + std::to_string(sample_zones));
-    Check(generators == 0, "no zone has an initialAttenuation generator");
-    Check(amounts == std::vector<int>{119}, "only the zone of the quieter macro gets a modulator, of 119 centibels");
+    return a;
+}
+
+// A zone's initialAttenuation generator holds 2.5 times the zone's attenuation. FluidSynth, BASSMIDI and the E-mu chips
+// apply 0.4 of it. Program 1 plays a copy of the macro with a ScaleVolume of 64/127. On the DLS curve, the zone of the
+// copy then plays at (64/127)²: 119.05 cB down. Its generator holds 298 cB. The zone of program 0 plays at full level
+// and gets no attenuation.
+void TestMusyxZoneAttenuation()
+{
+    const Conversion c = ConvertScaledCopy(64, "quiet");
+
+    const SampleZoneAttenuation a = AttenuationOf(c.sf2);
+
+    Check(a.zones == 2, "each program has a zone: " + std::to_string(a.zones));
+    Check(a.generators == std::vector<int>{298}, "only the zone of the quieter macro gets an attenuation: 298 cB");
+    Check(a.modulators.empty(), "no zone has a modulator to initialAttenuation");
     Check(ntdlib::testing::CheckConversion(c, "quiet") == 0, "independent readers accept the files");
+}
+
+// The values of `opcode`, such as "volume", in the SFZ files of `c`, in the order of the files and their regions.
+std::vector<std::string> OpcodeValues(const Conversion& c, const std::string& opcode)
+{
+    const std::string key = " " + opcode + "=";
+    std::vector<std::string> values;
+    for (const seqlib::sfz::File& f : c.sfz.files)
+    {
+        for (std::size_t at = f.text.find(key); at != std::string::npos; at = f.text.find(key, at + 1))
+        {
+            const std::size_t start = at + key.size();
+            values.push_back(f.text.substr(start, f.text.find_first_of(" \n", start) - start));
+        }
+    }
+
+    return values;
+}
+
+// A voice at a volume of 0 plays at a gain of 0. Program 1 plays a copy of the macro with a ScaleVolume of 0. The zone
+// of the copy gets seqlib's form of an infinite attenuation: 1440 cB in its generator and a modulator of 864 cB. Its
+// SFZ region gets the lowest volume that sfzformat.com documents: -144 dB.
+void TestMusyxSilentZone()
+{
+    namespace sf2 = seqlib::sf2;
+    constexpr std::array<int, 5> kRest = {sf2::kNoController, sf2::kInitialAttenuation, 864, sf2::kNoController,
+                                          sf2::kLinear};
+
+    const Conversion c = ConvertScaledCopy(0, "silent");
+
+    const SampleZoneAttenuation a = AttenuationOf(c.sf2);
+    Check(a.generators == std::vector<int>{1440}, "only the zone of the silent macro gets an attenuation: 1440 cB");
+    Check(a.modulators == std::vector<std::array<int, 5>>{kRest}, "a modulator without a source holds 864 cB more");
+    Check(OpcodeValues(c, "volume") == std::vector<std::string>{"-144"},
+          "only the region of the silent macro gets a volume: -144 dB");
+    Check(ntdlib::testing::CheckConversion(c, "silent") == 0, "independent readers accept the files");
+}
+
+// An SFZ release falls by a factor of e^-8 in its time: 8 × 20 / ln 10 dB, about 69.49 dB. sfzformat.com gives that
+// curve on its page on ampeg_attack. The test macro's DLS release falls 96.5 dB in 100 ms of MusyX's clock: 193 steps
+// of 0.5 dB. The region's release therefore lasts 100 × 69.49 / 96.5 ms of MusyX's clock.
+void TestMusyxSfzRelease()
+{
+    const double kSeconds = 0.1 * (8.0 * 20.0 / std::numbers::ln10) / 96.5 * musyx::kNominalRate / musyx::kOutputRate;
+    const musyx::SongGroup group = TestSongGroup();
+    musyx::Instruments instruments(group, TestVolumes());
+
+    const Conversion c = musyx::ConvertSong(TestSong(false, false), {"release", "G/A/A", 5, 127}, instruments, {});
+
+    const std::vector<std::string> releases = OpcodeValues(c, "ampeg_release");
+    Check(releases.size() == 1 && std::abs(std::stod(releases[0]) - kSeconds) < 1e-6,
+          "the release lasts " + std::to_string(kSeconds) + " s: " + (releases.empty() ? "none" : releases[0]));
+}
+
+// Each instrument's global zone holds seqlib's kGlobalZoneModulators and a modulator from CC1 to the vibrato's depth.
+// The set's CC10 modulator has an amount of 500 and replaces the default one of 1000. The CC1 modulator has an amount
+// of 0 and replaces the default one of 50 cents.
+void TestMusyxGlobalZone()
+{
+    namespace sf2 = seqlib::sf2;
+    const musyx::SongGroup group = TestSongGroup();
+    musyx::Instruments instruments(group, TestVolumes());
+
+    const Conversion c = musyx::ConvertSong(TestSong(false, false), {"global", "G/A/A", 5, 127}, instruments, {});
+    const sf2::Records records = sf2::Read(c.sf2);
+
+    std::vector<std::array<int, 5>> expected;
+    for (const sf2::Modulator& m : sf2::kGlobalZoneModulators)
+    {
+        expected.push_back({m.source, m.dest, m.amount, m.amount_source, m.transform});
+    }
+    expected.push_back({sf2::kSrcModWheel, sf2::kVibLfoToPitch, 0, sf2::kNoController, sf2::kLinear});
+
+    std::vector<std::vector<std::array<int, 5>>> global_zones;
+    for (std::size_t zone = 0; zone + 1 < records.Count("ibag", 4); zone++)
+    {
+        if (!records.ZoneGens(zone).contains(sf2::kSampleId))
+        {
+            global_zones.push_back(ZoneModulators(records, zone));
+        }
+    }
+
+    constexpr std::array<int, 5> kCc10 = {sf2::kSrcPan, sf2::kPan, 500, sf2::kNoController, sf2::kLinear};
+    Check(global_zones.size() == 1, "the instrument has one global zone: " + std::to_string(global_zones.size()));
+    Check(!global_zones.empty() && global_zones[0] == expected,
+          "the global zone holds kGlobalZoneModulators and the CC1 modulator");
+    Check(!global_zones.empty() && std::ranges::count(global_zones[0], kCc10) == 1,
+          "the global zone holds the CC10 modulator with an amount of 500");
 }
 
 // A tempo table starts again in each pass. The run goes on past the end to find the loop, but the performance keeps
@@ -945,6 +1060,9 @@ int main(int argc, char** argv)
     TestMusyxSong();
     TestMusyxIntegerTickStep();
     TestMusyxZoneAttenuation();
+    TestMusyxSilentZone();
+    TestMusyxSfzRelease();
+    TestMusyxGlobalZone();
     TestMusyxTempoTable();
     TestMusyxPitchWheelRange();
     TestMusyxMixedPitchWheelRanges();

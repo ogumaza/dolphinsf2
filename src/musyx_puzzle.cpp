@@ -11,7 +11,6 @@
 #include <functional>
 #include <map>
 #include <memory>
-#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -22,6 +21,7 @@
 #include "ntdlib/musyx/samples.h"
 #include "xsflib/binary.h"
 
+#include "musyx_game.h"
 #include "rel_module.h"
 #include "yay0.h"
 
@@ -49,16 +49,15 @@ SongGroup MakeSongGroup(std::span<const uint8_t> project, std::span<const uint8_
                         std::span<const uint8_t> directory, std::vector<uint8_t> samples, uint16_t id,
                         const std::string& name)
 {
-    std::vector<ntdlib::musyx::Group> groups = ntdlib::musyx::ReadProject(project);
-    const auto found = std::find_if(groups.begin(), groups.end(), [id](const ntdlib::musyx::Group& g)
-                                    { return g.id == id && g.type == ntdlib::musyx::GroupType::kSongs; });
-    if (found == groups.end())
+    const std::vector<ntdlib::musyx::Group> groups = ntdlib::musyx::ReadProject(project);
+    const ntdlib::musyx::Group* found = FindSongGroup(groups, id);
+    if (found == nullptr)
     {
         throw FormatError(name + " has no song group " + std::to_string(id));
     }
 
     SongGroup group;
-    group.group = std::move(*found);
+    group.group = *found;
     group.pool = ntdlib::musyx::ReadPool(pool);
     group.samples = ntdlib::musyx::ReadSampleDirectory(directory);
     group.sample_data = std::move(samples);
@@ -100,27 +99,7 @@ void AddLoadedGroup(SongGroup& group, const LoadedGroup& loaded)
     group.pool.tables.insert(loaded.pool.tables.begin(), loaded.pool.tables.end());
     group.pool.keymaps.insert(loaded.pool.keymaps.begin(), loaded.pool.keymaps.end());
     group.pool.layers.insert(loaded.pool.layers.begin(), loaded.pool.layers.end());
-
-    const auto offset = static_cast<uint32_t>(group.sample_data.size());
-    bool added = false;
-    for (const ntdlib::musyx::SampleInfo& sample : loaded.samples)
-    {
-        const auto held = [&sample](const ntdlib::musyx::SampleInfo& s)
-        {
-            return s.id == sample.id;
-        };
-        if (std::none_of(group.samples.begin(), group.samples.end(), held))
-        {
-            ntdlib::musyx::SampleInfo moved = sample;
-            moved.offset += offset;
-            group.samples.push_back(moved);
-            added = true;
-        }
-    }
-    if (added)
-    {
-        group.sample_data.insert(group.sample_data.end(), loaded.sample_data.begin(), loaded.sample_data.end());
-    }
+    AddMissingSamples(group, loaded.samples, loaded.sample_data);
 }
 
 // Add a song to `music`.
@@ -211,6 +190,7 @@ void AddMenu(PuzzleMusic& music, const ReadFile& read_file, uint8_t master_volum
         {
             throw FormatError(std::string(kFile) + "'s parts overlap");
         }
+
         parts[i] = r.Sub(start, end - start);
     }
 
@@ -432,6 +412,7 @@ void AddYoshisCookie(PuzzleMusic& music, const ReadFile& read_file, uint8_t mast
         {
             throw FormatError(std::string(kItems) + "'s items overlap");
         }
+
         return item_reader.Sub(start, end - start);
     };
 

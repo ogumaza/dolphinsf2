@@ -9,8 +9,6 @@
 
 #include "ntdlib/disc/game.h"
 
-#include "jaudio.h"
-
 namespace dolphinsf2
 {
 

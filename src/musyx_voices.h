@@ -15,7 +15,6 @@
 #include <vector>
 
 #include "ntdlib/musyx/pool.h"
-#include "ntdlib/musyx/samples.h"
 
 #include "jaudio.h"
 #include "musyx_game.h"

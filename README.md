@@ -362,15 +362,15 @@ dolphinsf2 also writes SFZ files with the same instruments:
 - `sfz/samples/`: 16-bit WAV samples shared by all sequences in the game.
 
 SFZ players ignore MIDI channels. Each file contains one instrument. Load the MIDI in a DAW and
-assign an SFZ player, such as sfizz, to each track with its matching file. Output targets sfizz
-1.2.
+assign an SFZ player, such as sfizz, to each track with its matching file. The player tested is
+sfizz 1.2.
 
 Presets use program change. A sequence with more than 128 presets uses bank select (CC0) too.
 SFZ regions differ from SoundFont zones in these ways:
 
-- **Envelopes.** As in the game, sfizz decays and releases fall linearly in dB. They fall by
-  78.17 dB over their specified duration. Times are fitted as for SoundFont. SoundFont's limit
-  on them doesn't apply.
+- **Envelopes.** As in the game, decays and releases fall linearly in dB. The documentation's
+  curve falls by a factor of e^-8 over the specified time. That's 69.49 dB. Times are fitted as
+  for SoundFont. SoundFont's limit on them doesn't apply.
 - **LFO.** The vibrato is a sine wave. The game uses a sine too.
 - **Pan.** A curve maps CC10 to `(value - 64) / 64`. That's the SoundFont convention that the
   MIDI output uses.
@@ -382,9 +382,20 @@ SFZ regions differ from SoundFont zones in these ways:
 - **Loops.** sfizz crossfades the loop end with data before the loop start over at least 1 ms.
   Samples include 4 ms of repeated loop data before the start. The crossfade is then inaudible.
 
+sfizz 1.2 ends decays and releases sooner than the documentation's curve. Over the specified
+time, sfizz falls by a factor of e^-9: 78.17 dB. Where the game has fallen 40 dB, sfizz has
+fallen 45 dB.
+
 During offline rendering, sfizz 1.2.3 can silence streamed samples after their preloaded
 portion. The files request full loading with `hint_ram_based=1`. sfizz prints "Unsupported value
 for hint_stealing: 1" for this. The message is harmless.
+
+The opcodes follow their documentation at sfzformat.com, with these exceptions:
+
+- **Long decays.** A decay can last longer than the documented limit of 100 s. The game's
+  envelope falls that slowly. sfizz 1.2 plays the time as written.
+- **Loud regions.** A region's `volume` can lie above the documented limit of 6 dB. sfizz 1.2
+  takes volumes up to 48 dB.
 
 ## Differences from the game
 
@@ -464,7 +475,8 @@ nine where a song has them:
 - **Effect sends.** CC91 and CC93 hold each channel's reverb and chorus sends. Synths play them
   as reverb and chorus. In the game, the sends reach the effects that the game sets up.
 
-SoundFont output follows the specification. Player differences remain:
+SoundFont output follows the specification, apart from the zones' attenuation. Player differences
+remain:
 
 - **Level.** FluidSynth runs the SoundFont low-pass filter on every note. dolphinsf2's zones
   leave that filter open. The filter still divides the level by the square root of its Q.
@@ -477,20 +489,20 @@ SoundFont output follows the specification. Player differences remain:
   and releases then fall 4% slower in decibels. Sustain levels are 4% shallower: -11.9 dB plays
   as -11.4 dB. FluidSynth also slows any release faster than 15.6 ms (-7200 timecents) to that
   time.
-- **Attenuation.** Like E-mu hardware, FluidSynth and BASSMIDI apply 0.4 of a zone's initial
-  attenuation. The specification applies all of it. dolphinsf2 therefore puts the attenuation of
-  a MusyX game's zones in a modulator without a source. The specification counts a missing
-  source as 1. The modulator then adds its whole amount to the attenuation. FluidSynth 2.4.5 and
-  later do the same. BASSMIDI and earlier versions of FluidSynth ignore such a modulator. The
-  zones then lose their attenuation. The zones of the JAudio games keep their attenuation in the
-  generator.
+- **Attenuation.** FluidSynth, BASSMIDI and the E-mu chips apply 0.4 of a zone's initial
+  attenuation. The specification calls for all of it. dolphinsf2 therefore writes 2.5 times a
+  zone's attenuation in the generator, up to the generator's limit of 1440 cB. Those players
+  play that limit as 57.6 dB. A modulator without a source holds any attenuation beyond 57.6 dB.
+  FluidSynth 2.4.5 and later apply that modulator. BASSMIDI and earlier versions of FluidSynth
+  ignore it. A player that follows the specification plays every attenuated zone too quietly.
+  TinySoundFont plays a quarter of the attenuation. Before 27 January 2025, TinySoundFont played
+  2.5 times the attenuation.
 - **Pitch.** FluidSynth rounds pitch down to whole cents. Fractional bends can be almost a cent
   flat. The beating of notes detuned by less than a cent changes too.
 - **Modulators.** BASSMIDI 2.4.16 applies only some SoundFont modulators. TinySoundFont applies
   none. Neither applies the CC1 and CC10 modulators. MusyX songs then pan wider than the
   SoundFont sets. In BASSMIDI, CC1 gives the specification's default vibrato: 50 cents at CC1
-  127. In TinySoundFont, CC1 vibrato depth has no effect. The zones of the MusyX games lose their
-  attenuation there too.
+  127. In TinySoundFont, CC1 vibrato depth has no effect.
 - **Tempo changes.** FluidSynth rounds its position to the nearest MIDI tick at each change and
   restarts its clock there. This can advance playback by half a tick per change: 1/30 ms at 120
   BPM with 7680 ticks per quarter note. TinySoundFont rounds tempo-change times down to

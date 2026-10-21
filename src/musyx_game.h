@@ -2,14 +2,15 @@
 
 // The music of a GameCube game that plays it through Factor 5's MusyX: the songs that the game's code lists, and the
 // song groups that play them. ntdlib's musyx module reads the files. dolphinsf2 recognizes a game by the SHA-1 of its
-// main.dol. It converts two games by Camelot, Mario Party 4, Pokémon Colosseum, WarioWare, Inc.: Mega Party Game$! and
-// the NDDEMO disc. Camelot names each file on its discs with three capital letters, a path of three levels (PathOf).
-// One song group plays all of a Camelot game's songs. Mario Party 4 keeps its groups and its songs in the file of
-// Hudson's sound manager (musyx_msm.h). There each song names its group. Pokémon Colosseum keeps its songs, and its
-// song groups' projects, pools and sample directories, in FSYS archives (ntdlib/disc/fsys.h). There the code's table
-// gives each song's group. WarioWare keeps its groups in one MusyX project and its songs in one file. Its sound room
-// gives each song's group (ReadSoundRoom). The NDDEMO disc's code lists the paths of its songs' files (ReadSongPaths).
-// One song group plays them all.
+// main.dol. It converts two games by Camelot, Mario Party 4, Pokémon Colosseum, WarioWare, Inc.: Mega Party Game$!, the
+// NDDEMO disc and Nintendo Puzzle Collection. Camelot names each file on its discs with three capital letters, a path
+// of three levels (PathOf). One song group plays all of a Camelot game's songs. Mario Party 4 keeps its groups and its
+// songs in the file of Hudson's sound manager (musyx_msm.h). There each song names its group. Pokémon Colosseum keeps
+// its songs, and its song groups' projects, pools and sample directories, in FSYS archives (ntdlib/disc/fsys.h). There
+// the code's table gives each song's group. WarioWare keeps its groups in one MusyX project and its songs in one file.
+// Its sound room gives each song's group (ReadSoundRoom). The NDDEMO disc's code lists the paths of its songs' files
+// (ReadSongPaths). One song group plays them all. Nintendo Puzzle Collection keeps its music in the modules of its
+// code.
 
 #pragma once
 
@@ -134,6 +135,15 @@ struct SongGroup
     std::vector<ntdlib::musyx::SampleInfo> samples;
     std::vector<uint8_t> sample_data;
 };
+
+// The first group of songs among `groups`, a project's groups, whose MusyX ID is `id`. Without `id`, the first group of
+// songs. Null if `groups` has no such group.
+const ntdlib::musyx::Group* FindSongGroup(const std::vector<ntdlib::musyx::Group>& groups, std::optional<uint16_t> id);
+
+// Give `group` the samples of `samples` that it lacks. `data` holds their data. That data goes after the group's data
+// if the group takes any of the samples.
+void AddMissingSamples(SongGroup& group, const std::vector<ntdlib::musyx::SampleInfo>& samples,
+                       std::span<const uint8_t> data);
 
 // What the code of a game with Hudson's sound manager says about its music (see musyx_game.cpp).
 struct SoundManagerRules;

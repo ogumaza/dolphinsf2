@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.20)
 # the macOS app. A release changes it here and adds its notes in docs/release-notes/.
 # C is for the compression libraries below. A build that doesn't find them installed compiles them from their C
 # sources.
-project(dolphinsf2 VERSION 1.3.0 LANGUAGES C CXX)
+project(dolphinsf2 VERSION 1.3.1 LANGUAGES C CXX)
 
 # The libraries that dolphinsf2 shares with the other converters and the PSF players: seqlib for MIDI, SoundFont 2
 # and SFZ, xsflib for the common code and the build's templates, and ntdlib for Nintendo's formats. All three are

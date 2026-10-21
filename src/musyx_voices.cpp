@@ -13,10 +13,21 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
+#include <memory>
+#include <optional>
+#include <string>
 #include <utility>
+#include <vector>
 
+#include "ntdlib/musyx/pool.h"
+#include "ntdlib/musyx/project.h"
+#include "ntdlib/musyx/samples.h"
 #include "xsflib/binary.h"
+
+#include "musyx_game.h"
 
 namespace dolphinsf2::musyx
 {

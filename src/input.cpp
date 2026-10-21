@@ -4,18 +4,26 @@
 
 #include "input.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <ios>
+#include <memory>
 #include <optional>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "ntdlib/disc/game.h"
 #include "ntdlib/disc/image.h"
+#include "ntdlib/sequence_export/frame.h"
 #include "xsflib/ascii.h"
 #include "xsflib/files.h"
 
 #include "disc.h"
+#include "jaudio.h"
+#include "musyx_convert.h"
 #include "musyx_game.h"
 
 namespace dolphinsf2
@@ -64,6 +72,7 @@ Input Input::Open(const std::filesystem::path& path)
     {
         return OpenDisc(path);
     }
+
     // A start-up archive: JAudio2's BAA, or JAudio1's AAF.
     if (IsStartUpArchive(header))
     {

@@ -28,18 +28,26 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <limits>
+#include <cstddef>
+#include <cstdint>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
 
+#include "ntdlib/musyx/project.h"
 #include "ntdlib/musyx/song.h"
 #include "ntdlib/sequence_export/passes.h"
+#include "seqlib/midi/performance.h"
 #include "seqlib/midi/recorder.h"
 #include "xsflib/binary.h"
+
+#include "jaudio.h"
+#include "musyx_game.h"
+#include "musyx_voices.h"
 
 namespace dolphinsf2::musyx
 {
@@ -760,19 +768,24 @@ void Player::Controller(uint8_t channel, uint8_t controller, uint8_t value, int6
     case 1:
         e.kind = EventKind::kModulation;
         break;
+
     // The channel's volume as the song sets it. AddEvents maps it to the voices' curve (MapLevel).
     case 7:
         e.kind = EventKind::kVolume;
         break;
+
     case 10:
         e.kind = EventKind::kPan;
         break;
+
     case 11:
         e.kind = EventKind::kExpression;
         break;
+
     case 91:
         e.kind = EventKind::kReverb;
         break;
+
     case 93:
         e.kind = EventKind::kChorus;
         break;
@@ -785,6 +798,7 @@ void Player::Controller(uint8_t channel, uint8_t controller, uint8_t value, int6
         }
         active_.clear();
         return;
+
     case kCrossfade:
     case kPriority:
     case kPriorityHigh:
@@ -1062,10 +1076,10 @@ bool Player::Step()
 
 void Player::Run(std::size_t passes)
 {
-    const auto most_runs = static_cast<uint64_t>(kMaxSeconds / kRunSeconds);
+    constexpr auto kMostRuns = static_cast<uint64_t>(kMaxSeconds / kRunSeconds);
     while (!ended_ && jumps_.size() < passes)
     {
-        if (runs_ >= most_runs)
+        if (runs_ >= kMostRuns)
         {
             truncated_ = true;
             return;
@@ -1238,8 +1252,12 @@ void Player::AddEvents(Performance& perf)
     for (std::size_t c = 0; c < kChannels; c++)
     {
         std::vector<ChannelEvent>& events = events_[c];
-        std::sort(events.begin(), events.end(), [](const ChannelEvent& a, const ChannelEvent& b)
-                  { return std::tie(a.tick, a.rank, a.order) < std::tie(b.tick, b.rank, b.order); });
+        const auto earlier = [](const ChannelEvent& a, const ChannelEvent& b)
+        {
+            return std::tie(a.tick, a.rank, a.order) < std::tie(b.tick, b.rank, b.order);
+        };
+        std::sort(events.begin(), events.end(), earlier);
+
         std::map<EventKind, int> last;
         float pitch = 0.0f;
         ChannelLevels levels;
@@ -1248,6 +1266,7 @@ void Player::AddEvents(Performance& perf)
             TrackEvent e = ce.event;
             e.tick = static_cast<uint32_t>(std::max<int64_t>(ce.tick, 0));
             MapLevel(c, e, levels);
+
             if (e.kind == EventKind::kPitch)
             {
                 if (e.semitones == pitch)
@@ -1266,6 +1285,7 @@ void Player::AddEvents(Performance& perf)
                 }
                 last[e.kind] = value;
             }
+
             perf.tracks[c].push_back(e);
         }
     }

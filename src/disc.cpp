@@ -4,10 +4,16 @@
 
 #include "disc.h"
 
+#include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 
 #include "ntdlib/disc/containers.h"
+#include "ntdlib/disc/game.h"
+#include "ntdlib/disc/image.h"
+
+#include "jaudio.h"
 
 namespace dolphinsf2
 {

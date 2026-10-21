@@ -7,15 +7,26 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cstddef>
+#include <cstdint>
 #include <iterator>
 #include <map>
+#include <memory>
+#include <optional>
 #include <set>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "ntdlib/disc/error.h"
 #include "ntdlib/disc/fsys.h"
+#include "ntdlib/disc/game.h"
+#include "ntdlib/dol.h"
+#include "ntdlib/musyx/pool.h"
+#include "ntdlib/musyx/project.h"
+#include "ntdlib/musyx/samples.h"
 #include "xsflib/binary.h"
 #include "xsflib/bytes.h"
 #include "xsflib/sha1.h"
@@ -260,6 +271,7 @@ std::string DolText(const ntdlib::Dol& dol, uint32_t address, std::size_t longes
         {
             break;
         }
+
         text += c;
     }
 
@@ -306,19 +318,15 @@ std::set<uint16_t> StartedSamples(const ntdlib::musyx::Pool& pool)
 std::shared_ptr<const SongGroup> ReadSoundManagerGroup(const MsmFile& file, uint16_t id, const std::string& path)
 {
     const MsmGroup parts = file.Group(id);
-    std::vector<ntdlib::musyx::Group> groups = ntdlib::musyx::ReadProject(parts.project);
-    const auto is_songs = [id](const ntdlib::musyx::Group& g)
-    {
-        return g.id == id && g.type == ntdlib::musyx::GroupType::kSongs;
-    };
-    const auto songs = std::find_if(groups.begin(), groups.end(), is_songs);
-    if (songs == groups.end())
+    const std::vector<ntdlib::musyx::Group> groups = ntdlib::musyx::ReadProject(parts.project);
+    const ntdlib::musyx::Group* songs = FindSongGroup(groups, id);
+    if (songs == nullptr)
     {
         throw FormatError(path + "'s group " + std::to_string(id) + " has no song group");
     }
 
     auto group = std::make_shared<SongGroup>();
-    group->group = std::move(*songs);
+    group->group = *songs;
     group->pool = ntdlib::musyx::ReadPool(parts.pool);
     group->samples = ntdlib::musyx::ReadSampleDirectory(parts.directory);
     group->sample_data.assign(parts.samples.begin(), parts.samples.end());
@@ -334,7 +342,7 @@ std::shared_ptr<const SongGroup> ReadSoundManagerGroup(const MsmFile& file, uint
     // entries that the group lacks go into the group's directory.
     for (const MsmGroup& base : file.BaseGroups())
     {
-        std::vector<ntdlib::musyx::SampleInfo> samples = ntdlib::musyx::ReadSampleDirectory(base.directory);
+        const std::vector<ntdlib::musyx::SampleInfo> samples = ntdlib::musyx::ReadSampleDirectory(base.directory);
         const auto lacking = [&missing](const ntdlib::musyx::SampleInfo& s)
         {
             return missing.contains(s.id);
@@ -344,20 +352,10 @@ std::shared_ptr<const SongGroup> ReadSoundManagerGroup(const MsmFile& file, uint
             continue;
         }
 
-        const auto offset = static_cast<uint32_t>(group->sample_data.size());
-        group->sample_data.insert(group->sample_data.end(), base.samples.begin(), base.samples.end());
-        for (ntdlib::musyx::SampleInfo& sample : samples)
+        AddMissingSamples(*group, samples, base.samples);
+        for (const ntdlib::musyx::SampleInfo& sample : samples)
         {
-            const auto held = [&sample](const ntdlib::musyx::SampleInfo& s)
-            {
-                return s.id == sample.id;
-            };
-            if (std::none_of(group->samples.begin(), group->samples.end(), held))
-            {
-                sample.offset += offset;
-                missing.erase(sample.id);
-                group->samples.push_back(sample);
-            }
+            missing.erase(sample.id);
         }
     }
 
@@ -400,19 +398,16 @@ std::shared_ptr<const SongGroup> ReadSetGroup(const std::vector<FsysFile>& commo
                                               const std::string& set, std::vector<uint8_t> samples)
 {
     const std::string project = set + "_proj";
-    std::vector<ntdlib::musyx::Group> groups = ntdlib::musyx::ReadProject(FsysFileNamed(common, project, archive).data);
-    const auto is_songs = [](const ntdlib::musyx::Group& g)
-    {
-        return g.type == ntdlib::musyx::GroupType::kSongs;
-    };
-    const auto songs = std::find_if(groups.begin(), groups.end(), is_songs);
-    if (songs == groups.end())
+    const std::vector<ntdlib::musyx::Group> groups =
+        ntdlib::musyx::ReadProject(FsysFileNamed(common, project, archive).data);
+    const ntdlib::musyx::Group* songs = FindSongGroup(groups, std::nullopt);
+    if (songs == nullptr)
     {
         throw FormatError(archive + "'s " + project + " has no song group");
     }
 
     auto group = std::make_shared<SongGroup>();
-    group->group = std::move(*songs);
+    group->group = *songs;
     group->pool = ntdlib::musyx::ReadPool(FsysFileNamed(common, set + "_pool", archive).data);
     group->samples = ntdlib::musyx::ReadSampleDirectory(FsysFileNamed(common, set + "_sdir", archive).data);
     group->sample_data = std::move(samples);
@@ -556,6 +551,41 @@ std::span<const uint8_t> SongIn(const ntdlib::Dol& dol, uint32_t sizes, uint32_t
     const uint64_t size = std::min<uint64_t>(DolWord(dol, sizes + number * 4u), songs.size() - offset);
 
     return songs.subspan(static_cast<std::size_t>(offset), static_cast<std::size_t>(size));
+}
+
+const ntdlib::musyx::Group* FindSongGroup(const std::vector<ntdlib::musyx::Group>& groups, std::optional<uint16_t> id)
+{
+    const auto is_songs = [id](const ntdlib::musyx::Group& g)
+    {
+        return g.type == ntdlib::musyx::GroupType::kSongs && (!id || g.id == *id);
+    };
+    const auto songs = std::find_if(groups.begin(), groups.end(), is_songs);
+    return songs == groups.end() ? nullptr : &*songs;
+}
+
+void AddMissingSamples(SongGroup& group, const std::vector<ntdlib::musyx::SampleInfo>& samples,
+                       std::span<const uint8_t> data)
+{
+    const auto offset = static_cast<uint32_t>(group.sample_data.size());
+    bool added = false;
+    for (const ntdlib::musyx::SampleInfo& sample : samples)
+    {
+        const auto held = [&sample](const ntdlib::musyx::SampleInfo& s)
+        {
+            return s.id == sample.id;
+        };
+        if (std::none_of(group.samples.begin(), group.samples.end(), held))
+        {
+            ntdlib::musyx::SampleInfo moved = sample;
+            moved.offset += offset;
+            group.samples.push_back(moved);
+            added = true;
+        }
+    }
+    if (added)
+    {
+        group.sample_data.insert(group.sample_data.end(), data.begin(), data.end());
+    }
 }
 
 std::optional<Game> Game::Open(std::shared_ptr<ntdlib::disc::GameFiles> disc)
@@ -742,12 +772,8 @@ void Game::ReadSoundRoomGame(const SoundRoomRules& rules)
         const auto [found, added] = indexes.try_emplace(listed.group_id, groups_.size());
         if (added)
         {
-            const auto is_songs = [&listed](const ntdlib::musyx::Group& g)
-            {
-                return g.id == listed.group_id && g.type == ntdlib::musyx::GroupType::kSongs;
-            };
-            const auto songs = std::find_if(groups.begin(), groups.end(), is_songs);
-            if (songs == groups.end())
+            const ntdlib::musyx::Group* songs = FindSongGroup(groups, listed.group_id);
+            if (songs == nullptr)
             {
                 throw FormatError(project + ".proj has no song group " + std::to_string(listed.group_id));
             }
@@ -771,19 +797,15 @@ void Game::ReadPathTableGame(const PathTableRules& rules)
 {
     // The project's song group, with the pool and the samples.
     const std::string project = rules.project;
-    std::vector<ntdlib::musyx::Group> groups = ntdlib::musyx::ReadProject(ReadFile(project + ".prj"));
-    const auto is_songs = [&rules](const ntdlib::musyx::Group& g)
-    {
-        return g.id == rules.group && g.type == ntdlib::musyx::GroupType::kSongs;
-    };
-    const auto songs = std::find_if(groups.begin(), groups.end(), is_songs);
-    if (songs == groups.end())
+    const std::vector<ntdlib::musyx::Group> groups = ntdlib::musyx::ReadProject(ReadFile(project + ".prj"));
+    const ntdlib::musyx::Group* songs = FindSongGroup(groups, rules.group);
+    if (songs == nullptr)
     {
         throw FormatError(project + ".prj has no song group " + std::to_string(rules.group));
     }
 
     auto group = std::make_shared<SongGroup>();
-    group->group = std::move(*songs);
+    group->group = *songs;
     group->pool = ntdlib::musyx::ReadPool(ReadFile(project + ".pol"));
     group->samples = ntdlib::musyx::ReadSampleDirectory(ReadFile(project + ".sdr"));
     group->sample_data = ReadFile(project + ".smp");
@@ -820,18 +842,14 @@ std::shared_ptr<const SongGroup> Game::ReadSongGroup(uint32_t first_file) const
     group->sample_data = ReadFile(PathOf(first_file + 6));
 
     // The project's first group of songs, with the pool and the samples.
-    std::vector<ntdlib::musyx::Group> groups = ntdlib::musyx::ReadProject(project);
-    const auto is_songs = [](const ntdlib::musyx::Group& g)
-    {
-        return g.type == ntdlib::musyx::GroupType::kSongs;
-    };
-    const auto songs = std::find_if(groups.begin(), groups.end(), is_songs);
-    if (songs == groups.end())
+    const std::vector<ntdlib::musyx::Group> groups = ntdlib::musyx::ReadProject(project);
+    const ntdlib::musyx::Group* songs = FindSongGroup(groups, std::nullopt);
+    if (songs == nullptr)
     {
         throw FormatError(PathOf(first_file + 2) + " has no song group");
     }
 
-    group->group = std::move(*songs);
+    group->group = *songs;
     group->pool = ntdlib::musyx::ReadPool(pool);
     group->samples = ntdlib::musyx::ReadSampleDirectory(directory);
 
