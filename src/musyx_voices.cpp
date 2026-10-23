@@ -54,6 +54,9 @@ constexpr int kMostLevels = 8;
 // A wait's time that never ends.
 constexpr uint16_t kWaitForever = 0xffff;
 
+// The milliseconds of a tick at 120 beats a minute: 1000 / 768. dolphinsf2 takes that tempo for every time in ticks.
+constexpr double kTickMs = 1000.0 / 768.0;
+
 // The trap of a note's release, among a voice's three traps.
 constexpr uint8_t kReleaseTrap = 0;
 
@@ -138,6 +141,7 @@ struct Run
     MacroVoice voice;
     std::optional<double> release_at; // the first KeyOff, in milliseconds after the note's start
     std::optional<double> stop_at;    // the first StopSample
+    std::vector<VolumeRamp> ramps;    // the Envelope steps, each from its time after the note's start
     bool sample_started = false;
     bool envelope_before_sample = false;
 };
@@ -171,11 +175,15 @@ Wait KeyWaitOf(const MacroStep& s)
 }
 
 // A run of a macro's steps for a note that the player releases `release_ms` after its start: kNever for a note that it
-// holds.
+// holds. ScaleVolume divides by `volume_scale_divisor` (SongGroup).
 class MacroRun
 {
 public:
-    MacroRun(const Pool& pool, double release_ms) : pool_(pool), release_ms_(release_ms), released_(release_ms <= 0.0)
+    MacroRun(const Pool& pool, double release_ms, int volume_scale_divisor)
+        : pool_(pool),
+          release_ms_(release_ms),
+          volume_scale_divisor_(volume_scale_divisor),
+          released_(release_ms <= 0.0)
     {
     }
 
@@ -218,6 +226,7 @@ private:
 
     const Pool& pool_;
     const double release_ms_;
+    const int volume_scale_divisor_;
     Run run_;
     Place place_;
     double now_ = 0.0;
@@ -357,6 +366,20 @@ MacroRun::Next MacroRun::Step(const MacroStep& s)
         }
         break;
 
+    case MacroOp::kEnvelope:
+        {
+            // Byte 1 scales the volume in 128ths. Byte 2 adds to it in 127ths of full volume. Bytes 3 and 4 name a
+            // curve. The time is in milliseconds with bit 0 of byte 5, else in ticks. MusyX ramps for at least 1 ms.
+            const uint16_t time = s.Half(6);
+            const double ms = (s.Byte(5) & 1) != 0 ? time : time * kTickMs;
+            run_.ramps.push_back({now_, std::max(ms, 1.0), s.Byte(1) / 128.0, s.Byte(2) / 127.0});
+            if (pool_.tables.contains(s.Half(3)))
+            {
+                Note("volume curves left out");
+            }
+            break;
+        }
+
     case MacroOp::kSetAdsr:
         v.envelope = EnvelopeOf(pool_, s.Half(1), s.Byte(3) != 0);
         if (v.envelope && !v.envelope->dls && (v.envelope->decay_ms > 0.0 || v.envelope->release_ms > 0.0))
@@ -377,16 +400,26 @@ MacroRun::Next MacroRun::Step(const MacroStep& s)
         break;
 
     case MacroOp::kScaleVolumeDls:
-        v.volume = (s.Byte(3) != 0 ? 1.0 : v.volume) * s.Half(1) / 4096.0;
-        break;
+        {
+            const double scale = s.Half(1) / 4096.0;
+            v.volume = (s.Byte(3) != 0 ? 1.0 : v.volume) * scale;
+            v.volume_add = s.Byte(3) != 0 ? 0.0 : v.volume_add * scale;
+            break;
+        }
 
     case MacroOp::kScaleVolume:
-        v.volume = (s.Byte(5) != 0 ? 1.0 : v.volume) * s.Byte(1) / 127.0;
-        if (s.Byte(2) != 0 || s.Byte(3) != 0 || s.Byte(4) != 0)
         {
-            Note("volume curves and volume additions left out");
+            // Byte 5 picks the note's volume in place of the voice's. Byte 2 adds to the scaled volume in 127ths of
+            // full volume. Bytes 3 and 4 name a table of the pool as a curve. MusyX skips a curve that the pool lacks.
+            const double scale = s.Byte(1) / static_cast<double>(volume_scale_divisor_);
+            v.volume = (s.Byte(5) != 0 ? 1.0 : v.volume) * scale;
+            v.volume_add = (s.Byte(5) != 0 ? 0.0 : v.volume_add) * scale + s.Byte(2) / 127.0;
+            if (pool_.tables.contains(s.Half(3)))
+            {
+                Note("volume curves left out");
+            }
+            break;
         }
-        break;
 
     case MacroOp::kModeSelect:
         v.dls_volume = s.Byte(1) != 0;
@@ -517,8 +550,7 @@ MacroRun::Next MacroRun::Pass(const Wait& wait)
         return Next::kStep;
     }
 
-    // A tick at 120 beats a minute lasts 1000 / 768 ms.
-    const double length = wait.time == kWaitForever ? kNever : (wait.ms ? wait.time : wait.time * 1000.0 / 768.0);
+    const double length = wait.time == kWaitForever ? kNever : (wait.ms ? wait.time : wait.time * kTickMs);
     double end = wait.absolute ? length : now_ + length;
     if (wait.on_release)
     {
@@ -576,7 +608,7 @@ void MacroRun::SetVibrato(const MacroStep& s)
 
     Vibrato vib;
     vib.delay_ms = now_;
-    vib.period_ms = (s.Byte(5) & 1) != 0 ? time : time * 1000.0 / 768.0;
+    vib.period_ms = (s.Byte(5) & 1) != 0 ? time : time * kTickMs;
     vib.depth_cents = key_range * 100.0 + cent_range;
     vib.mod_depth_cents = mod_vibrato_cents_;
     vib.mod_scales_depth = (s.Byte(3) & 3) != 0;
@@ -593,10 +625,10 @@ void MacroRun::Note(const std::string& what)
 }
 
 // Run `macro`'s steps for a note that the player releases `release_ms` after its start: kNever for a note that it
-// holds.
-Run RunMacro(const Pool& pool, uint16_t macro, double release_ms)
+// holds. ScaleVolume divides by `volume_scale_divisor`.
+Run RunMacro(const Pool& pool, uint16_t macro, double release_ms, int volume_scale_divisor)
 {
-    return MacroRun(pool, release_ms).Follow(macro);
+    return MacroRun(pool, release_ms, volume_scale_divisor).Follow(macro);
 }
 
 // The pan of a voice that an entry of a keymap or a layer starts, under the pan `pan` of the objects before it. The
@@ -667,6 +699,48 @@ void AddVoices(const Pool& pool, uint16_t object, int key, int pan, double volum
     }
 }
 
+// What a release `release_ms` after a note's start does in `run`, a run of the macro for that release. `held` is the
+// run for a held note. A voice that plays on after the release until a StopSample fades (kFade). A voice that stops at
+// the release is cut. A voice that stops by itself at the same time as a held note does ignores the release
+// (kAsHeld). A KeyOff after the release releases the envelope.
+KeyOff KeyOffOf(const Run& run, double release_ms, const Run& held)
+{
+    const bool stops =
+        run.stop_at && *run.stop_at >= release_ms && (!run.release_at || *run.stop_at <= *run.release_at);
+    if (stops)
+    {
+        if (*run.stop_at == release_ms)
+        {
+            return KeyOff::kCut;
+        }
+
+        return run.stop_at != held.stop_at ? KeyOff::kFade : KeyOff::kAsHeld;
+    }
+    if (run.release_at && *run.release_at >= release_ms)
+    {
+        return KeyOff::kRelease;
+    }
+
+    return KeyOff::kIgnored;
+}
+
+// The fade of a voice whose macro runs as `run` for a release `release_ms` after the note's start (KeyOff::kFade): the
+// ramps from the release to the stop.
+ReleaseFade FadeOf(const Run& run, double release_ms)
+{
+    ReleaseFade fade;
+    fade.stop_ms = *run.stop_at - release_ms;
+    for (const VolumeRamp& r : run.ramps)
+    {
+        if (r.start_ms >= release_ms && r.start_ms < *run.stop_at)
+        {
+            fade.ramps.push_back({r.start_ms - release_ms, r.ms, r.scale, r.add});
+        }
+    }
+
+    return fade;
+}
+
 } // namespace
 
 double DlsMilliseconds(double timecents)
@@ -685,10 +759,48 @@ double PianoPanAt(const PianoPan& pan, int key)
     return std::clamp(pan.centre_pan + (voice_key - pan.centre_key) * pan.scale / 128.0, 0.0, 127.0);
 }
 
-MacroVoice FollowMacro(const Pool& pool, uint16_t macro)
+double RampedVolume(const std::vector<VolumeRamp>& ramps, double volume, double ms)
 {
-    // The held note gives the settings, and any stop that the voice makes by itself.
-    Run held = RunMacro(pool, macro, kNever);
+    double from = volume;
+    double to = volume;
+    double start = 0.0;
+    double length = 0.0;
+
+    const auto at = [&](double t)
+    {
+        return t >= start + length ? to : from + (to - from) * (t - start) / length;
+    };
+
+    for (const VolumeRamp& r : ramps)
+    {
+        if (r.start_ms > ms)
+        {
+            break;
+        }
+
+        from = at(r.start_ms);
+        to = std::min(from * r.scale + r.add, 1.0);
+        start = r.start_ms;
+        length = r.ms;
+    }
+
+    return at(ms);
+}
+
+std::optional<double> FadeVolume(const ReleaseFade& fade, double volume, double ms)
+{
+    if (ms >= fade.stop_ms)
+    {
+        return std::nullopt;
+    }
+
+    return RampedVolume(fade.ramps, volume, ms);
+}
+
+MacroVoice FollowMacro(const Pool& pool, uint16_t macro, int volume_scale_divisor)
+{
+    // The held note gives the settings, the fades of its volume, and any stop that the voice makes by itself.
+    Run held = RunMacro(pool, macro, kNever, volume_scale_divisor);
     MacroVoice voice = std::move(held.voice);
     if (held.stop_at)
     {
@@ -699,6 +811,13 @@ MacroVoice FollowMacro(const Pool& pool, uint16_t macro)
         voice.stop_ms = *held.release_at;
         voice.approximations.push_back("voices that release themselves stop instead");
     }
+    for (const VolumeRamp& r : held.ramps)
+    {
+        if (!voice.stop_ms || r.start_ms < *voice.stop_ms)
+        {
+            voice.held_ramps.push_back(r);
+        }
+    }
     if (voice.envelope && !held.envelope_before_sample)
     {
         voice.approximations.push_back("envelopes set after their sample starts apply from its start");
@@ -706,29 +825,56 @@ MacroVoice FollowMacro(const Pool& pool, uint16_t macro)
 
     // A release late in the note: after every wait of a fixed time, or halfway to the voice's stop of its own.
     const double late_ms = voice.stop_ms ? *voice.stop_ms / 2.0 : 60000.0;
-    const Run late = RunMacro(pool, macro, late_ms);
-    const bool cut =
-        late.stop_at && *late.stop_at >= late_ms && (!late.release_at || *late.stop_at <= *late.release_at);
-    if (cut)
+    const Run late = RunMacro(pool, macro, late_ms, volume_scale_divisor);
+    voice.key_off = KeyOffOf(late, late_ms, held);
+    if (voice.key_off == KeyOff::kFade)
     {
-        voice.key_off = KeyOff::kCut;
-    }
-    else if (late.release_at && *late.release_at >= late_ms)
-    {
-        voice.key_off = KeyOff::kRelease;
+        voice.release_fade = FadeOf(late, late_ms);
     }
 
     // A release early in the note should do the same.
     constexpr double kEarly = 1.0;
-    const Run early = RunMacro(pool, macro, kEarly);
-    const bool early_cut = early.stop_at && (!early.release_at || *early.stop_at <= *early.release_at);
-    const KeyOff early_key_off = early_cut ? KeyOff::kCut : early.release_at ? KeyOff::kRelease : KeyOff::kIgnored;
-    if (early_key_off != voice.key_off)
+    const Run early = RunMacro(pool, macro, kEarly, volume_scale_divisor);
+    if (KeyOffOf(early, kEarly, held) != voice.key_off)
     {
         voice.approximations.push_back("releases early in a note act as late ones do");
     }
 
     return voice;
+}
+
+double VoiceVolume(const MacroVoice& voice, double volume)
+{
+    return std::min(voice.volume * volume + voice.volume_add, 1.0);
+}
+
+std::optional<double> HeldSilenceMs(const MacroVoice& voice)
+{
+    // A ramp that leaves the volume at 0 does so whatever the volume was before it.
+    std::optional<double> silent;
+    if (!voice.held_ramps.empty() && RampedVolume(voice.held_ramps, 1.0, kNever) <= 0.0)
+    {
+        const VolumeRamp& last = voice.held_ramps.back();
+        silent = last.start_ms + last.ms;
+    }
+    if (voice.stop_ms)
+    {
+        silent = std::min(silent.value_or(kNever), *voice.stop_ms + kCutMs);
+    }
+
+    return silent;
+}
+
+bool FadesThroughRelease(const MacroVoice& voice)
+{
+    if (voice.held_ramps.empty())
+    {
+        return false;
+    }
+
+    // A voice that ignores the release fades to silence only if its ramps take it there.
+    return voice.key_off == KeyOff::kAsHeld ||
+           (voice.key_off == KeyOff::kIgnored && RampedVolume(voice.held_ramps, 1.0, kNever) <= 0.0);
 }
 
 std::vector<KeyVoice> VoicesOf(const Pool& pool, uint16_t object, int key)
@@ -745,7 +891,6 @@ double TableLevel(const VolumeTable& volumes, double volume)
     const auto i = static_cast<std::size_t>(x);
     const double fraction = x - static_cast<double>(i);
     const double next = volumes[std::min(i + 1, volumes.size() - 1)];
-
     return volumes[i] + fraction * (next - volumes[i]);
 }
 
@@ -776,7 +921,7 @@ const MacroVoice& Instruments::Macro(uint16_t macro)
     auto it = macros_.find(macro);
     if (it == macros_.end())
     {
-        it = macros_.emplace(macro, FollowMacro(group_.pool, macro)).first;
+        it = macros_.emplace(macro, FollowMacro(group_.pool, macro, group_.volume_scale_divisor)).first;
     }
 
     return it->second;

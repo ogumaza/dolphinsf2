@@ -134,6 +134,11 @@ struct SongGroup
     ntdlib::musyx::Pool pool;
     std::vector<ntdlib::musyx::SampleInfo> samples;
     std::vector<uint8_t> sample_data;
+
+    // The number that the game's build of MusyX divides by in ScaleVolume. The step multiplies a voice's volume by
+    // its scale, then divides the product by this number. The early MusyX on the NDDEMO disc shifts the product right
+    // by 7 bits: it divides by 128.
+    int volume_scale_divisor = 127;
 };
 
 // The first group of songs among `groups`, a project's groups, whose MusyX ID is `id`. Without `id`, the first group of

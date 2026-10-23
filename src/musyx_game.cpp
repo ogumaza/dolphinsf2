@@ -97,7 +97,7 @@ struct SoundRoomRules
 // main.dol holds the addresses of `song_count` paths, in the order of the songs' IDs (ReadSongPaths). A song takes the
 // name of its file. `project` names the four files of the game's MusyX project without their extensions: the project
 // (.prj), the pool (.pol), the sample directory (.sdr) and the samples (.smp). The project's group `group` plays every
-// song at `volume`.
+// song at `volume`. ScaleVolume divides by `volume_scale_divisor` (SongGroup).
 struct PathTableRules
 {
     std::string_view dol_sha1;
@@ -109,6 +109,7 @@ struct PathTableRules
     uint32_t volume_table = 0;
     uint8_t master_volume = 127;
     TickStep tick_step = TickStep::kFloat;
+    int volume_scale_divisor = 127;
 };
 
 // What the code of Nintendo Puzzle Collection says about its music (musyx_puzzle.h).
@@ -216,10 +217,11 @@ constexpr std::array<SoundRoomRules, 1> kSoundRoomGames{{
 // master volume for music at 127 (0x80026a90). Its menu of scenes (0x80007b20) fades the music to 64 through
 // sndMasterVolume (0x80047ef8). Each scene starts its song and fades the master volume back to 127 over a second. The
 // disc links an early build of MusyX (TickStep::kInteger). That build's salCalcVolume (0x800538e8) takes the volume
-// table at 0x8006a0f0, or the DLS table at 0x80069eb4.
+// table at 0x8006a0f0, or the DLS table at 0x80069eb4. Its ScaleVolume (0x8004c8bc) shifts the product of the volume
+// and the scale right by 7 bits. Pokémon Colosseum's divides it by 127.
 constexpr std::array<PathTableRules, 1> kPathTableGames{{
     {"d46883ce81a884b65c6e40d483b196add1dd1bf4", 0x80065394, 9, "audio/nddemo", 0, 127, 0x8006a0f0, 127,
-     TickStep::kInteger},
+     TickStep::kInteger, 128},
 }};
 
 // The games that keep their music in modules of their code that dolphinsf2 converts.
@@ -288,7 +290,6 @@ const GameRules* RulesOf(const std::array<GameRules, N>& games, std::string_view
         return r.dol_sha1 == sha1;
     };
     const auto rules = std::find_if(games.begin(), games.end(), matches);
-
     return rules != games.end() ? &*rules : nullptr;
 }
 
@@ -549,7 +550,6 @@ std::span<const uint8_t> SongIn(const ntdlib::Dol& dol, uint32_t sizes, uint32_t
     }
 
     const uint64_t size = std::min<uint64_t>(DolWord(dol, sizes + number * 4u), songs.size() - offset);
-
     return songs.subspan(static_cast<std::size_t>(offset), static_cast<std::size_t>(size));
 }
 
@@ -809,6 +809,7 @@ void Game::ReadPathTableGame(const PathTableRules& rules)
     group->pool = ntdlib::musyx::ReadPool(ReadFile(project + ".pol"));
     group->samples = ntdlib::musyx::ReadSampleDirectory(ReadFile(project + ".sdr"));
     group->sample_data = ReadFile(project + ".smp");
+    group->volume_scale_divisor = rules.volume_scale_divisor;
     groups_.push_back(std::move(group));
 
     // The code's table of the songs' paths. A song's place in the table is its ID.

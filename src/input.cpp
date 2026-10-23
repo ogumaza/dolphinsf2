@@ -4,6 +4,8 @@
 
 #include "input.h"
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -11,7 +13,9 @@
 #include <ios>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -20,6 +24,7 @@
 #include "ntdlib/sequence_export/frame.h"
 #include "xsflib/ascii.h"
 #include "xsflib/files.h"
+#include "xsflib/sha1.h"
 
 #include "disc.h"
 #include "jaudio.h"
@@ -30,6 +35,40 @@ namespace dolphinsf2
 {
 namespace
 {
+
+// The games of the first JAudio whose sound effects dolphinsf2 converts, by the SHA-1s of the start-up archives of
+// their USA releases. Each of these games plays its effects in the first sequence of its sound table
+// (GameOptions::jaudio1_effects). Pikmin 2's first sequence isn't an effects sequence. dolphinsf2 leaves out the
+// effects of Pikmin 2 and of the other games.
+constexpr std::array<std::string_view, 3> kEffectsGames{
+    "65ea70655099a196e0707bf4e4ce61e7818553d9", // The Wind Waker
+    "c66c0103a5c7c1292b5fc6c3371ed1458035cde7", // The Wind Waker HD
+    "7436b12c7470a2ed14f865e0a6aa96ccfa1af758", // Pac-Man Vs.
+};
+
+// The options for the JAudio game whose start-up archive is `archive`. A game of kEffectsGames lists its effects too.
+GameOptions OptionsFor(std::span<const uint8_t> archive)
+{
+    const std::string sha1 = xsflib::Sha1::Hex(xsflib::Sha1::Of(archive));
+    return {.jaudio1_effects = std::find(kEffectsGames.begin(), kEffectsGames.end(), sha1) != kEffectsGames.end()};
+}
+
+// The JAudio game among the files of `disc`, or nothing if the disc has no start-up archive. Throw FormatError if the
+// archive can't be read.
+std::optional<Game> JaudioGameOn(const std::shared_ptr<ntdlib::disc::GameFiles>& disc)
+{
+    std::optional<Game> game = Game::FromDiscFiles(disc, kProgram);
+    if (!game)
+    {
+        return std::nullopt;
+    }
+
+    // FromDiscFiles has read the archive already. A game of kEffectsGames opens a second time, with its effects.
+    std::vector<uint8_t> archive;
+    disc->read_file(game->DiscPath(), archive);
+    const GameOptions options = OptionsFor(archive);
+    return options.jaudio1_effects ? Game::FromDiscFiles(disc, kProgram, options) : std::move(game);
+}
 
 // Whether the disc reader takes the file at `path` for a GameCube disc image.
 bool ReadsAsDisc(const std::filesystem::path& path)
@@ -76,8 +115,14 @@ Input Input::Open(const std::filesystem::path& path)
     // A start-up archive: JAudio2's BAA, or JAudio1's AAF.
     if (IsStartUpArchive(header))
     {
+        std::vector<uint8_t> archive;
+        if (!xsflib::ReadFile(path, archive))
+        {
+            throw FormatError("can't read it");
+        }
+
         Input input;
-        input.jaudio_ = std::make_unique<GameInput>(Game::FromFolder(path, kProgram));
+        input.jaudio_ = std::make_unique<GameInput>(Game::FromFolder(path, kProgram, OptionsFor(archive)));
 
         return input;
     }
@@ -132,7 +177,7 @@ Conversion Input::Convert(std::size_t index, const PerformOptions& perform)
 Input Input::OpenDisc(const std::filesystem::path& path)
 {
     Input input;
-    if (std::optional<Game> game = Game::FromDiscFiles(LoadDisc(path, false), kProgram))
+    if (std::optional<Game> game = JaudioGameOn(LoadDisc(path, false)))
     {
         input.jaudio_ = std::make_unique<GameInput>(std::move(*game));
         return input;

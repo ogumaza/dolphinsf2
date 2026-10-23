@@ -184,12 +184,14 @@ int SquaredValue(double amplitude)
     return static_cast<int>(std::lround(127.0 * std::sqrt(std::clamp(amplitude, 0.0, 1.0))));
 }
 
-// Where an event goes among a channel's events at one tick: note-offs come first, then settings, then note-ons.
+// Where an event goes among a channel's events at one tick: note-offs come first, then settings, then note-ons. The
+// note-off of a note that ends on the tick it starts comes last.
 enum class Rank
 {
     kNoteOff,
     kSetting,
     kNoteOn,
+    kEmptyNoteOff,
 };
 
 // The rank of an event of `kind`.
@@ -302,8 +304,9 @@ private:
     void Controller(uint8_t channel, uint8_t controller, uint8_t value, int64_t tick);
     void NoteOn(uint8_t channel, uint8_t key, uint8_t velocity, uint32_t end, std::size_t section, int64_t tick);
 
-    // Add `e` to the events of `channel` at `tick`. The event's kind gives its rank among the tick's events.
-    void Record(uint8_t channel, int64_t tick, TrackEvent e);
+    // Add `e` to the events of `channel` at `tick`. The event's kind gives its rank among the tick's events, unless
+    // `rank` gives it.
+    void Record(uint8_t channel, int64_t tick, TrackEvent e, std::optional<Rank> rank = std::nullopt);
 
     // Find the volume curve that note `n` follows, from its voices. Count what that approximates.
     void SetCurve(NoteRecord& n);
@@ -338,6 +341,15 @@ private:
     // then. Add to `approximated` what the end approximates.
     double VoiceEnd(const MacroVoice& v, int key, double on_seconds, double off_seconds,
                     std::set<std::string>& approximated);
+
+    // The seconds that the sample of voice `v` plays, or nothing if it loops. `key` is the key that the voice starts
+    // with.
+    std::optional<double> SampleSecondsOf(const MacroVoice& v, int key);
+
+    // The seconds where voice `v` falls silent, for a voice that goes on with its held fade through the release
+    // (FadesThroughRelease) and a note from `on_seconds`: where the fade does, or where a sample ends before that.
+    // `key` is the key that the voice starts with.
+    double FadeEnd(const MacroVoice& v, int key, double on_seconds);
 
     // Put each channel's events in `perf`, in order, and the tempo changes.
     void AddEvents(Performance& perf);
@@ -922,9 +934,9 @@ bool Player::ReleaseNotes()
     return !active_.empty();
 }
 
-void Player::Record(uint8_t channel, int64_t tick, TrackEvent e)
+void Player::Record(uint8_t channel, int64_t tick, TrackEvent e, std::optional<Rank> rank)
 {
-    events_[channel].push_back({tick, RankOf(e.kind), order_++, e});
+    events_[channel].push_back({tick, rank.value_or(RankOf(e.kind)), order_++, e});
 }
 
 void Player::SetCurve(NoteRecord& n)
@@ -1156,12 +1168,17 @@ Performance Player::Finish(const PerformOptions& options)
     return perf;
 }
 
-// The seconds that voice `v` sounds after its end: its release, or the fade of a voice that stops.
+// The seconds that voice `v` sounds after its end: its release, its macro's fade up to its stop and the stop's fade,
+// or the fade of a voice that stops.
 double TailOf(const MacroVoice& v)
 {
     if (v.key_off == KeyOff::kRelease && v.envelope)
     {
         return v.envelope->release_ms / 1000.0;
+    }
+    if (v.key_off == KeyOff::kFade)
+    {
+        return (v.release_fade.stop_ms + kCutMs) / 1000.0;
     }
     if (v.key_off == KeyOff::kCut || v.stop_ms)
     {
@@ -1183,6 +1200,7 @@ double Player::EndNotes(Performance& perf, int64_t last_tick)
         std::optional<double> latest;
         std::optional<double> earliest;
         double tail = 0.0;
+        double faded = 0.0; // where the voices that go on with their held fades through the release fall silent
         std::set<std::string> approximated;
         for (const KeyVoice& kv : n.voices)
         {
@@ -1196,8 +1214,17 @@ double Player::EndNotes(Performance& perf, int64_t last_tick)
             const double end = VoiceEnd(v, kv.key, on_seconds, off_seconds, approximated);
             latest = std::max(latest.value_or(end), end);
             earliest = std::min(earliest.value_or(end), end);
-            tail = std::max(tail, TailOf(v));
+
+            if (FadesThroughRelease(v))
+            {
+                faded = std::max(faded, FadeEnd(v, kv.key, on_seconds));
+            }
+            else
+            {
+                tail = std::max(tail, TailOf(v));
+            }
         }
+
         for (const std::string& a : approximated)
         {
             perf.approximations[a]++;
@@ -1211,8 +1238,8 @@ double Player::EndNotes(Performance& perf, int64_t last_tick)
         const int64_t end = std::max(n.on, end_seconds == off_seconds ? off : TickAt(end_seconds));
         TrackEvent e{.kind = EventKind::kNoteOff, .key = n.key};
         e.note = n.id;
-        Record(n.channel, end, e);
-        sound_end = std::max(sound_end, end_seconds + tail);
+        Record(n.channel, end, e, end == n.on ? std::optional(Rank::kEmptyNoteOff) : std::nullopt);
+        sound_end = std::max({sound_end, end_seconds + tail, faded});
     }
 
     return sound_end;
@@ -1221,19 +1248,15 @@ double Player::EndNotes(Performance& perf, int64_t last_tick)
 double Player::VoiceEnd(const MacroVoice& v, int key, double on_seconds, double off_seconds,
                         std::set<std::string>& approximated)
 {
+    // A voice whose held fade goes on through the release doesn't stop at its note's end.
     double end = off_seconds;
     if (v.key_off == KeyOff::kIgnored)
     {
-        // The voice's key, moved by the macro, against the sample's.
-        const Sample* sample = instruments_.GetSample(*v.sample);
-        const int voice_key = v.fixed_key.value_or(key + v.key_shift);
-        const double ratio =
-            sample != nullptr ? std::pow(2.0, (voice_key - sample->key) / 12.0 + v.detune_cents / 1200.0) : 1.0;
-        if (const std::optional<double> length = instruments_.SampleSeconds(*v.sample, ratio))
+        if (const std::optional<double> length = SampleSecondsOf(v, key))
         {
             end = on_seconds + *length;
         }
-        else
+        else if (!FadesThroughRelease(v))
         {
             approximated.insert("voices that loop and ignore the release stop at their note's end");
         }
@@ -1241,6 +1264,28 @@ double Player::VoiceEnd(const MacroVoice& v, int key, double on_seconds, double 
     if (v.stop_ms)
     {
         end = std::min(end, on_seconds + *v.stop_ms / 1000.0);
+    }
+
+    return end;
+}
+
+std::optional<double> Player::SampleSecondsOf(const MacroVoice& v, int key)
+{
+    // The voice's key, moved by the macro, against the sample's.
+    const Sample* sample = instruments_.GetSample(*v.sample);
+    const int voice_key = v.fixed_key.value_or(key + v.key_shift);
+    const double ratio =
+        sample != nullptr ? std::pow(2.0, (voice_key - sample->key) / 12.0 + v.detune_cents / 1200.0) : 1.0;
+
+    return instruments_.SampleSeconds(*v.sample, ratio);
+}
+
+double Player::FadeEnd(const MacroVoice& v, int key, double on_seconds)
+{
+    double end = on_seconds + HeldSilenceMs(v).value() / 1000.0;
+    if (const std::optional<double> length = SampleSecondsOf(v, key))
+    {
+        end = std::min(end, on_seconds + *length);
     }
 
     return end;

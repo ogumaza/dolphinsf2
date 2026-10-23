@@ -449,23 +449,149 @@ void TestPianoPan()
     pool.macros[3] = {Step(MacroOp::kSetKey, {72}), Step(MacroOp::kPianoPan, {100, 60, 54}), Step(MacroOp::kEnd)};
     pool.macros[4] = {Step(MacroOp::kEnd)};
 
-    const musyx::MacroVoice shifted = musyx::FollowMacro(pool, 1);
+    const musyx::MacroVoice shifted = musyx::FollowMacro(pool, 1, 127);
     Check(shifted.piano_pan && shifted.piano_pan->scale == 100 && shifted.piano_pan->centre_key == 60 &&
               shifted.piano_pan->centre_pan == 54,
           "PianoPan takes its scale, centre key and centre pan from bytes 1 to 3");
     Check(musyx::PianoPanAt(*shifted.piano_pan, 60) == 63.375 && musyx::PianoPanAt(*shifted.piano_pan, 0) == 16.5,
           "an AddKey before the step moves the key that the pan follows");
 
-    const musyx::MacroVoice wide = musyx::FollowMacro(pool, 2);
+    const musyx::MacroVoice wide = musyx::FollowMacro(pool, 2, 127);
     Check(wide.piano_pan && !wide.piano_pan->fixed_key, "a SetKey after the step leaves the key of the pan alone");
     Check(wide.piano_pan && musyx::PianoPanAt(*wide.piano_pan, 0) == 124.0,
           "a scale of -128 moves the pan one step left for each key");
     Check(wide.piano_pan && musyx::PianoPanAt(*wide.piano_pan, 127) == 0.0, "the pan stops at 0");
 
-    const musyx::MacroVoice fixed = musyx::FollowMacro(pool, 3);
+    const musyx::MacroVoice fixed = musyx::FollowMacro(pool, 3, 127);
     Check(fixed.piano_pan && musyx::PianoPanAt(*fixed.piano_pan, 0) == 63.375,
           "a SetKey before the step fixes the key that the pan follows");
-    Check(!musyx::FollowMacro(pool, 4).piano_pan, "a macro without the step keeps the pan of its keymap or layer");
+    Check(!musyx::FollowMacro(pool, 4, 127).piano_pan, "a macro without the step keeps the pan of its keymap or layer");
+}
+
+// ScaleVolume multiplies the note's volume, or the voice's, by its scale over 127. The early MusyX on the NDDEMO disc
+// divides by 128. The step then adds byte 2 in 127ths of full volume. MusyX plays a volume above full at full volume.
+// Bytes 3 and 4 name a curve. 0xffff names none, and MusyX skips a curve that the pool lacks.
+void TestScaleVolume()
+{
+    using ntdlib::musyx::MacroOp;
+    ntdlib::musyx::Pool pool;
+    pool.macros[1] = {Step(MacroOp::kScaleVolume, {90, 10, 0xff, 0xff, 1}), Step(MacroOp::kEnd)};
+    pool.macros[2] = {Step(MacroOp::kScaleVolume, {64, 20, 0xff, 0xff, 1}),
+                      Step(MacroOp::kScaleVolume, {64, 0, 0xff, 0xff, 0}), Step(MacroOp::kEnd)};
+    pool.macros[3] = {Step(MacroOp::kScaleVolume, {127, 50, 0xff, 0xff, 1}), Step(MacroOp::kEnd)};
+    pool.macros[4] = {Step(MacroOp::kScaleVolume, {127, 0, 5, 0, 1}), Step(MacroOp::kEnd)};
+    pool.macros[5] = {Step(MacroOp::kScaleVolume, {127, 0, 6, 0, 1}), Step(MacroOp::kEnd)};
+    pool.tables[5] = {0, 0x7f};
+
+    const musyx::MacroVoice later = musyx::FollowMacro(pool, 1, 127);
+    const musyx::MacroVoice early = musyx::FollowMacro(pool, 1, 128);
+    const musyx::MacroVoice twice = musyx::FollowMacro(pool, 2, 128);
+    const musyx::MacroVoice loud = musyx::FollowMacro(pool, 3, 128);
+
+    Check(later.volume == 90.0 / 127.0 && later.volume_add == 10.0 / 127.0, "the scale divides by 127");
+    Check(early.volume == 90.0 / 128.0 && early.volume_add == 10.0 / 127.0, "the early build's scale divides by 128");
+    Check(std::abs(musyx::VoiceVolume(early, 0.5) - (0.5 * 90.0 / 128.0 + 10.0 / 127.0)) < 1e-12,
+          "the voice's volume is the scaled note's volume plus the addition");
+    Check(twice.volume == 0.25 && std::abs(twice.volume_add - 10.0 / 127.0) < 1e-12,
+          "a step on the voice's volume scales the addition before it");
+    Check(musyx::VoiceVolume(loud, 1.0) == 1.0 && musyx::VoiceVolume(loud, 0.25) < 1.0,
+          "a volume above full plays at full volume");
+    Check(later.approximations.empty() && musyx::FollowMacro(pool, 5, 127).approximations.empty(),
+          "a step that names no curve, or one that the pool lacks, reports nothing");
+    const std::vector<std::string> curved = musyx::FollowMacro(pool, 4, 127).approximations;
+    Check(curved == std::vector<std::string>{"volume curves left out"}, "a curve in the pool is reported");
+}
+
+// The steps of a fade after the note's release, as the NDDEMO disc's macros make it: wait for the release, ramp the
+// volume to 80/128 of itself in 120 ms, ramp it to 0 in 800 ms, then stop the sample.
+std::vector<ntdlib::musyx::MacroStep> FadeSteps()
+{
+    using ntdlib::musyx::MacroOp;
+    return {
+        Step(MacroOp::kWaitMs, {1, 0, 0, 0, 0, 0xff, 0xff}),
+        Step(MacroOp::kEnvelope, {80, 0, 0xff, 0xff, 1, 120, 0}),
+        Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 120, 0}),
+        Step(MacroOp::kEnvelope, {0, 0, 0xff, 0xff, 1, 0x20, 0x03}),
+        Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0x20, 0x03}),
+        Step(MacroOp::kStopSample),
+        Step(MacroOp::kEnd),
+    };
+}
+
+// A voice that plays on after its note's release follows its macro's fade (KeyOff::kFade). Each Envelope step ramps
+// the volume in a line, from where it is to its scale in 128ths times that. The fade ends at the StopSample, 920 ms
+// after the release. A voice that stops by itself at the same time whether the note is released or not ignores the
+// release (KeyOff::kAsHeld). Its fade ramps while the note is held, from 100 ms after the note's start, and leaves it
+// silent at the stop.
+void TestReleaseFade()
+{
+    using ntdlib::musyx::MacroOp;
+    ntdlib::musyx::Pool pool;
+    pool.macros[1] = {Step(MacroOp::kStartSample, {1})};
+    const std::vector<ntdlib::musyx::MacroStep> fade = FadeSteps();
+    pool.macros[1].insert(pool.macros[1].end(), fade.begin(), fade.end());
+    pool.macros[2] = {Step(MacroOp::kStartSample, {1}), Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 100, 0})};
+    pool.macros[2].insert(pool.macros[2].end(), fade.begin() + 1, fade.end());
+
+    const musyx::MacroVoice faded = musyx::FollowMacro(pool, 1, 127);
+    const musyx::MacroVoice own = musyx::FollowMacro(pool, 2, 127);
+
+    const musyx::ReleaseFade& f = faded.release_fade;
+    Check(faded.key_off == musyx::KeyOff::kFade && f.stop_ms == 920.0 && f.ramps.size() == 2,
+          "the voice fades for 920 ms after its release, in two ramps");
+    Check(f.ramps.size() == 2 && f.ramps[0].start_ms == 0.0 && f.ramps[0].ms == 120.0 && f.ramps[0].scale == 0.625 &&
+              f.ramps[1].start_ms == 120.0 && f.ramps[1].ms == 800.0 && f.ramps[1].scale == 0.0,
+          "the ramps start at the release and 120 ms later");
+    Check(musyx::FadeVolume(f, 1.0, 60.0) == 0.8125 && musyx::FadeVolume(f, 1.0, 120.0) == 0.625 &&
+              musyx::FadeVolume(f, 1.0, 520.0) == 0.3125 && !musyx::FadeVolume(f, 1.0, 920.0),
+          "each ramp moves the volume in a line from where it is, and the voice stops at the end");
+    Check(faded.approximations.empty() && faded.held_ramps.empty(), "a fade after the release reports nothing");
+    Check(own.key_off == musyx::KeyOff::kAsHeld && own.stop_ms == 1020.0,
+          "a voice that stops by itself ignores the release");
+    Check(own.held_ramps.size() == 2 && own.held_ramps[0].start_ms == 100.0 && own.held_ramps[1].start_ms == 220.0,
+          "its fade ramps while the note is held");
+    Check(musyx::HeldSilenceMs(own) == 1020.0 && musyx::FadesThroughRelease(own) && own.approximations.empty(),
+          "it falls silent at its stop, goes on with its fade through the release and reports nothing");
+}
+
+// A held note's fade goes on through the release of a voice that ignores the release: macro 1 waits for the release
+// after its fade, then ends. A fade to silence leaves the voice silent at its end (HeldSilenceMs). A fade to 64/128 of
+// the volume leaves it sounding. Ramps after the voice stops change nothing.
+void TestHeldFade()
+{
+    using ntdlib::musyx::MacroOp;
+    ntdlib::musyx::Pool pool;
+    const auto fade_to = [](uint32_t scale)
+    {
+        return std::vector<ntdlib::musyx::MacroStep>{
+            Step(MacroOp::kStartSample, {1}),
+            Step(MacroOp::kEnvelope, {scale, 0, 0xff, 0xff, 1, 0xe8, 0x03}),
+            Step(MacroOp::kWaitTicks, {1, 0, 0, 0, 1, 0xff, 0xff}),
+            Step(MacroOp::kEnd),
+        };
+    };
+    pool.macros[1] = fade_to(0);
+    pool.macros[2] = fade_to(64);
+    pool.macros[3] = {Step(MacroOp::kStartSample, {1}), Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0xf4, 0x01}),
+                      Step(MacroOp::kStopSample), Step(MacroOp::kEnvelope, {0, 0, 0xff, 0xff, 1, 0xe8, 0x03}),
+                      Step(MacroOp::kEnd)};
+
+    const musyx::MacroVoice silent = musyx::FollowMacro(pool, 1, 127);
+    const musyx::MacroVoice half = musyx::FollowMacro(pool, 2, 127);
+    const musyx::MacroVoice stopped = musyx::FollowMacro(pool, 3, 127);
+
+    Check(silent.key_off == musyx::KeyOff::kIgnored && silent.held_ramps.size() == 1 &&
+              silent.held_ramps[0].start_ms == 0.0 && silent.held_ramps[0].ms == 1000.0,
+          "the voice ignores the release and fades over 1000 ms from the note's start");
+    Check(musyx::HeldSilenceMs(silent) == 1000.0 && musyx::FadesThroughRelease(silent),
+          "a fade to silence ends at 1000 ms and goes on through the release");
+    Check(musyx::RampedVolume(silent.held_ramps, 1.0, 250.0) == 0.75 &&
+              musyx::RampedVolume(silent.held_ramps, 1.0, 2000.0) == 0.0,
+          "the volume falls in a line");
+    Check(!musyx::HeldSilenceMs(half) && !musyx::FadesThroughRelease(half),
+          "a fade to 64/128 leaves the voice sounding");
+    Check(silent.approximations.empty() && half.approximations.empty(), "the fades report nothing");
+    Check(stopped.held_ramps.empty() && stopped.stop_ms == 500.0, "a ramp after the stop is left out");
 }
 
 // A song group with one program. Program 0 plays macro 1. The macro picks the DLS volume curve without ITD, sets DLS
@@ -612,7 +738,6 @@ double TableVelocity(int velocity, int volume, bool on_table)
     const musyx::VolumeTable table = TestVolumes();
     const double written = volume / 127.0;
     const double channel = on_table ? musyx::TableVolume(table, written * written) : written;
-
     return 127.0 * std::sqrt(musyx::TableLevel(table, velocity / 127.0 * channel)) / written;
 }
 
@@ -866,6 +991,87 @@ void TestMusyxSilentZone()
     Check(ntdlib::testing::CheckConversion(c, "silent") == 0, "independent readers accept the files");
 }
 
+// The level that the test's volume table gives a voice with a scale of 80/127 and an addition of 20/127, with the
+// volume controllers at full, at MIDI velocity `velocity`. The level is relative to the voice's level at full velocity.
+// The player writes a note on the table at the velocity whose square is the table's level of the note's velocity.
+double AddedResponse(int velocity)
+{
+    const musyx::VolumeTable table = TestVolumes();
+    const double written = velocity / 127.0;
+    const double note = musyx::TableVolume(table, written * written);
+    const auto level = [&table](double volume)
+    {
+        return musyx::TableLevel(table, 80.0 / 127.0 * volume + 20.0 / 127.0);
+    };
+
+    return level(note) / level(1.0);
+}
+
+// MusyX adds a ScaleVolume step's addition after the scale. Program 1 plays a layer whose entry plays macro 2 at a
+// volume of 0. Macro 2 is the test's macro on the volume table, with a scale of 80/127 and an addition of 20/127. The
+// voice then plays at the table's level of 20/127 at any velocity. Its zone holds that attenuation, and a velocity
+// modulator of 0 that replaces SoundFont's default one. Its SFZ region gives a flat velocity curve. Program 2 plays
+// macro 2 at full volume: the table's level of 100/127 at full velocity. Its modulator fits the voice's velocity
+// response within 0.5 dB from velocity 40 to 127. Its SFZ region gives the response at every 8th velocity.
+void TestMusyxVolumeAddition()
+{
+    namespace sf2 = seqlib::sf2;
+    using ntdlib::musyx::MacroOp;
+    using ntdlib::musyx::PatternEventKind;
+    musyx::SongGroup group = TestSongGroup();
+    group.pool.macros[2] = group.pool.macros[1];
+    std::vector<ntdlib::musyx::MacroStep>& macro = group.pool.macros[2];
+    macro[0] = Step(MacroOp::kModeSelect, {0, 1});
+    macro.insert(macro.begin() + 1, Step(MacroOp::kScaleVolume, {80, 20, 0xff, 0xff, 1}));
+    group.pool.layers[0x8000] = {{.object = 2, .volume = 0}};
+    group.group.pages.push_back({.object = 0x8000, .priority = 0, .max_voices = 8, .program = 1});
+    group.group.pages.push_back({.object = 2, .priority = 0, .max_voices = 8, .program = 2});
+    musyx::Instruments instruments(group, TestVolumes());
+    ntdlib::musyx::Song song = TestSong(false, false);
+    std::vector<ntdlib::musyx::PatternEvent>& events = song.patterns[0].events;
+    events.push_back({.tick = 200, .kind = PatternEventKind::kProgram, .value = 1});
+    events.push_back({.tick = 240, .kind = PatternEventKind::kNote, .key = 62, .velocity = 100, .length = 96});
+    events.push_back({.tick = 400, .kind = PatternEventKind::kProgram, .value = 2});
+    events.push_back({.tick = 440, .kind = PatternEventKind::kNote, .key = 64, .velocity = 64, .length = 96});
+
+    const Conversion c = musyx::ConvertSong(song, {"added", "G/A/A", 5, 127}, instruments, {});
+
+    const SampleZoneAttenuation a = AttenuationOf(c.sf2);
+    const auto generator = [](double volume)
+    {
+        return static_cast<int>(std::lround(-500.0 * std::log10(musyx::TableLevel(TestVolumes(), volume))));
+    };
+    std::vector<int> amounts;
+    for (const std::array<int, 5>& m : a.modulators)
+    {
+        if (m[0] == (sf2::kNoteOnVelocity | sf2::kNegative | sf2::kConcave) && m[3] == 0 && m[4] == 0)
+        {
+            amounts.push_back(m[2]);
+        }
+    }
+    Check(a.zones == 3 && a.generators == std::vector<int>{generator(20.0 / 127.0), generator(100.0 / 127.0)},
+          "the zones hold the table's levels of 20/127 and of 100/127");
+    Check(amounts.size() == 2 && amounts[0] == 0 && amounts[1] > 0 && amounts[1] < 960,
+          "the velocity modulators replace the default one's 960 cB with 0 and with a fitted amount");
+    for (int velocity = 40; velocity <= 127 && amounts.size() == 2; velocity += 8)
+    {
+        const double fitted = amounts[1] / 960.0 * 40.0 * std::log10(velocity / 127.0);
+        const double game = 20.0 * std::log10(AddedResponse(velocity));
+        Check(std::abs(fitted - game) < 0.5, "velocity " + std::to_string(velocity) + " plays within 0.5 dB: " +
+                                                 std::to_string(fitted) + " against " + std::to_string(game));
+    }
+
+    const std::vector<std::string> flat = OpcodeValues(c, "amp_velcurve_1");
+    const std::vector<std::string> middle = OpcodeValues(c, "amp_velcurve_64");
+    Check(flat.size() == 2 && flat[0] == "1" && middle.size() == 2 && middle[0] == "1",
+          "the region at a volume of 0 plays at every velocity alike");
+    Check(middle.size() == 2 && std::abs(std::stod(middle[1]) - AddedResponse(64)) < 1e-6,
+          "the other region gives the response at velocity 64: " + (middle.size() == 2 ? middle[1] : "none"));
+    Check(OpcodeValues(c, "amp_velcurve_120").size() == 2 && OpcodeValues(c, "amp_velcurve_127").empty(),
+          "the curves run to velocity 120, and reach 1 at 127 by default");
+    Check(ntdlib::testing::CheckConversion(c, "added") == 0, "independent readers accept the files");
+}
+
 // An SFZ release falls by a factor of e^-8 in its time: 8 × 20 / ln 10 dB, about 69.49 dB. sfzformat.com gives that
 // curve on its page on ampeg_attack. The test macro's DLS release falls 96.5 dB in 100 ms of MusyX's clock: 193 steps
 // of 0.5 dB. The region's release therefore lasts 100 × 69.49 / 96.5 ms of MusyX's clock.
@@ -880,6 +1086,128 @@ void TestMusyxSfzRelease()
     const std::vector<std::string> releases = OpcodeValues(c, "ampeg_release");
     Check(releases.size() == 1 && std::abs(std::stod(releases[0]) - kSeconds) < 1e-6,
           "the release lasts " + std::to_string(kSeconds) + " s: " + (releases.empty() ? "none" : releases[0]));
+}
+
+// A zone whose voice fades after its release gets a release that reaches 20 dB down when the fade does. The test's
+// macro plays on the DLS curve, where the level is the square of the volume. With FadeSteps, the volume reaches
+// sqrt(0.1) at 120 + 800 × (1 - sqrt(0.1) / 0.625) ms of MusyX's clock, about 515.2 ms. A SoundFont release falls
+// 100 dB in its time, and an SFZ release 8 × 20 / ln 10 dB.
+void TestMusyxReleaseFade()
+{
+    namespace sf2 = seqlib::sf2;
+    musyx::SongGroup group = TestSongGroup();
+    std::vector<ntdlib::musyx::MacroStep>& macro = group.pool.macros[1];
+    macro.resize(3);
+    const std::vector<ntdlib::musyx::MacroStep> fade = FadeSteps();
+    macro.insert(macro.end(), fade.begin(), fade.end());
+    musyx::Instruments instruments(group, TestVolumes());
+
+    const Conversion c = musyx::ConvertSong(TestSong(false, false), {"fade", "G/A/A", 5, 127}, instruments, {});
+
+    const double fit_ms = (120.0 + 800.0 * (1.0 - std::sqrt(0.1) / 0.625)) * musyx::kNominalRate / musyx::kOutputRate;
+    const sf2::Records records = sf2::Read(c.sf2);
+    std::vector<int> releases;
+    for (std::size_t zone = 0; zone + 1 < records.Count("ibag", 4); zone++)
+    {
+        const std::map<uint16_t, uint16_t> gens = records.ZoneGens(zone);
+        if (gens.contains(sf2::kSampleId) && gens.contains(sf2::kReleaseVolEnv))
+        {
+            releases.push_back(static_cast<int16_t>(gens.at(sf2::kReleaseVolEnv)));
+        }
+    }
+    const int expected = static_cast<int>(std::lround(1200.0 * std::log2(5.0 * fit_ms / 1000.0)));
+    Check(releases.size() == 1 && std::abs(releases[0] - expected) <= 1,
+          "the SoundFont release lasts 5 times the fade's time 20 dB down: " + std::to_string(expected) + " timecents");
+    const std::vector<std::string> sfz = OpcodeValues(c, "ampeg_release");
+    const double seconds = 8.0 / std::numbers::ln10 * fit_ms / 1000.0;
+    Check(sfz.size() == 1 && std::abs(std::stod(sfz[0]) - seconds) < 1e-3,
+          "the SFZ release lasts " + std::to_string(seconds) + " s: " + (sfz.empty() ? "none" : sfz[0]));
+    Check(c.performance.approximations.empty(), "the conversion reports no approximation");
+}
+
+// The values of generator `oper` in the zones of `sf2` that play a sample, in the order of the zones.
+std::vector<int> SampleZoneValues(const std::vector<uint8_t>& sf2, uint16_t oper)
+{
+    const seqlib::sf2::Records records = seqlib::sf2::Read(sf2);
+    std::vector<int> values;
+    for (std::size_t zone = 0; zone + 1 < records.Count("ibag", 4); zone++)
+    {
+        const std::map<uint16_t, uint16_t> gens = records.ZoneGens(zone);
+        if (gens.contains(seqlib::sf2::kSampleId) && gens.contains(oper))
+        {
+            values.push_back(static_cast<int16_t>(gens.at(oper)));
+        }
+    }
+
+    return values;
+}
+
+// A zone whose voice fades while its note is held gets a hold up to the fade's start and a decay that reaches the
+// fade's level 20 dB down when the fade does. The voice of program 0 waits 100 ms, then follows FadeSteps' fade and
+// stops by itself. On the DLS curve, its fade reaches 20 dB down 515.2 ms after its start, as in TestMusyxReleaseFade.
+// Its sustain is silent, and its release goes on at the decay's rate: the game's voice ignores the release. The voice
+// of program 1 ignores the release too. It fades to 64/128 of its volume over 400 ms, a level of (64/128)², 12.04 dB
+// down. Its decay reaches 6.02 dB down when the fade does, at a volume of sqrt(0.5) after 234.3 ms. Its release stays
+// the cut of a stopped voice. The song lasts until the first voice falls silent, 1020 ms after its start.
+void TestMusyxHeldFade()
+{
+    namespace sf2 = seqlib::sf2;
+    using ntdlib::musyx::MacroOp;
+    using ntdlib::musyx::PatternEventKind;
+    musyx::SongGroup group = TestSongGroup();
+    const std::vector<ntdlib::musyx::MacroStep> fade = FadeSteps();
+    group.pool.macros[1] = {Step(MacroOp::kModeSelect, {1, 1}), Step(MacroOp::kStartSample, {1}),
+                            Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 100, 0})};
+    group.pool.macros[1].insert(group.pool.macros[1].end(), fade.begin() + 1, fade.end());
+    group.pool.macros[2] = {Step(MacroOp::kModeSelect, {1, 1}), Step(MacroOp::kStartSample, {1}),
+                            Step(MacroOp::kEnvelope, {64, 0, 0xff, 0xff, 1, 0x90, 0x01}),
+                            Step(MacroOp::kWaitMs, {1, 0, 0, 0, 0, 0xff, 0xff}), Step(MacroOp::kEnd)};
+    group.group.pages.push_back({.object = 2, .priority = 0, .max_voices = 8, .program = 1});
+    musyx::Instruments instruments(group, TestVolumes());
+    ntdlib::musyx::Song song = TestSong(false, false);
+    std::vector<ntdlib::musyx::PatternEvent>& events = song.patterns[0].events;
+    events.push_back({.tick = 360, .kind = PatternEventKind::kProgram, .value = 1});
+    events.push_back({.tick = 400, .kind = PatternEventKind::kNote, .key = 62, .velocity = 100, .length = 96});
+
+    const Conversion c = musyx::ConvertSong(song, {"held", "G/A/A", 5, 127}, instruments, {});
+
+    const double to_real = musyx::kNominalRate / musyx::kOutputRate;
+    const auto timecents = [](double ms)
+    {
+        return static_cast<int>(std::lround(1200.0 * std::log2(ms / 1000.0)));
+    };
+    const double silent_fit_ms = (120.0 + 800.0 * (1.0 - std::sqrt(0.1) / 0.625)) * to_real;
+    const double half_fit_ms = 400.0 * (1.0 - std::sqrt(0.5)) / 0.5 * to_real;
+    const double half_db = -20.0 * std::log10(0.25);
+    const std::vector<int> holds = SampleZoneValues(c.sf2, sf2::kHoldVolEnv);
+    const std::vector<int> decays = SampleZoneValues(c.sf2, sf2::kDecayVolEnv);
+    const std::vector<int> sustains = SampleZoneValues(c.sf2, sf2::kSustainVolEnv);
+    const std::vector<int> releases = SampleZoneValues(c.sf2, sf2::kReleaseVolEnv);
+    Check(holds.size() == 2 && holds[0] == timecents(100.0 * to_real) && holds[1] == -12000,
+          "the first zone holds until its fade starts, 100 ms in, and the second has no hold");
+    Check(decays.size() == 2 && std::abs(decays[0] - timecents(5.0 * silent_fit_ms)) <= 1 &&
+              std::abs(decays[1] - timecents(100.0 / half_db * 2.0 * half_fit_ms)) <= 1,
+          "each decay reaches its fit's level when the fade does");
+    Check(sustains == std::vector<int>{1440, static_cast<int>(std::lround(10.0 * half_db))},
+          "the first sustain is silent, and the second 12.04 dB down");
+    Check(releases.size() == 2 && releases[0] == decays[0] && releases[1] == timecents(4.5 * 10.0 * to_real),
+          "the first release goes on at the decay's rate, and the second is the cut of a stopped voice");
+
+    const std::vector<std::string> sfz_holds = OpcodeValues(c, "ampeg_hold");
+    const std::vector<std::string> sfz_decays = OpcodeValues(c, "ampeg_decay");
+    const std::vector<std::string> sfz_releases = OpcodeValues(c, "ampeg_release");
+    Check(sfz_holds.size() == 1 && std::abs(std::stod(sfz_holds[0]) - 0.1 * to_real) < 1e-6,
+          "the first SFZ region holds for 100 ms");
+    Check(sfz_decays.size() == 2 && sfz_releases.size() == 2 &&
+              std::abs(std::stod(sfz_decays[0]) - 8.0 / std::numbers::ln10 * silent_fit_ms / 1000.0) < 1e-3 &&
+              sfz_releases[0] == sfz_decays[0],
+          "the first region's decay and release fall at the fit's rate");
+    Check(std::abs(c.performance.seconds - 1.02) < 1e-9,
+          "the song lasts until the first voice falls silent: " + std::to_string(c.performance.seconds));
+    Check(c.performance.approximations ==
+              std::map<std::string, uint32_t>{{"voices that loop and ignore the release stop at their note's end", 1}},
+          "only the voice that keeps sounding is reported, for stopping at its note's end");
+    Check(ntdlib::testing::CheckConversion(c, "held") == 0, "independent readers accept the files");
 }
 
 // Each instrument's global zone holds seqlib's kGlobalZoneModulators and a modulator from CC1 to the vibrato's depth.
@@ -1000,6 +1328,35 @@ void TestMusyxMixedPitchWheelRanges()
     Check(mixed != perf.approximations.end() && mixed->second == 1, "the held note of another range counts once");
 }
 
+// A note of no length ends on the tick it starts. Its note-off comes after its note-on. The MIDI note then ends, and a
+// later note of the same key plays on the same channel.
+void TestMusyxNoteOfNoLength()
+{
+    using ntdlib::musyx::PatternEventKind;
+    const musyx::SongGroup group = TestSongGroup();
+    musyx::Instruments instruments(group, TestVolumes());
+    ntdlib::musyx::Song song = TestSong(false, false);
+    song.patterns[0].events[0].length = 0;
+    song.patterns[0].events.push_back(
+        {.tick = 384, .kind = PatternEventKind::kNote, .key = 60, .velocity = 100, .length = 192});
+
+    const Conversion c = musyx::ConvertSong(song, {"empty", "G/A/A", 5, 127}, instruments, {});
+
+    std::vector<std::pair<EventKind, uint32_t>> notes;
+    for (const TrackEvent& e : c.performance.tracks[0])
+    {
+        if (e.kind == EventKind::kNoteOn || e.kind == EventKind::kNoteOff)
+        {
+            notes.emplace_back(e.kind, e.tick);
+        }
+    }
+    const std::vector<std::pair<EventKind, uint32_t>> expected = {
+        {EventKind::kNoteOn, 0}, {EventKind::kNoteOff, 0}, {EventKind::kNoteOn, 384}, {EventKind::kNoteOff, 576}};
+    Check(notes == expected, "the note of no length ends after its note-on, at its tick");
+    Check(c.channels == 1, "both notes play on one MIDI channel");
+    Check(ntdlib::testing::CheckConversion(c, "empty") == 0, "independent readers accept the files");
+}
+
 // Open the game at `path` as dolphinsf2 opens its inputs. Convert every sequence, and validate each file.
 void TestGameConvertsEverySequence(const char* path)
 {
@@ -1054,6 +1411,9 @@ int main(int argc, char** argv)
     TestRelModule();
     TestDlsMilliseconds();
     TestPianoPan();
+    TestScaleVolume();
+    TestReleaseFade();
+    TestHeldFade();
     TestMusyxSongVolume();
     TestMusyxVolumeTable();
     TestMusyxTableLevels();
@@ -1061,11 +1421,15 @@ int main(int argc, char** argv)
     TestMusyxIntegerTickStep();
     TestMusyxZoneAttenuation();
     TestMusyxSilentZone();
+    TestMusyxVolumeAddition();
     TestMusyxSfzRelease();
+    TestMusyxReleaseFade();
+    TestMusyxHeldFade();
     TestMusyxGlobalZone();
     TestMusyxTempoTable();
     TestMusyxPitchWheelRange();
     TestMusyxMixedPitchWheelRanges();
+    TestMusyxNoteOfNoLength();
 
     if (argc > 1)
     {

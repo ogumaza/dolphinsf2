@@ -60,10 +60,39 @@ enum class KeyOff
     kIgnored, // it plays on: to the sample's end, or as long as the sample loops
     kRelease, // its envelope's release
     kCut,     // a fade of 10 ms (StopSample)
+    kFade,    // it plays on and follows its macro's fade (MacroVoice::release_fade), then stops (StopSample)
+    kAsHeld,  // it plays on as a held note does and stops by itself (MacroVoice::stop_ms)
 };
 
 // The fade that ends a stopped voice.
 constexpr double kCutMs = 10.0;
+
+// A ramp of a voice's volume that an Envelope step starts (0x0f), `start_ms` after the note's start in a held note's
+// ramps (MacroVoice::held_ramps), or after the note's release in a release's fade (ReleaseFade). The volume moves in a
+// line over `ms`, from where it is to `scale` times that plus `add`. MusyX holds the target to full volume.
+struct VolumeRamp
+{
+    double start_ms = 0.0;
+    double ms = 0.0;
+    double scale = 1.0;
+    double add = 0.0; // in units of full volume
+};
+
+// The volume `ms` after the start of `ramps`, for a voice at `volume` that follows them in order. Each ramp starts
+// where the volume is. A later ramp takes over from an earlier one.
+double RampedVolume(const std::vector<VolumeRamp>& ramps, double volume, double ms);
+
+// What a voice does after its note's release when its macro plays it on until a stop (KeyOff::kFade): the ramps of its
+// volume, in order, and the stop `stop_ms` after the release.
+struct ReleaseFade
+{
+    std::vector<VolumeRamp> ramps;
+    double stop_ms = 0.0;
+};
+
+// The volume of a voice `ms` after its note's release, for a voice at `volume` that follows `fade`. Return nothing
+// once the voice has stopped.
+std::optional<double> FadeVolume(const ReleaseFade& fade, double volume, double ms);
 
 // A vibrato: a sine on the pitch from `delay_ms` after the note's start. Its depth is `depth_cents`, plus
 // `mod_depth_cents` times the mod wheel. With `mod_scales_depth`, the mod wheel scales the whole depth.
@@ -115,13 +144,17 @@ struct MacroVoice
     std::optional<int> fixed_key;   // a key that replaces the note's key (SetKey)
     double detune_cents = 0.0;
     double volume = 1.0;     // the scale of the note's volume (ScaleVolumeDLS, ScaleVolume)
+    double volume_add = 0.0; // what ScaleVolume adds to the scaled volume, in units of full volume
     bool dls_volume = false; // the voice's level is the square of its volume (ModeSelect)
     bool itd = false;        // the pan narrows to 0.766 of its range (ModeSelect)
     // A pan that follows the key, in place of the pan of the keymap or the layer.
     std::optional<PianoPan> piano_pan;
     std::optional<Envelope> envelope;
+    // The ramps of the voice's volume while its note is held, up to the voice's stop (stop_ms).
+    std::vector<VolumeRamp> held_ramps;
     KeyOff key_off = KeyOff::kIgnored;
-    std::optional<double> stop_ms; // the voice stops itself this long after its start, unless released before
+    ReleaseFade release_fade;      // for KeyOff::kFade
+    std::optional<double> stop_ms; // the voice stops itself this long after its start if its note is still held
     std::optional<Vibrato> vibrato;
     std::optional<Tremolo> tremolo;
     std::optional<PitchEnvelope> pitch_envelope;
@@ -133,8 +166,21 @@ struct MacroVoice
     std::vector<std::string> approximations;
 };
 
-// Follow SoundMacro `macro` of `pool` for a note. A macro that the pool lacks starts nothing.
-MacroVoice FollowMacro(const ntdlib::musyx::Pool& pool, uint16_t macro);
+// Follow SoundMacro `macro` of `pool` for a note. A macro that the pool lacks starts nothing. ScaleVolume divides by
+// `volume_scale_divisor` (SongGroup).
+MacroVoice FollowMacro(const ntdlib::musyx::Pool& pool, uint16_t macro, int volume_scale_divisor);
+
+// The volume of `voice` for a note at `volume`: the note's volume scaled by the voice's macro, plus the macro's
+// addition. MusyX plays a volume above full at full volume.
+double VoiceVolume(const MacroVoice& voice, double volume);
+
+// The milliseconds after its note's start at which a held note of `voice` falls silent: at the end of the cut after
+// stop_ms, or at the end of a held ramp that leaves its volume at 0. Return nothing if the note sounds on.
+std::optional<double> HeldSilenceMs(const MacroVoice& voice);
+
+// Whether `voice` fades to silence while its note is held and goes on with the fade through the release: a voice that
+// ignores the release (KeyOff::kIgnored) or stops by itself (KeyOff::kAsHeld).
+bool FadesThroughRelease(const MacroVoice& voice);
 
 // A voice that a key of a program starts: a macro, the key that it starts with, its pan (0 to 127, 64 the centre,
 // before the channel's pan moves it) and the share of the note's volume that the layers give it.

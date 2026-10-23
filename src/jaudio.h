@@ -26,6 +26,7 @@ using ntdlib::sequence_export::jaudio::EventKind;
 using ntdlib::sequence_export::jaudio::FormatError;
 using ntdlib::sequence_export::jaudio::Game;
 using ntdlib::sequence_export::jaudio::GameInput;
+using ntdlib::sequence_export::jaudio::GameOptions;
 using ntdlib::sequence_export::jaudio::IsStartUpArchive;
 using ntdlib::sequence_export::jaudio::kSfzSamplesFolder;
 using ntdlib::sequence_export::jaudio::MidiReport;

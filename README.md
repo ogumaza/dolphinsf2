@@ -15,7 +15,7 @@ Games known to work:
   Princess HD (Wii U)
 - Link's Crossbow Training (Wii, JAudio2)
 - The Legend of Zelda: The Wind Waker (the first JAudio), on the GameCube, and The Wind Waker HD
-  (Wii U): the music
+  (Wii U)
 - The Legend of Zelda: Collector's Edition (JAudio2): the menu's sounds
 - Mario Golf: Toadstool Tour (USA, MusyX): the music
 - Mario Power Tennis (USA, MusyX): the music
@@ -27,8 +27,10 @@ Games known to work:
 - The NDDEMO disc (MusyX): the music. The disc's header names it NDDEMO. It never went on sale.
 
 Other games that use JAudio may convert too. Some play music from streamed audio files rather
-than sequences. dolphinsf2 leaves those out. The first JAudio plays a game's sound effects in
-one sequence. The game's code steers that sequence. dolphinsf2 leaves it out too.
+than sequences. dolphinsf2 leaves those out. The Wind Waker, The Wind Waker HD and Pac-Man Vs.
+play all their sound effects in one sequence. dolphinsf2 converts each effect as that sequence
+plays it when the game starts the effect. It leaves out the effects of other games that use the
+first JAudio (see [The first JAudio's sound effects](#the-first-jaudios-sound-effects)).
 
 A MusyX game lists its songs in a table in its code. dolphinsf2 reads that table in Mario Golf:
 Toadstool Tour, Mario Power Tennis and Pokémon Colosseum. Mario Party 4 keeps its songs and
@@ -87,7 +89,9 @@ dolphinsf2 [options] <start-up archive | disc image | main.dol> [...]
 
 Games write ports to steer their music. A sequence can branch on a port's value or wait until
 the game writes the port. `--port` writes a port before each sequence starts. As in the game,
-ports start at 0. Use `--only` to choose the sequences it applies to.
+ports start at 0. Use `--only` to choose the sequences it applies to. For a sound effect of the
+first JAudio, `--port` writes a port of the effect's slot (see
+[The first JAudio's sound effects](#the-first-jaudios-sound-effects)).
 
 The game plays at most 64 notes at once. A note that finds every voice busy takes the voice of
 an older note. By default, dolphinsf2 keeps every note. `--voices 64` drops the notes that the
@@ -110,6 +114,9 @@ name of its file in the sequence archive. A sound without a name can play a file
 sound plays at the same volume. Its files would be the same. dolphinsf2 lists the sequence once.
 A sound that plays the file at another volume becomes `SOUND_<section>_<group>_<index>`. The
 files of a sequence table have no names. One that no sound plays becomes `SEQUENCE_<number>`.
+The sound effects come after the music, in the sound table's order. An effect takes its name
+from the name file. Without one, it becomes `se<category>-<index>`, such as `se4-0123`. The
+sound table gives the category and the index.
 
 ## Downloads
 
@@ -202,17 +209,71 @@ The first JAudio's sequences use the first command set. dolphinsf2 plays them wi
 player, by that command set's rules: its gate notes, its registers and conditions, and its
 tracks' tempo and timebase. Three things differ from the game. A track that shares its parent's
 voices gets separate voices. Oscillators that a track sets are left out. So are the tempos of
-child tracks. dolphinsf2 reports all three.
+child tracks. dolphinsf2 reports all three. A track can also send its notes through the DSP's
+automatic mixer. That mixer sets their gains from their volume and pan. dolphinsf2 plays those
+notes at half the level of the others. That level approximates the game's mix.
+
+### The first JAudio's sound effects
+
+The Wind Waker, The Wind Waker HD and Pac-Man Vs. play all their sound effects in one sequence:
+the first sequence of the sound table. The sound library starts it when the game starts.
+dolphinsf2 recognizes these games by the start-up archives of their USA releases. It converts
+the effects of no other game that uses the first JAudio. Pikmin 2's first sequence isn't an
+effects sequence. Pikmin 2 starts its effects another way. dolphinsf2 leaves them out.
+
+In The Wind Waker, the effects sequence gives each category of effects four slots. A slot is a
+track that waits for an effect. To start an effect, the library writes four of the slot's ports:
+a wait for the distance, the map's information, the effect's number and a request. The slot's
+track then plays the effect. dolphinsf2 plays each effect that way, in the first slot of its
+category. The library's writes come after the first tick of the effects sequence. An effect's
+first note therefore comes a tick after the start of its file. Only the slot's track and the
+tracks below it count for the loops and the end. The effect ends when its slot is free again. An
+effect's volume is its volume in the sound table times the volume of its category. An effect
+also plays at the pitch that the table gives it. The MIDI file holds that pitch as a pitch bend.
+
+`--port` writes ports of the effect's slot. The game's code does the same when it passes values
+with an effect. A value for port 6 stands for the map's information. Some effects, such as
+footsteps, play another sound for each value there. Without a value, some of them play
+nothing. Ports 0, 3 and 4 take the library's values. `--port` doesn't change them. Some effects
+play nothing in any case. Most of those end at once. Their files hold no notes.
+
+A game keeps some effects going by starting them again and again. dolphinsf2 plays each effect
+from one start: to its end, or with loop markers where it loops.
 
 Short loops, such as repeating sound effects, run until the MIDI is at least 10 seconds long.
 Sounds held without end stop 10 seconds after their last change. A wait of 9,600 ticks or more
 counts as waiting for ever. So does a wait for a looping note that nothing releases. Games use
 such waits for sounds that they stop themselves. A sequence that finishes ends when its last
-sound does. So does one whose tracks all wait for ever with nothing sounding. The last release
-can add up to 10 seconds. Performances stop after 15 minutes. One that has been silent for more
-than 10 seconds by then ends with its last sound too. A tempo or timebase of 0 stops the
-sequence. The performance ends there. dolphinsf2 reports the stop. A track that never waits
-would hang the game. dolphinsf2 stops the track and reports it.
+sound does. So does one whose tracks all wait for ever with nothing sounding. In Four Swords
+Adventures, a sequence that sends to the game's echo ends when the echo falls silent instead
+(see [Game rules](#game-rules)). The last release can add up to 10 seconds. Performances stop
+after 15 minutes. One that has been silent for more than 10 seconds by then ends with its last
+sound too. A tempo or timebase of 0 stops the sequence. The performance ends there. dolphinsf2
+reports the stop. A track that never waits would hang the game. dolphinsf2 stops the track and
+reports it.
+
+### Game rules
+
+Some rules for a game's sounds lie in the game's code, not in its files. dolphinsf2 recognizes
+Four Swords Adventures by its start-up archive, in the USA and the Japanese release. dolphinsf2
+then follows these rules of the game:
+
+- **System sounds.** The game plays its system sounds, the sound table's first group, at 0.7 of
+  their volume. dolphinsf2 does the same.
+- **Notes without a release.** A note whose oscillator has neither a release table nor a direct
+  release fades out over 26.7 ms when the game releases it. In the other JAudio2 games, such a
+  note stops at once. Twilight Princess's code does that.
+- **The echo.** The game sets up an echo at start-up. A sound that sends to it repeats about
+  every 160 ms. Each repeat has half the level of the one before. MIDI and SoundFont can't
+  describe an echo. The MIDI file of a sequence that sends to it ends when the echo falls
+  silent. Looping and held sounds keep their ends.
+- **Muted tracks.** One piece of music plays only two of its tracks. The game's code mutes the
+  others when the piece starts. dolphinsf2 leaves out their notes.
+
+dolphinsf2 also recognizes The Wind Waker's start-up archive, on the GameCube and in The Wind
+Waker HD, in the USA release. The game gives each of the sound table's eight categories of
+sound effects a volume. Category 1 keeps the volume of the sound table. Categories 3, 6 and 7
+play at 0.82 of it. The others play at 0.88 of it. dolphinsf2 does the same.
 
 ### MIDI
 
@@ -445,8 +506,9 @@ nine where a song has them:
 
 - **Linear envelopes.** A linear envelope's decay and release fall in a straight line in
   amplitude. SoundFont and SFZ envelopes fall in decibels. A fall to silence is fitted to reach
-  the game's level 20 dB down. A note's decay or release therefore fades more evenly than in
-  the game. The fitted fall goes on after the game's note has fallen silent.
+  the game's level 20 dB down. So is a macro's fade, while its note is held or after the note's
+  release. A note's decay or release therefore fades more evenly than in the game. The fitted
+  fall goes on after the game's note has fallen silent.
 - **Pitch envelopes** fall in a straight line in SoundFont and SFZ. MusyX's pitch envelopes fall
   in decibels of their range. The fit reaches half the range at the same time.
 - **Volume curves.** MusyX looks up the product of a voice's volumes in its volume table.

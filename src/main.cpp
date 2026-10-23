@@ -110,7 +110,7 @@ int main(int argc, char** argv)
     converter.program = kProgram;
     converter.version_line = "dolphinsf2 " DOLPHINSF2_VERSION;
     converter.input_word = "input";
-    converter.folder_message = " is a folder: give its .baa or .aaf file";
+    converter.folder_message = " is a folder: give its .baa or .aaf file, or an extracted disc's sys/main.dol";
     converter.samples_folder = kSfzSamplesFolder;
     converter.usage = Usage;
     converter.option = ExtraOption;
