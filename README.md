@@ -3,9 +3,9 @@
 dolphinsf2 converts the music and sound effects of Nintendo GameCube games to MIDI, SoundFont 2
 and SFZ. It reads games that play their sound through JAudio, the sound library in Nintendo
 EAD's JSystem. Both generations convert: the first JAudio and JAudio2. So do the files of Wii
-and Wii U games that use JAudio. dolphinsf2 also converts the music of a few games that play it
-through Factor 5's MusyX. Each sequence gets a MIDI file and a SoundFont containing its
-instruments. The SFZ files hold the same instruments at the game's level (see
+and Wii U games that use JAudio. dolphinsf2 also converts the music and sound effects of a few
+games that play them through Factor 5's MusyX. Each sequence gets a MIDI file and a SoundFont
+containing its instruments. The SFZ files hold the same instruments at the game's level (see
 [SFZ files](#sfz-files)).
 
 Games known to work:
@@ -17,14 +17,15 @@ Games known to work:
 - The Legend of Zelda: The Wind Waker (the first JAudio), on the GameCube, and The Wind Waker HD
   (Wii U)
 - The Legend of Zelda: Collector's Edition (JAudio2): the menu's sounds
-- Mario Golf: Toadstool Tour (USA, MusyX): the music
-- Mario Power Tennis (USA, MusyX): the music
-- Mario Party 4 (USA, disc version 1, MusyX): the music of the sound test
-- Pokémon Colosseum (USA, MusyX): the music
-- WarioWare, Inc.: Mega Party Game$! (USA, MusyX): the music
-- Nintendo Puzzle Collection (Japan, MusyX): the music of the menu, Dr. Mario, Panel de Pon and
-  Yoshi's Cookie
-- The NDDEMO disc (MusyX): the music. The disc's header names it NDDEMO. It never went on sale.
+- Mario Golf: Toadstool Tour (USA, MusyX): the music and sound effects
+- Mario Power Tennis (USA, MusyX): the music and sound effects
+- Mario Party 4 (USA, disc version 1, MusyX): the music of the sound test and the sound effects
+- Pokémon Colosseum (USA, MusyX): the music and sound effects
+- WarioWare, Inc.: Mega Party Game$! (USA, MusyX): the music and sound effects
+- Nintendo Puzzle Collection (Japan, MusyX): the music and sound effects of the menu, Dr. Mario,
+  Panel de Pon and Yoshi's Cookie
+- The NDDEMO disc (MusyX): the music and sound effects. The disc's header names it NDDEMO. It
+  never went on sale.
 
 Other games that use JAudio may convert too. Some play music from streamed audio files rather
 than sequences. dolphinsf2 leaves those out. The Wind Waker, The Wind Waker HD and Pac-Man Vs.
@@ -44,7 +45,7 @@ starts with its module's name. Dr. Mario's and Panel de Pon's songs take the nam
 games' debug modules give them. The menu's songs take their numbers. Yoshi's Cookie's songs take
 the names of their files. The NDDEMO disc's code lists the paths of its songs' files. dolphinsf2
 names each song after its file. It recognizes each of these games by its `main.dol`. Other MusyX
-games don't convert. Neither do the sound effects of these games.
+games don't convert.
 
 dolphinsf2 reads a game's disc image, an extracted disc or a JAudio game's start-up archive:
 
@@ -407,12 +408,61 @@ MusyX:
 - The SoundMacros. A program's keymaps and layers start macros on a note. A macro is a small
   program that the voice runs. The macro's steps set up the voice: the sample, volume, pan,
   envelopes, vibrato, tremolo and key group, and what the release does. A macro can pan its
-  voice by the key. Each run of keys that starts the same voice the same way becomes a zone. A
-  macro's envelope is either a DLS envelope or a linear one. A DLS envelope's decay and release
-  fall in decibels.
+  voice by the key. It can also play its sample at a rate that it sets, whatever the key. Each
+  run of keys that starts the same voice the same way becomes a zone. A macro's envelope is
+  either a DLS envelope or a linear one. A DLS envelope's decay and release fall in decibels.
 - Drums. MusyX plays MIDI channel 10 from the song group's drum programs. dolphinsf2 copies
   that channel's presets to bank 128. SoundFont synths play channel 10 from that bank.
 - DSPADPCM and PCM samples, with their loops.
+
+### MusyX's sound effects
+
+A MusyX game starts a sound effect by its ID. The effect's row in its group's table of effects
+names an object of the pool, a key, a volume and a pan. MusyX plays the object at the key. A
+note of a song plays a program the same way. The game passes a volume and a pan, or takes the
+row's. It can then set the effect's controllers, such as its volume or its reverb send. The
+volume of the effect's volume group and the master volume for effects multiply the effect's
+volume. dolphinsf2 lists the effects that each game's code starts. It plays each one as the
+game starts it:
+
+- Mario Party 4: the sound manager's table of effects. Its entries give each effect's volume,
+  pan, sends and pitch. An effect's name gives its number in the table, such as `se-0036`. The
+  sound test adds its name for the effect.
+- Pokémon Colosseum: the effects of the sound table's five sets of effects. The game starts each
+  one at full volume, with its pan in the centre. An effect's name gives its set and its ID.
+- WarioWare, Inc.: Mega Party Game$!: the songs that the game plays as effects and that the
+  sound room leaves out, then the effects of the game's table of effects. Each one takes the
+  number that the game's play function takes for it, such as `se-0013`. The songs convert as the
+  sound room's do.
+- Nintendo Puzzle Collection: the effects of the menu, Dr. Mario, Panel de Pon and Yoshi's
+  Cookie. Panel de Pon's and Yoshi's Cookie's tables give most effects a volume and a pan. An
+  effect's name starts with its module's name and ends with its ID.
+- The NDDEMO disc: the effects of the project's group of effects. The project's header names
+  them.
+- Mario Golf: Toadstool Tour and Mario Power Tennis: the tables of effects in the games' code.
+  They list the effects of the group that the game loads at start-up, of each voice bank and of
+  each narration. Mario Power Tennis's tables list the courts' effects too. That game keeps more
+  effects in groups that its tables leave out. dolphinsf2 converts those as well. Each effect
+  plays at its row's volume and pan. Mario Power Tennis plays its effects at a master volume of
+  101 of 127 and gives each one a reverb send (CC91) of 64. An effect's name starts with its
+  voice bank's name, `narration`, `court` or `se` and ends with its ID, such as `mario-0154`. A
+  voice bank's macros can play objects and samples of the groups that the game loads at
+  start-up. dolphinsf2 finds them there too.
+
+The effects come after the songs. An effect's MIDI file plays every voice that MusyX starts for
+it: the voices that the object starts, and the voices that their macros start. A voice's note
+starts where its macro starts its sample. A macro that starts one sample after another plays
+each sample in a note of its own, up to the next one's start. Each of those notes takes the
+settings that the macro has made by its start. The voices that start at the same time share a
+note and a preset. Each note plays on a MIDI channel of its own. Synths play drums on MIDI
+channel 10. The notes leave that channel free. An effect therefore plays at most 15 notes. CC7,
+CC10, CC91, CC93 and the pitch wheel take the effect's controllers. A macro can also set its
+voice's volume controller and sends. The voice plays at the volume controller that the macro
+sets. CC91 and CC93 then take the largest send that the macros of a note's voices set. A note
+lasts until its voices fall silent by themselves. A note whose voices sound on, such as a
+looping sample, stops 10 seconds after the effect's last change. A JAudio sound held without
+end stops the same way. The last change is the last start of one of the effect's notes, or the
+last end of a note that falls silent by itself.
 
 ## SFZ files
 
@@ -420,7 +470,10 @@ dolphinsf2 also writes SFZ files with the same instruments:
 
 - `sfz/<sequence>/<track>.sfz`: the instruments of one MIDI track and its layers. Each file is
   named after its MIDI track.
-- `sfz/samples/`: 16-bit WAV samples shared by all sequences in the game.
+- `sfz/samples/`: 16-bit WAV samples shared by all sequences in the game. A MusyX sample's file
+  takes the sample's ID, such as `s27.wav`. A game's groups can give one ID different samples.
+  The file of such a sample from a later group also gives a number for that group, such as
+  `s7_27.wav`.
 
 SFZ players ignore MIDI channels. Each file contains one instrument. Load the MIDI in a DAW and
 assign an SFZ player, such as sfizz, to each track with its matching file. The player tested is
@@ -536,6 +589,13 @@ nine where a song has them:
   notes play their releases. These tails are quiet.
 - **Effect sends.** CC91 and CC93 hold each channel's reverb and chorus sends. Synths play them
   as reverb and chorus. In the game, the sends reach the effects that the game sets up.
+- **Sound effects.** An effect's files play it as MusyX does when the game starts it and leaves
+  it alone. The game's code can change an effect's controllers while it plays, or stop it. A
+  macro can sweep a sample's pitch, move its pan, or change its key or volume while the sample
+  plays. dolphinsf2 leaves those changes out. It reports the sweeps and the moving pans. A macro
+  can also take its reverb send from a controller or a variable. dolphinsf2 leaves that send out
+  and reports it. In the game, those effects reach the reverb that the game sets up. Their sound
+  then rings on after the files' sound ends.
 
 SoundFont output follows the specification, apart from the zones' attenuation. Player differences
 remain:

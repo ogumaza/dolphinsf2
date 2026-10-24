@@ -30,11 +30,11 @@ public:
     // Print the warnings of a JAudio game's files, each after `name`. A MusyX game prints none.
     void PrintWarnings(const std::string& name) const;
 
-    // The game's sequences, or its songs, in order.
+    // The game's sequences in order. For a MusyX game, these are the songs and then the effects.
     std::vector<ntdlib::sequence_export::Sequence> Sequences() const;
 
-    // Convert the game's sequence or song `index`, with the errors of the banks or the instruments since the last
-    // conversion as warnings.
+    // Convert sequence `index` of Sequences, with the errors of the banks or the instruments since the last conversion
+    // as warnings.
     Conversion Convert(std::size_t index, const PerformOptions& perform);
 
 private:

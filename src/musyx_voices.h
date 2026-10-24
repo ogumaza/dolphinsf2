@@ -7,11 +7,14 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "ntdlib/musyx/pool.h"
@@ -136,19 +139,65 @@ struct PianoPan
 // The pan of a voice that starts with `key` and follows `pan`: 0 to 127, 64 the centre.
 double PianoPanAt(const PianoPan& pan, int key);
 
+// A voice that a macro starts on another voice (PlayMacro): the macro and the step that the new voice starts at, and
+// when, after the start of the voice that starts it. The new voice starts with that voice's key at the step, plus
+// `key_add`. `key_shift` and `fixed_key` hold the starting voice's changes to its key up to the step. The new voice
+// shares the starting voice's controllers: `volume_controller` holds the volume controller that the starting voice has
+// set by the step (MacroVoice::volume_controller).
+struct StartedVoice
+{
+    uint16_t macro = 0;
+    uint16_t step = 0;
+    int key_add = 0;
+    int key_shift = 0;
+    std::optional<int> fixed_key;
+    double at_ms = 0.0;
+    std::optional<double> volume_controller;
+};
+
+// The approximation that a voice's report gives for the SoundMacro commands that dolphinsf2 doesn't follow.
+inline constexpr char kCommandsLeftOut[] = "SoundMacro commands that dolphinsf2 doesn't follow left out";
+
 // What a SoundMacro does with a note.
 struct MacroVoice
 {
     std::optional<uint16_t> sample; // the sample it starts, if any
+    double sample_ms = 0.0;         // when it starts the sample, after its start
     int key_shift = 0;              // keys added to the note's key (AddKey)
     std::optional<int> fixed_key;   // a key that replaces the note's key (SetKey)
     double detune_cents = 0.0;
+    // A rate in Hz at which the voice plays its sample, whatever its key and detune (SetPitch). A later SetKey takes
+    // its place.
+    std::optional<double> rate_hz;
     double volume = 1.0;     // the scale of the note's volume (ScaleVolumeDLS, ScaleVolume)
     double volume_add = 0.0; // what ScaleVolume adds to the scaled volume, in units of full volume
+    // The share of the volume controller (CC7) that the voice's volume follows (VolumeSelect). MusyX holds the
+    // controller's value times the share at full volume.
+    double source_volume = 1.0;
+    // The volume controller from 0 to 1, if the macro sets it (SetVariable on a controller). In an effect, it takes the
+    // place of the effect's volume controller at full. A song's channel holds the controller. A song's note leaves it
+    // out.
+    std::optional<double> volume_controller;
+    // The sends to aux A and aux B (CC91 and CC93) from 0 to 1, if the macro sets them. An effect's note takes them in
+    // place of the effect's sends. A song's note leaves them out.
+    std::optional<double> reverb_controller;
+    std::optional<double> chorus_controller;
     bool dls_volume = false; // the voice's level is the square of its volume (ModeSelect)
     bool itd = false;        // the pan narrows to 0.766 of its range (ModeSelect)
     // A pan that follows the key, in place of the pan of the keymap or the layer.
     std::optional<PianoPan> piano_pan;
+    // A pan from 0 to 127 that the voice sets itself (Panning). The voice takes it in place of the pan of the keymap
+    // or the layer, and of a PianoPan before it.
+    std::optional<int> pan;
+    bool pan_last = false;  // a Panning step comes after the last PianoPan
+    bool pan_moves = false; // a Panning step moves the pan (the voice keeps the first pan)
+    // The voices that the macro starts on other voices (PlayMacro), in order.
+    std::vector<StartedVoice> started;
+    // The parts of a voice whose macro starts one sample after another, one for each sample: from the sample's start
+    // to the next one's, with the settings that the macro has made by the time the sample has played for a moment.
+    // Empty for a voice that starts one sample. A song's note plays the first sample with the voice's settings, and an
+    // effect plays every part.
+    std::vector<MacroVoice> parts;
     std::optional<Envelope> envelope;
     // The ramps of the voice's volume while its note is held, up to the voice's stop (stop_ms).
     std::vector<VolumeRamp> held_ramps;
@@ -170,9 +219,14 @@ struct MacroVoice
 // `volume_scale_divisor` (SongGroup).
 MacroVoice FollowMacro(const ntdlib::musyx::Pool& pool, uint16_t macro, int volume_scale_divisor);
 
+// `voice` for a note that starts `ms` after the voice does, where the voice starts its sample: the times of the
+// voice's settings count from the note's start. A voice that stops before then starts no sample.
+MacroVoice VoiceFrom(const MacroVoice& voice, double ms);
+
 // The volume of `voice` for a note at `volume`: the note's volume scaled by the voice's macro, plus the macro's
-// addition. MusyX plays a volume above full at full volume.
-double VoiceVolume(const MacroVoice& voice, double volume);
+// addition, times the share of the volume controller that the voice follows. `controller` holds the controller, from 0
+// to 1. MusyX plays a volume above full at full volume.
+double VoiceVolume(const MacroVoice& voice, double volume, double controller);
 
 // The milliseconds after its note's start at which a held note of `voice` falls silent: at the end of the cut after
 // stop_ms, or at the end of a held ramp that leaves its volume at 0. Return nothing if the note sounds on.
@@ -183,13 +237,17 @@ std::optional<double> HeldSilenceMs(const MacroVoice& voice);
 bool FadesThroughRelease(const MacroVoice& voice);
 
 // A voice that a key of a program starts: a macro, the key that it starts with, its pan (0 to 127, 64 the centre,
-// before the channel's pan moves it) and the share of the note's volume that the layers give it.
+// before the channel's pan moves it) and the share of the note's volume that the layers give it. The voice's note
+// starts `from_ms` after the voice does (VoiceFrom). A voice of an effect can play one part of its macro's voice
+// (MacroVoice::parts): `part` is then 1 plus the part's index, else 0.
 struct KeyVoice
 {
     uint16_t macro = 0;
     int key = 60;
     int pan = 64;
     double volume = 1.0;
+    double from_ms = 0.0;
+    std::size_t part = 0;
 };
 
 // The voices that `key` starts on object `object` of `pool`: a macro, a keymap or a layer.
@@ -208,6 +266,7 @@ struct Sample
     Pcm pcm;
     uint8_t key = 60; // the key that plays it at its rate
     uint32_t id = 0;
+    std::string sfz_name; // its WAV file's name in the SFZ files' shared folder, without ".wav"
 };
 
 // The song group's macros as voices, and its samples decoded on demand. Read failures are collected in Errors() and
@@ -216,8 +275,9 @@ class Instruments
 {
 public:
     // Read `group`. The group's voices play on the game's volume table `volumes` unless they pick the DLS curve.
-    // `group` must outlive the instruments.
-    Instruments(const SongGroup& group, const VolumeTable& volumes);
+    // `group` must outlive the instruments. The SFZ files give a sample the name that `sfz_names` holds for its ID
+    // (SfzSampleNames), or "s" and its ID, such as "s12".
+    Instruments(const SongGroup& group, const VolumeTable& volumes, std::map<uint16_t, std::string> sfz_names = {});
 
     const SongGroup& Group() const
     {
@@ -231,6 +291,13 @@ public:
 
     // Macro `macro` as a voice, followed once.
     const MacroVoice& Macro(uint16_t macro);
+
+    // Macro `macro` as a voice, or part `part` of that voice (KeyVoice::part), for a note that starts `from_ms` after
+    // the voice does (VoiceFrom), made once.
+    const MacroVoice& Macro(uint16_t macro, std::size_t part, double from_ms);
+
+    // The voice that `voice` plays from its note's start.
+    const MacroVoice& Voice(const KeyVoice& voice);
 
     // The amplitude of `voice` at `volume`: the volume squared on the DLS curve, else the volume table's level.
     double Level(const MacroVoice& voice, double volume) const;
@@ -255,8 +322,26 @@ private:
     const SongGroup& group_;
     VolumeTable volumes_;
     std::map<uint16_t, MacroVoice> macros_;
+    // By macro, part and the note's start (VoiceFrom).
+    std::map<std::tuple<uint16_t, std::size_t, double>, MacroVoice> later_macros_;
     std::map<uint16_t, std::unique_ptr<Sample>> samples_;
+    std::map<uint16_t, std::string> sfz_names_;
     std::vector<std::string> errors_;
 };
+
+// A voice of a sound effect: a voice that the effect's object starts, or a voice that a macro starts on another voice
+// (PlayMacro). The voice's macro starts `start_ms` after the effect.
+struct EffectVoice
+{
+    KeyVoice voice;
+    double start_ms = 0.0;
+};
+
+// The voices that MusyX plays for an effect of object `object` at `key`, with `instruments`: the object's voices and
+// the voices that their macros start, in the order of their starts. A voice that starts one sample after another
+// comes once for each part (MacroVoice::parts). MusyX has 64 voices. Add to `approximations` what the list leaves
+// out.
+std::vector<EffectVoice> EffectVoicesOf(Instruments& instruments, uint16_t object, int key,
+                                        std::set<std::string>& approximations);
 
 } // namespace dolphinsf2::musyx

@@ -43,17 +43,17 @@ struct ModuleGroup
     uint32_t directory = 0;
 };
 
-// The song group `id` of `project`, with its pool, its sample directory and its samples. `name` names the files in the
-// errors. Throw FormatError if the project has no such group of songs.
-SongGroup MakeSongGroup(std::span<const uint8_t> project, std::span<const uint8_t> pool,
-                        std::span<const uint8_t> directory, std::vector<uint8_t> samples, uint16_t id,
-                        const std::string& name)
+// The group `id` of `type` in `project`, with its pool, its sample directory and its samples. `name` names the files
+// in the errors. Throw FormatError if the project has no such group.
+SongGroup MakeGroup(std::span<const uint8_t> project, std::span<const uint8_t> pool, std::span<const uint8_t> directory,
+                    std::vector<uint8_t> samples, uint16_t id, ntdlib::musyx::GroupType type, const std::string& name)
 {
     const std::vector<ntdlib::musyx::Group> groups = ntdlib::musyx::ReadProject(project);
-    const ntdlib::musyx::Group* found = FindSongGroup(groups, id);
+    const ntdlib::musyx::Group* found = FindGroup(groups, type, id);
     if (found == nullptr)
     {
-        throw FormatError(name + " has no song group " + std::to_string(id));
+        const char* kind = type == ntdlib::musyx::GroupType::kSongs ? " has no song group " : " has no effects group ";
+        throw FormatError(name + kind + std::to_string(id));
     }
 
     SongGroup group;
@@ -65,13 +65,31 @@ SongGroup MakeSongGroup(std::span<const uint8_t> project, std::span<const uint8_
     return group;
 }
 
-// The song group of `group`'s files in section `section` of `module`, with the samples `samples`.
-SongGroup ModuleSongGroup(const RelModule& module, uint32_t section, const ModuleGroup& group,
-                          std::vector<uint8_t> samples, const std::string& name)
+// The group of `type` of `group`'s files in section `section` of `module`, with the samples `samples`.
+SongGroup ModuleGroupOf(const RelModule& module, uint32_t section, const ModuleGroup& group,
+                        std::vector<uint8_t> samples, ntdlib::musyx::GroupType type, const std::string& name)
 {
-    return MakeSongGroup(module.Object(module.At(section, group.project)),
-                         module.Object(module.At(section, group.pool)),
-                         module.Object(module.At(section, group.directory)), std::move(samples), group.id, name);
+    return MakeGroup(module.Object(module.At(section, group.project)), module.Object(module.At(section, group.pool)),
+                     module.Object(module.At(section, group.directory)), std::move(samples), group.id, type, name);
+}
+
+// The effects of the effects groups of `project`, in the project's order (ProjectEffects). Each plays in the group
+// whose index in PuzzleMusic::groups is `group`, at the volume `group_volume` of its volume group. Its name is
+// `module`, "-se-" and its ID in four digits, such as "panepon-se-0012".
+std::vector<GameEffect> ModuleEffects(std::span<const uint8_t> project, std::size_t group, const std::string& module,
+                                      uint8_t group_volume)
+{
+    const auto name = [&module](uint16_t id)
+    {
+        return EffectName(module + "-se", id);
+    };
+    std::vector<GameEffect> effects = ProjectEffects(ntdlib::musyx::ReadProject(project), group, name);
+    for (GameEffect& effect : effects)
+    {
+        effect.group_volume = group_volume;
+    }
+
+    return effects;
 }
 
 // The objects and the samples of a group that a module keeps loaded while its songs play: the group's pool, its sample
@@ -153,6 +171,10 @@ uint8_t MenuVolume(std::span<const uint8_t> table, uint16_t group, uint16_t id)
 // comes from the table at 0 in section 4 (MenuVolume). Group 0 stays loaded while the songs play. Its objects and
 // samples serve every song. Nothing names the menu's songs. A song's name gives its ID in two digits, such as
 // "menu-01". The songs come in the order of their IDs.
+//
+// The menu starts an effect through sndFXStartEx with a volume and a pan of 0xff and studio 0. At start-up, the menu
+// calls sndVolume(127, 0, 0xff) (0x8320 in section 1), then sndVolume(110, 0, 0xff) (0x3458). A song's start sets its
+// group's volume again. The effects' group keeps 110.
 void AddMenu(PuzzleMusic& music, const ReadFile& read_file, uint8_t master_volume)
 {
     constexpr char kFile[] = "menu_relsamp.szp";
@@ -171,6 +193,7 @@ void AddMenu(PuzzleMusic& music, const ReadFile& read_file, uint8_t master_volum
 
     constexpr ModuleGroup kEffects{0, 0x111884, 0x1116c0, 0x111938};
     constexpr std::size_t kEffectsPart = 2;
+    constexpr uint8_t kEffectsVolume = 110;
     constexpr std::array<Group, 5> kGroups{{
         {{1, 0x135184, 0x133fd8, 0x1352b8}, 0, "title/Yoshi_title.samp"},
         {{2, 0x113d84, 0x111bc4, 0x113fec}, 1, nullptr},
@@ -204,7 +227,8 @@ void AddMenu(PuzzleMusic& music, const ReadFile& read_file, uint8_t master_volum
         std::vector<uint8_t> samples = group.samples != nullptr
                                            ? read_file(group.samples)
                                            : std::vector<uint8_t>(parts[group.part].begin(), parts[group.part].end());
-        SongGroup song_group = ModuleSongGroup(module, kData, group.files, std::move(samples), kFile);
+        SongGroup song_group =
+            ModuleGroupOf(module, kData, group.files, std::move(samples), ntdlib::musyx::GroupType::kSongs, kFile);
         AddLoadedGroup(song_group, effects);
         index_of_group[group.files.id] = music.groups.size();
         music.groups.push_back(std::make_shared<const SongGroup>(std::move(song_group)));
@@ -241,10 +265,21 @@ void AddMenu(PuzzleMusic& music, const ReadFile& read_file, uint8_t master_volum
         AddSong(music, "menu-" + number, kFile, song.id, MenuVolume(volumes, song.group, song.id), master_volume,
                 group->second, module.Object(song.at));
     }
+
+    // The effects play from group 0 alone.
+    const std::size_t effects_group = music.groups.size();
+    music.groups.push_back(std::make_shared<const SongGroup>(
+        ModuleGroupOf(module, kData, kEffects, {parts[kEffectsPart].begin(), parts[kEffectsPart].end()},
+                      ntdlib::musyx::GroupType::kEffects, kFile)));
+    const std::vector<GameEffect> menu_effects =
+        ModuleEffects(module.Object(module.At(kData, kEffects.project)), effects_group, "menu", kEffectsVolume);
+    music.effects.insert(music.effects.end(), menu_effects.begin(), menu_effects.end());
 }
 
 // One of the games whose module holds its songs and its MusyX files: Dr. Mario and Panel de Pon. The game pushes groups
-// 1 and 0 of the files. Its songs play in group 1. A song's ID is its place in the table of songs.
+// 1 and 0 of the files. Its songs play in group 1. A song's ID is its place in the table of songs. Group 0 holds the
+// game's effects. The game starts them through a function of its own, with a volume and a pan of 0xff and studio 0
+// unless its table of effects gives them others.
 struct PuzzleGame
 {
     const char* name = nullptr;         // the start of the songs' names
@@ -256,6 +291,8 @@ struct PuzzleGame
     const char* samples = nullptr;      // the file of the samples
     std::span<const char* const> names; // the songs' names, by their IDs
     uint32_t volumes = 0;               // the table of the songs' volumes in `song_section`, or 0 for none
+    uint8_t effects_volume = 127;       // the volume that the game gives the effects' group
+    uint32_t effects = 0;               // the table of the effects' volumes and pans in `song_section`, or 0 for none
 };
 
 // The names of Dr. Mario's songs, by their IDs: the songs' symbols in the debug module Dr_MARIO.plf, without the prefix
@@ -268,9 +305,10 @@ constexpr std::array<const char*, 24> kDrMarioSongs{
 // Dr. Mario. dr_mario.szp unpacks to its module. The module's section 5 holds the table of songs at 0x10. Section 4
 // holds the MusyX files: the project at 0x10e424, the pool at 0x1035b0 and the sample directory at 0x10f2f4.
 // dr_test.samp holds the samples. During play, the songs play at full volume. The game lowers a song's volume during a
-// pause (0x13df4 in section 1), in its manual and in some other states.
+// pause (0x13df4 in section 1), in its manual and in some other states. The game starts its effects through 0x5bc4c in
+// section 1. Like the menu, it gives every group a volume of 110 after sndVolume(127, 0, 0xff). The effects keep it.
 constexpr PuzzleGame kDrMario{"dr_mario",     "dr_mario.szp", 5, 0x10, 4, {1, 0x10e424, 0x1035b0, 0x10f2f4},
-                              "dr_test.samp", kDrMarioSongs,  0};
+                              "dr_test.samp", kDrMarioSongs,  0, 110,  0};
 
 // The names of Panel de Pon's songs, by their IDs: the songs' symbols in the debug module PANEPON.plf, without the "_"
 // and the "_song" around them.
@@ -339,8 +377,16 @@ constexpr std::array<const char*, 59> kPanelDePonSongs{"flower_01",
 // samples. The game plays a song through PlayMIDI (0xad230 in section 1). That function sets the song's volume from the
 // table at 0x134148 in section 5. The table gives each song 4 bytes. The second byte gives the song's volume. A volume
 // above 127 gives the game's default, 110 (0x8ba40 in section 1).
-constexpr PuzzleGame kPanelDePon{"panepon",      "panepon.szp",    5,       0xbd0, 5, {1, 0x20350, 0x8fc0, 0x23010},
-                                 "panepon.samp", kPanelDePonSongs, 0x134148};
+//
+// The game starts most of its effects through the table at 0x165678 in section 5 (0xad2a4 and 0xad328 in section 1).
+// The table gives each effect 16 bytes, in the order of the effects' IDs. The byte at +4 gives the effect's volume,
+// and the byte at +5 its pan. 0x8bbd8 turns a volume of 0xff into 110, and a volume or a pan above 127 into 0xff. It
+// then starts the effect through 0xadf50 with the volume, the pan and studio 0. MusyX takes the row's volume or pan
+// for 0xff. 0xad328 then sets the pan by a player's place on the screen. The game's set-up calls sndVolume(127, 0,
+// 0xff) alone.
+constexpr PuzzleGame kPanelDePon{
+    "panepon",      "panepon.szp",    5,        0xbd0, 5,       {1, 0x20350, 0x8fc0, 0x23010},
+    "panepon.samp", kPanelDePonSongs, 0x134148, 127,   0x165678};
 
 // Add the songs of `game`.
 void AddGame(PuzzleMusic& music, const ReadFile& read_file, uint8_t master_volume, const PuzzleGame& game)
@@ -351,8 +397,8 @@ void AddGame(PuzzleMusic& music, const ReadFile& read_file, uint8_t master_volum
     const std::vector<uint8_t> file = UnpackYay0(read_file(game.file));
     const RelModule module(file, game.file);
     const std::size_t group = music.groups.size();
-    music.groups.push_back(std::make_shared<const SongGroup>(
-        ModuleSongGroup(module, game.file_section, game.files, read_file(game.samples), game.file)));
+    music.groups.push_back(std::make_shared<const SongGroup>(ModuleGroupOf(
+        module, game.file_section, game.files, read_file(game.samples), ntdlib::musyx::GroupType::kSongs, game.file)));
     const xsflib::Reader r(file, true);
     for (const auto& [id, at] : module.TablePointers(module.At(game.song_section, game.songs)))
     {
@@ -367,6 +413,37 @@ void AddGame(PuzzleMusic& music, const ReadFile& read_file, uint8_t master_volum
         AddSong(music, std::string(game.name) + "-" + name, game.file, id, volume, master_volume, group,
                 module.Object(at));
     }
+
+    // The effects play from the same files.
+    constexpr std::size_t kEffectEntry = 16;
+    constexpr std::size_t kEffectVolume = 4;
+    constexpr std::size_t kEffectPan = 5;
+    std::vector<GameEffect> effects = ModuleEffects(module.Object(module.At(game.file_section, game.files.project)),
+                                                    group, game.name, game.effects_volume);
+    for (GameEffect& effect : effects)
+    {
+        if (game.effects == 0)
+        {
+            break;
+        }
+
+        const std::size_t entry = module.At(game.song_section, game.effects) + effect.row.id * kEffectEntry;
+        const uint8_t volume = r.U8(entry + kEffectVolume);
+        const uint8_t pan = r.U8(entry + kEffectPan);
+        if (volume == 0xff)
+        {
+            effect.volume = kDefaultVolume;
+        }
+        else if (volume <= 127)
+        {
+            effect.volume = volume;
+        }
+        if (pan <= 127)
+        {
+            effect.pan = pan;
+        }
+    }
+    music.effects.insert(music.effects.end(), effects.begin(), effects.end());
 }
 
 // Yoshi's Cookie's songs. ycookie.szp unpacks to the game's module. ycookie.bin holds the game's sound files as items.
@@ -378,6 +455,14 @@ void AddGame(PuzzleMusic& music, const ReadFile& read_file, uint8_t master_volum
 // pushes groups 0 and 1 at start-up, and group 2 before a song of that group. A song of group 2 therefore finds objects
 // and samples in all three groups. The songs play at the volume for music in the game's options. The table at 0x179b74
 // in section 5 gives the volume of each of the options' 11 levels. The options start at level 5.
+//
+// The effects play at the master volume for effects in the game's options: the table at 0x179b7f in section 5 gives
+// each level's volume, and the options start at level 5 (sndMasterVolume, 0x41d58 in section 1). The game queues an
+// effect by its row in the table at 0x1797b4 in section 5 (0x41f54). A row holds 12 bytes: the effect's ID in a
+// big-endian word, then the effect's volume, pan, surround pan, motion and reverb send. Every row holds a motion of 0,
+// which keeps the pan still. The game starts a queued effect through sndFXStartEx with the row's volume and pan and
+// studio 0 (0x42d94). It then sets controller 0x5b, the reverb send, to the row's send. The table holds 80 rows. A row
+// whose effect group 1 lacks starts nothing. The effects find objects and samples in groups 0 and 1.
 void AddYoshisCookie(PuzzleMusic& music, const ReadFile& read_file, uint8_t master_volume)
 {
     constexpr char kFile[] = "ycookie.szp";
@@ -396,6 +481,14 @@ void AddYoshisCookie(PuzzleMusic& music, const ReadFile& read_file, uint8_t mast
     constexpr uint32_t kFirstSamples = 35;
     constexpr std::array<uint16_t, 2> kSongGroups{0, 2};
     constexpr std::array<uint16_t, 2> kLoadedGroups{0, 1};
+    constexpr uint32_t kEffectLevels = 0x179b7f;
+    constexpr uint32_t kEffectRows = 0x1797b4;
+    constexpr std::size_t kEffectRow = 12;
+    constexpr std::size_t kEffectRowCount = 80;
+    constexpr std::size_t kRowVolume = 4;
+    constexpr std::size_t kRowPan = 5;
+    constexpr std::size_t kRowReverb = 8;
+    constexpr uint16_t kEffectGroup = 1;
 
     const std::vector<uint8_t> file = UnpackYay0(read_file(kFile));
     const RelModule module(file, kFile);
@@ -421,8 +514,8 @@ void AddYoshisCookie(PuzzleMusic& music, const ReadFile& read_file, uint8_t mast
     for (const uint16_t g : kSongGroups)
     {
         const std::span<const uint8_t> samples = item(kFirstSamples + g);
-        SongGroup group =
-            MakeSongGroup(item(g * 3), item(g * 3 + 1), item(g * 3 + 2), {samples.begin(), samples.end()}, g, kItems);
+        SongGroup group = MakeGroup(item(g * 3), item(g * 3 + 1), item(g * 3 + 2), {samples.begin(), samples.end()}, g,
+                                    ntdlib::musyx::GroupType::kSongs, kItems);
         for (const uint16_t loaded : kLoadedGroups)
         {
             if (loaded != g)
@@ -452,6 +545,33 @@ void AddYoshisCookie(PuzzleMusic& music, const ReadFile& read_file, uint8_t mast
         const std::string name = path.substr(path.find_last_of('/') + 1);
         AddSong(music, "ycookie-" + name.substr(0, name.find_last_of('.')), kItems, static_cast<uint16_t>(id), volume,
                 master_volume, index->second, item(kFirstSong + s));
+    }
+
+    // The effects play from group 0. That group holds group 1's objects and samples too.
+    const std::vector<ntdlib::musyx::Group> project = ntdlib::musyx::ReadProject(item(kEffectGroup * 3));
+    const ntdlib::musyx::Group* effects = FindGroup(project, ntdlib::musyx::GroupType::kEffects, kEffectGroup);
+    if (effects == nullptr)
+    {
+        throw FormatError(std::string(kItems) + " has no effects group " + std::to_string(kEffectGroup));
+    }
+
+    const uint8_t effect_volume = r.U8(module.At(kData, kEffectLevels) + kFirstLevel);
+    const std::size_t rows = module.At(kData, kEffectRows);
+    for (std::size_t i = 0; i < kEffectRowCount; i++)
+    {
+        const std::size_t row = rows + i * kEffectRow;
+        const uint32_t id = r.U32(row);
+        const ntdlib::musyx::Effect* found = id > 0xffff ? nullptr : FindEffect(*effects, static_cast<uint16_t>(id));
+        if (found != nullptr)
+        {
+            music.effects.push_back({.name = EffectName("ycookie-se", found->id),
+                                     .group = index_of_group.at(0),
+                                     .row = *found,
+                                     .volume = r.U8(row + kRowVolume),
+                                     .pan = r.U8(row + kRowPan),
+                                     .master_volume = effect_volume,
+                                     .reverb = r.U8(row + kRowReverb)});
+        }
     }
 }
 

@@ -159,10 +159,17 @@ std::vector<ntdlib::sequence_export::Sequence> Input::Sequences() const
     }
     else
     {
+        // The effects follow the songs (musyx::GameInput::Convert).
         const std::vector<musyx::GameSong>& songs = musyx_->Files().Songs();
         for (std::size_t i = 0; i < songs.size(); i++)
         {
             sequences.push_back({i, songs[i].name});
+        }
+
+        const std::vector<musyx::GameEffect>& effects = musyx_->Files().Effects();
+        for (std::size_t i = 0; i < effects.size(); i++)
+        {
+            sequences.push_back({songs.size() + i, effects[i].name});
         }
     }
 

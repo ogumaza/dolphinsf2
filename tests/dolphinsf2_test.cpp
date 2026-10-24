@@ -11,8 +11,10 @@
 #include <exception>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <numbers>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <utility>
@@ -134,32 +136,41 @@ void TestMusyxSongLists()
           "a list past the DOL's data fails: " + past_the_data);
 }
 
-// A sound manager's file with one group and two songs. The header gives the offsets and sizes of the tables of groups
-// and songs. It also gives the offsets of the groups' data, the groups' samples and the songs that no group holds.
-// Group 7's data starts with the offsets of its pool, its project, its sample directory and its songs. Song 0's SNG
-// file lies at offset 2 of the group's songs and holds the bytes 1 to 4. Song 1's file lies at offset 1 of the songs
-// that no group holds and holds the bytes 5 to 7. The group's samples lie at offset 1 of the groups' samples. They're
-// the bytes 0xaa and 0xbb. The settings list one base group: the table's group 0.
+// A sound manager's file with one group, two songs and two effects. The header gives the offsets and sizes of the
+// tables of groups and songs. It also gives the offsets of the groups' data, the groups' samples, the songs that no
+// group holds and the table of effects. The table of groups' first entry holds no group. Group 7's data starts with the
+// offsets of its pool, its project, its sample directory and its songs. Song 0's SNG file lies at offset 2 of the
+// group's songs and holds the bytes 1 to 4. Song 1's file lies at offset 1 of the songs that no group holds and holds
+// the bytes 5 to 7. The group's samples lie at offset 1 of the groups' samples. They're the bytes 0xaa and 0xbb. The
+// settings list one base group: the table's group 1. They give the table of effects three entries. The second holds no
+// effect.
 void TestSoundManagerFile()
 {
     BigEndianBytes b;
     b.PadTo(0x60);
     b.Put32(0x20, 0x60);
-    b.Put32(0x24, 0x20);
-    b.U16(7).U16(0).U32(0).U32(0x20).U32(1).U32(2).PadTo(0x80);
-    b.Put32(0x28, 0x80);
+    b.Put32(0x24, 0x40);
+    b.PadTo(0x80);
+    b.U16(7).U16(0).U32(0).U32(0x20).U32(1).U32(2).PadTo(0xa0);
+    b.Put32(0x28, 0xa0);
     b.Put32(0x2c, 0x20);
     b.U16(7).U16(3).U32(2).U32(4).U8(0).U8(90).U16(0);
     b.U16(7).U16(4).U32(1).U32(3).U8(0xff).U8(127).U16(0);
-    b.Put32(0x38, 0xa0);
+    b.Put32(0x38, 0xc0);
     b.U32(0x10).U32(0x14).U32(0x18).U32(0x1a);
     b.U32(0x11111111).U32(0x22222222).U16(0x3333).U16(0).U32(0x01020304);
-    b.Put32(0x40, 0xc0);
+    b.Put32(0x40, 0xe0);
     b.U8(0).U8(0xaa).U8(0xbb);
-    b.Put32(0x48, 0xc3);
+    b.Put32(0x48, 0xe3);
     b.U8(0).U8(5).U8(6).U8(7);
-    b.Put32(0x10, 0xc7);
-    b.PadTo(0xc7 + 0x28).U8(1).U8(0);
+    b.Put32(0x10, 0xe7);
+    b.PadTo(0xe7 + 0x28).U8(1).U8(1);
+    b.Put16(0xe7 + 6, 3);
+    b.PadTo(0x120);
+    b.Put32(0x30, 0x120);
+    b.U16(7).U16(12).U8(100).U8(32).U16(0xfff0).U8(64).U8(20).U8(30).U8(0).U32(0);
+    b.U16(7).U16(0xffff).PadTo(0x140);
+    b.U16(7).U16(13).U8(127).U8(64).U16(0x10).U8(0).U8(0).U8(0).U8(0).U32(0);
     const std::vector<uint8_t>& file = b.Data();
     const musyx::MsmFile msm(file, "sound/test.msm");
 
@@ -182,8 +193,18 @@ void TestSoundManagerFile()
     Check(ErrorOf([&] { msm.Group(8); }) == "sound/test.msm has no group 8", "a group that the table lacks fails");
     const std::vector<musyx::MsmGroup> base = msm.BaseGroups();
     Check(base.size() == 1 && base[0].pool.data() == group.pool.data(), "the settings' base group");
+    const std::vector<musyx::MsmEffect> effects = msm.Effects();
+    if (Check(effects.size() == 2, "the table lists two effects"))
+    {
+        const musyx::MsmEffect& first = effects[0];
+        Check(first.number == 0 && first.group_id == 7 && first.id == 12 && first.volume == 100 && first.pan == 32 &&
+                  first.pitch == -16 && first.reverb == 20 && first.chorus == 30,
+              "the first effect: its number, group, ID, volume, pan, pitch and sends");
+        Check(effects[1].number == 2 && effects[1].id == 13 && effects[1].pitch == 16,
+              "the entry without an effect keeps its number");
+    }
     std::vector<uint8_t> wrong_base = file;
-    wrong_base.back() = 5;
+    wrong_base[0xe7 + 0x29] = 5;
     Check(ErrorOf([&] { musyx::MsmFile(wrong_base, "sound/test.msm").BaseGroups(); }) ==
               "sound/test.msm has no group at 5 in its table",
           "a base group that the table lacks fails");
@@ -223,6 +244,18 @@ void TestSoundTest()
         ErrorOf([&] { musyx::ReadSoundTest(module.Data(), "dll/test.rel", 4, 5, messages.Data(), "mess/test.dat"); }) ==
             "dll/test.rel's sound test runs past the file's end",
         "an entry past the module's end fails");
+
+    // A list of voices in the same form names effects by their numbers. Of two entries for one effect, the later
+    // counts. An unused entry names nothing.
+    BigEndianBytes voices;
+    voices.U32(1).U32(47u << 16).U16(28).U16(0).U32(100);
+    voices.U32(1).U32(47u << 16 | 1).U16(28).U16(0).U32(100);
+    voices.U32(0).U32(47u << 16 | 1).U16(28).U16(0).U32(101);
+    voices.U32(1).U32(47u << 16 | 1).U16(3).U16(80).U32(102);
+    const std::map<uint32_t, std::string> named =
+        musyx::ReadSoundTestEffects(voices.Data(), "dll/test.rel", 0, 4, messages.Data(), "mess/test.dat");
+    Check(named.size() == 1 && named.contains(100) && named.at(100) == "Boo's Haunted Bash!",
+          "the list names effect 100 by its later entry");
     const auto read_missing = [&]
     {
         musyx::ReadSoundTest(missing.Data(), "dll/test.rel", 0, 1, messages.Data(), "mess/test.dat");
@@ -490,11 +523,11 @@ void TestScaleVolume()
 
     Check(later.volume == 90.0 / 127.0 && later.volume_add == 10.0 / 127.0, "the scale divides by 127");
     Check(early.volume == 90.0 / 128.0 && early.volume_add == 10.0 / 127.0, "the early build's scale divides by 128");
-    Check(std::abs(musyx::VoiceVolume(early, 0.5) - (0.5 * 90.0 / 128.0 + 10.0 / 127.0)) < 1e-12,
+    Check(std::abs(musyx::VoiceVolume(early, 0.5, 1.0) - (0.5 * 90.0 / 128.0 + 10.0 / 127.0)) < 1e-12,
           "the voice's volume is the scaled note's volume plus the addition");
     Check(twice.volume == 0.25 && std::abs(twice.volume_add - 10.0 / 127.0) < 1e-12,
           "a step on the voice's volume scales the addition before it");
-    Check(musyx::VoiceVolume(loud, 1.0) == 1.0 && musyx::VoiceVolume(loud, 0.25) < 1.0,
+    Check(musyx::VoiceVolume(loud, 1.0, 1.0) == 1.0 && musyx::VoiceVolume(loud, 0.25, 1.0) < 1.0,
           "a volume above full plays at full volume");
     Check(later.approximations.empty() && musyx::FollowMacro(pool, 5, 127).approximations.empty(),
           "a step that names no curve, or one that the pool lacks, reports nothing");
@@ -844,6 +877,75 @@ void TestMusyxSong()
     Check(c.samples == 1 && c.sfz.files.size() == 1 && c.sfz.samples.size() == 1,
           "the SoundFont and the SFZ files hold the one sample");
     Check(ntdlib::testing::CheckConversion(c, "loop") == 0, "independent readers accept the files");
+}
+
+// A group of effects plays the objects and samples that it lacks from the groups pushed before it. The bank keeps its
+// macro 1. Its effect of object 2 plays the pushed group's macro 2 and sample 9, under the pushed group's name.
+void TestMusyxPushedGroups()
+{
+    using ntdlib::musyx::MacroOp;
+    musyx::SongGroup startup = TestSongGroup();
+    startup.pool.macros[2] = {Step(MacroOp::kStartSample, {9}), Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0xff, 0xff})};
+    startup.samples[0].id = 9;
+    musyx::SongGroup bank = TestSongGroup();
+    bank.pool.macros[1] = {Step(MacroOp::kStartSample, {1}), Step(MacroOp::kEnd)};
+    const auto pushed = std::make_shared<const musyx::SongGroup>(startup);
+
+    musyx::AddPushedGroups(bank, {pushed});
+    musyx::Instruments instruments(bank, TestVolumes(), {{9, "s0_9"}});
+    musyx::GameEffect effect;
+    effect.name = "pushed";
+    effect.row = {.id = 1, .object = 2, .max_voices = 1, .key = 60};
+    const Conversion c = musyx::ConvertEffect(effect, instruments);
+
+    Check(bank.pool.macros.at(1).size() == 2 && bank.pool.macros.count(2) == 1,
+          "the bank keeps its macro 1 and gains macro 2");
+    const musyx::Sample* sample = instruments.GetSample(9);
+    Check(sample != nullptr && sample->sfz_name == "s0_9" && sample->pcm.channels.size() == 1 &&
+              sample->pcm.channels[0].size() == 3200,
+          "sample 9 decodes from the pushed group's data");
+    Check(c.samples == 1 && c.sfz.samples.size() == 1 && c.sfz.samples[0].name == "s0_9.wav",
+          "the effect plays sample 9 under the pushed group's name");
+    Check(instruments.Errors().empty(), "nothing fails");
+}
+
+// The SFZ files' shared folder gives each sample of a game one name. Group 1 gives sample 1 other data than group 0.
+// Group 2 holds group 1's sample at another offset, and group 3 holds group 0's. Group 1's sample takes the group's
+// index in its name. Its song's SFZ files play that file. Its SoundFont keeps the name "s1".
+void TestMusyxSfzSampleNames()
+{
+    const musyx::SongGroup first = TestSongGroup();
+    musyx::SongGroup other = TestSongGroup();
+    for (uint8_t& byte : other.sample_data)
+    {
+        byte ^= 0x5a;
+    }
+    musyx::SongGroup moved = other;
+    moved.sample_data.insert(moved.sample_data.begin(), 2, 0);
+    moved.samples[0].offset += 2;
+    const std::vector<std::shared_ptr<const musyx::SongGroup>> groups = {
+        std::make_shared<const musyx::SongGroup>(first), std::make_shared<const musyx::SongGroup>(other),
+        std::make_shared<const musyx::SongGroup>(moved), std::make_shared<const musyx::SongGroup>(first)};
+
+    const std::vector<std::map<uint16_t, std::string>> names = musyx::SfzSampleNames(groups);
+    musyx::Instruments named(*groups[1], TestVolumes(), names[1]);
+    musyx::Instruments plain(*groups[1], TestVolumes());
+    const Conversion c = musyx::ConvertSong(TestSong(true, false), {"loop", "G/A/A", 5, 127}, named, {});
+    const Conversion unnamed = musyx::ConvertSong(TestSong(true, false), {"loop", "G/A/A", 5, 127}, plain, {});
+
+    const auto name_of = [&names](std::size_t group)
+    {
+        const auto found = names[group].find(1);
+        return found != names[group].end() ? found->second : std::string("none");
+    };
+    Check(names.size() == 4 && name_of(0) == "s1" && name_of(1) == "s1_1" && name_of(2) == "s1_1" && name_of(3) == "s1",
+          "groups 0 and 3 name sample 1 s1, and groups 1 and 2 s1_1: " + name_of(0) + " " + name_of(1) + " " +
+              name_of(2) + " " + name_of(3));
+    Check(c.sfz.samples.size() == 1 && c.sfz.samples[0].name == "s1_1.wav", "group 1's song writes s1_1.wav");
+    Check(c.sfz.files.size() == 1 && c.sfz.files[0].text.find("s1_1.wav") != std::string::npos &&
+              c.sfz.files[0].text.find("/s1.wav") == std::string::npos,
+          "the song's SFZ file plays s1_1.wav");
+    Check(c.sf2 == unnamed.sf2, "the SoundFont stays the same");
 }
 
 // The early build of MusyX on the NDDEMO disc moves its clock on by whole 65536ths of a tick. At 120 beats a minute,
@@ -1357,6 +1459,399 @@ void TestMusyxNoteOfNoLength()
     Check(ntdlib::testing::CheckConversion(c, "empty") == 0, "independent readers accept the files");
 }
 
+// VolumeSelect picks the sources of a voice's volume. Byte 1 names the controller, and bytes 2 and 3 hold its share in
+// percent. Byte 4 picks how the source joins the others: 0 replaces them. A share of the volume controller (CC7) that
+// replaces the others scales the voice's volume. MusyX holds the controller's value times the share at full volume.
+// Other sources are reported.
+void TestVolumeSelect()
+{
+    using ntdlib::musyx::MacroOp;
+    ntdlib::musyx::Pool pool;
+    pool.macros[1] = {Step(MacroOp::kVolumeSelect, {7, 40}), Step(MacroOp::kEnd)};
+    pool.macros[2] = {Step(MacroOp::kVolumeSelect, {7, 127}), Step(MacroOp::kEnd)};
+    pool.macros[3] = {Step(MacroOp::kVolumeSelect, {1, 50}), Step(MacroOp::kEnd)};
+    pool.macros[4] = {Step(MacroOp::kVolumeSelect, {7, 60, 0, 1}), Step(MacroOp::kEnd)};
+    pool.macros[5] = {Step(MacroOp::kEnd)};
+
+    const musyx::MacroVoice part = musyx::FollowMacro(pool, 1, 127);
+    Check(part.source_volume == 0.4 && musyx::VoiceVolume(part, 0.5, 1.0) == 0.2 && part.approximations.empty(),
+          "a share of 40% of the volume controller scales the voice's volume by 0.4");
+    Check(musyx::VoiceVolume(musyx::FollowMacro(pool, 2, 127), 1.0, 1.0) == 1.0,
+          "a share above 100% plays at full volume with the controller at full");
+    const std::vector<std::string> other = {"volume sources other than a share of the volume controller left out"};
+    Check(musyx::FollowMacro(pool, 3, 127).approximations == other, "another controller is reported");
+    Check(musyx::FollowMacro(pool, 4, 127).approximations == other, "a source that joins the others is reported");
+    Check(musyx::FollowMacro(pool, 5, 127).source_volume == 1.0, "a voice follows the volume controller in full");
+}
+
+// Panning sets the voice's pan from byte 1. The voice takes it in place of the pan of the keymap or the layer and of a
+// PianoPan before it. MusyX then moves the pan by byte 4, a signed number, over the time in bytes 2 and 3. dolphinsf2
+// keeps the first pan. The conversion reports the move.
+void TestPanning()
+{
+    using ntdlib::musyx::MacroOp;
+    ntdlib::musyx::Pool pool;
+    pool.macros[1] = {Step(MacroOp::kPianoPan, {100, 60, 54}), Step(MacroOp::kPanning, {0}), Step(MacroOp::kEnd)};
+    pool.macros[2] = {Step(MacroOp::kPanning, {127}), Step(MacroOp::kPianoPan, {100, 60, 54}), Step(MacroOp::kEnd)};
+    pool.macros[3] = {Step(MacroOp::kPanning, {84, 0xe8, 0x03, 0xd8}), Step(MacroOp::kEnd)};
+
+    const musyx::MacroVoice left = musyx::FollowMacro(pool, 1, 127);
+    Check(left.pan == 0 && left.pan_last && left.piano_pan && left.approximations.empty(),
+          "the step's pan comes after a PianoPan");
+    const musyx::MacroVoice piano = musyx::FollowMacro(pool, 2, 127);
+    Check(piano.pan == 127 && !piano.pan_last && piano.piano_pan, "a PianoPan after the step comes last");
+    const musyx::MacroVoice moving = musyx::FollowMacro(pool, 3, 127);
+    Check(moving.pan == 84 && moving.pan_moves && moving.approximations.empty(),
+          "a pan that moves keeps its first pan");
+}
+
+// A song's voice takes a macro's Panning: its region pans hard left. A song's channel holds the volume controller that
+// a macro sets. A song's voice leaves that out and reports it. The rest of the song's files stays as it is without the
+// two steps. An effect's voice takes both.
+void TestMusyxSongPanning()
+{
+    using ntdlib::musyx::MacroOp;
+    const musyx::SongGroup plain = TestSongGroup();
+    musyx::SongGroup group = TestSongGroup();
+    std::vector<ntdlib::musyx::MacroStep>& macro = group.pool.macros[1];
+    macro.insert(macro.begin() + 1, Step(MacroOp::kPanning, {0}));
+    macro.insert(macro.begin() + 1, Step(MacroOp::kSetVariable, {1, 7, 0, 0x00, 0x20}));
+    musyx::Instruments plain_instruments(plain, TestVolumes());
+    musyx::Instruments instruments(group, TestVolumes());
+    const ntdlib::musyx::Song song = TestSong(false, false);
+
+    const Conversion before = musyx::ConvertSong(song, {"pans", "G/A/A", 5, 127}, plain_instruments, {});
+    const Conversion after = musyx::ConvertSong(song, {"pans", "G/A/A", 5, 127}, instruments, {});
+    Check(OpcodeValues(before, "pan").empty() && OpcodeValues(after, "pan") == std::vector<std::string>{"-100"},
+          "the song's region pans hard left");
+    bool same = after.midi == before.midi && after.sfz.files.size() == before.sfz.files.size();
+    for (std::size_t i = 0; same && i < after.sfz.files.size(); i++)
+    {
+        std::string text = after.sfz.files[i].text;
+        if (const std::size_t at = text.find(" pan=-100"); at != std::string::npos)
+        {
+            text.erase(at, std::string(" pan=-100").size());
+        }
+        same = text == before.sfz.files[i].text;
+    }
+    Check(same, "the rest of the song's files stays the same");
+    const auto& reported = after.performance.approximations;
+    Check(reported.count("SoundMacro commands that dolphinsf2 doesn't follow left out") == 0 &&
+              reported.count("volumes and sends that a macro sets left out") == 1,
+          "the song reports the controller alone");
+
+    musyx::GameEffect effect;
+    effect.name = "left";
+    effect.row = {.id = 1, .object = 1, .max_voices = 1, .key = 60};
+    const Conversion c = musyx::ConvertEffect(effect, instruments);
+    Check(OpcodeValues(c, "pan") == std::vector<std::string>{"-100"}, "the effect's region pans hard left");
+    Check(ntdlib::testing::CheckConversion(c, "left") == 0, "independent readers accept the effect's files");
+}
+
+// SetPitch sets the rate of the voice's sample in Hz, from bytes 1 to 3, whatever the voice's key. A later SetKey takes
+// its place. A step with more in bytes 4 to 7 is reported. A song's macro at 16,000 Hz plays the sample of 32,000 Hz an
+// octave down at every key: 1,200 cents down, and the output's 1.5 cents up.
+void TestSetPitch()
+{
+    using ntdlib::musyx::MacroOp;
+    ntdlib::musyx::Pool pool;
+    pool.macros[1] = {Step(MacroOp::kSetPitch, {0x00, 0x7d, 0x00}), Step(MacroOp::kEnd)};
+    pool.macros[2] = {Step(MacroOp::kSetPitch, {0x00, 0x7d, 0x00}), Step(MacroOp::kSetKey, {72}), Step(MacroOp::kEnd)};
+    pool.macros[3] = {Step(MacroOp::kSetPitch, {0x00, 0x7d, 0x00, 1}), Step(MacroOp::kEnd)};
+    const musyx::MacroVoice rate = musyx::FollowMacro(pool, 1, 127);
+    Check(rate.rate_hz == 32000.0 && rate.approximations.empty(), "the step sets a rate of 32,000 Hz");
+    const musyx::MacroVoice key = musyx::FollowMacro(pool, 2, 127);
+    Check(!key.rate_hz && key.fixed_key == 72, "a later SetKey takes the rate's place");
+    const std::vector<std::string> left_out = {"SoundMacro commands that dolphinsf2 doesn't follow left out"};
+    Check(musyx::FollowMacro(pool, 3, 127).approximations == left_out, "a step with more bytes is reported");
+
+    musyx::SongGroup group = TestSongGroup();
+    std::vector<ntdlib::musyx::MacroStep>& macro = group.pool.macros[1];
+    macro.insert(macro.begin() + 1, Step(MacroOp::kSetPitch, {0x00, 0x3e, 0x80}));
+    musyx::Instruments instruments(group, TestVolumes());
+    const Conversion c = musyx::ConvertSong(TestSong(false, false), {"rate", "G/A/A", 5, 127}, instruments, {});
+    Check(OpcodeValues(c, "pitch_keytrack") == std::vector<std::string>{"0"} &&
+              OpcodeValues(c, "transpose") == std::vector<std::string>{"-11"} &&
+              OpcodeValues(c, "tune") == std::vector<std::string>{"-98"},
+          "the region plays an octave down at every key");
+    Check(ntdlib::testing::CheckConversion(c, "rate") == 0, "independent readers accept the files");
+}
+
+// SendMessage sends a message to the voices of the macro that bytes 2 and 3 name. No voice plays macro 0xffff.
+void TestSendMessage()
+{
+    using ntdlib::musyx::MacroOp;
+    ntdlib::musyx::Pool pool;
+    pool.macros[1] = {Step(MacroOp::kSendMessage, {0, 0xff, 0xff}), Step(MacroOp::kEnd)};
+    pool.macros[2] = {Step(MacroOp::kSendMessage, {0, 5, 0}), Step(MacroOp::kEnd)};
+
+    Check(musyx::FollowMacro(pool, 1, 127).approximations.empty(), "a message that reaches no voice changes nothing");
+    Check(musyx::FollowMacro(pool, 2, 127).approximations == std::vector<std::string>{musyx::kCommandsLeftOut},
+          "a message to a macro is reported");
+}
+
+// A voice that waits before it starts its sample plays its note from the sample's start (VoiceFrom). The times of the
+// voice's stop, ramps and vibrato then count from there. A voice that stops before the note's start plays no sample.
+void TestVoiceFrom()
+{
+    using ntdlib::musyx::MacroOp;
+    ntdlib::musyx::Pool pool;
+    pool.macros[1] = {
+        Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 200, 0}),
+        Step(MacroOp::kVibrato, {0, 20, 0, 0, 1, 100, 0}),
+        Step(MacroOp::kStartSample, {1}),
+        Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 50, 0}),
+        Step(MacroOp::kEnvelope, {0, 0, 0xff, 0xff, 1, 100, 0}),
+        Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0x2c, 0x01}),
+        Step(MacroOp::kStopSample),
+        Step(MacroOp::kEnd),
+    };
+
+    const musyx::MacroVoice voice = musyx::FollowMacro(pool, 1, 127);
+    Check(voice.sample_ms == 200.0 && voice.stop_ms == 550.0, "the voice starts its sample at 200 ms and stops at 550");
+    const musyx::MacroVoice later = musyx::VoiceFrom(voice, 200.0);
+    Check(later.sample && later.sample_ms == 0.0 && later.stop_ms == 350.0, "from the sample's start, it stops at 350");
+    Check(later.held_ramps.size() == 1 && later.held_ramps[0].start_ms == 50.0, "its ramp starts 50 ms in");
+    Check(later.vibrato && later.vibrato->delay_ms == 0.0, "its vibrato starts with the sample");
+    Check(!musyx::VoiceFrom(voice, 600.0).sample, "a voice that stops before the note's start plays no sample");
+}
+
+// PlayMacro starts another voice on the macro that bytes 2 and 3 name, from the step that bytes 4 and 5 name, with the
+// key of the voice that starts it plus byte 1. An effect plays the voices that its object's macros start. Each voice's
+// note starts where the voice starts its sample. The effect's voices that start their samples at one time share a
+// note. Each note plays on a MIDI channel of its own, with a preset of its own.
+void TestPlayMacro()
+{
+    using ntdlib::musyx::MacroOp;
+    musyx::SongGroup group = TestSongGroup();
+
+    // Macro 3 starts macro 4 at once, two keys up. It waits 200 ms, starts macro 5, and starts its sample. Macro 4
+    // starts its sample at once. Macro 5 waits 100 ms first. Each waits for ever once its sample plays.
+    group.pool.macros[3] = {
+        Step(MacroOp::kPlayMacro, {2, 4, 0, 0, 0, 50, 0xff}), Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 200, 0}),
+        Step(MacroOp::kPlayMacro, {0, 5, 0, 0, 0, 50, 0xff}), Step(MacroOp::kStartSample, {1}),
+        Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0xff, 0xff}),  Step(MacroOp::kEnd),
+    };
+    group.pool.macros[4] = {Step(MacroOp::kStartSample, {1}), Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0xff, 0xff})};
+    group.pool.macros[5] = {
+        Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 100, 0}),
+        Step(MacroOp::kStartSample, {1}),
+        Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0xff, 0xff}),
+    };
+    musyx::Instruments instruments(group, TestVolumes());
+
+    const std::vector<musyx::StartedVoice>& started = instruments.Macro(3).started;
+    Check(started.size() == 2 && started[0].macro == 4 && started[0].key_add == 2 && started[0].at_ms == 0.0 &&
+              started[1].macro == 5 && started[1].key_add == 0 && started[1].at_ms == 200.0,
+          "the macro starts macro 4 at once, two keys up, and macro 5 at 200 ms");
+
+    std::set<std::string> left_out;
+    const std::vector<musyx::EffectVoice> voices = musyx::EffectVoicesOf(instruments, 3, 60, left_out);
+    Check(voices.size() == 3 && voices[0].voice.macro == 3 && voices[1].voice.macro == 4 && voices[1].voice.key == 62 &&
+              voices[2].voice.macro == 5 && voices[2].start_ms == 200.0 && left_out.empty(),
+          "the effect plays the object's voice and the two that it starts");
+
+    musyx::GameEffect effect;
+    effect.name = "three voices";
+    effect.row = {.id = 1, .object = 3, .max_voices = 4, .key = 60};
+    const std::vector<musyx::EffectNote> notes = musyx::EffectNotes(effect, instruments, left_out);
+    const auto note_is = [&notes](std::size_t i, double start, uint8_t key, uint16_t macro)
+    {
+        return notes[i].start_ms == start && notes[i].key == key && notes[i].voices.size() == 1 &&
+               notes[i].voices[0].macro == macro;
+    };
+    Check(notes.size() == 3 && note_is(0, 0.0, 62, 4) && note_is(1, 200.0, 60, 3) && note_is(2, 300.0, 60, 5),
+          "a note for each start of a sample, at 0, 200 and 300 ms");
+
+    const Conversion c = musyx::ConvertEffect(effect, instruments);
+    std::vector<int64_t> starts;
+    std::vector<int64_t> ends;
+    for (std::size_t slot = 0; slot < c.performance.tracks.size(); slot++)
+    {
+        for (const TrackEvent& e : c.performance.tracks[slot])
+        {
+            if (e.kind == EventKind::kNoteOn)
+            {
+                starts.push_back(e.tick);
+            }
+            else if (e.kind == EventKind::kNoteOff)
+            {
+                ends.push_back(e.tick);
+            }
+        }
+    }
+    Check(starts.size() == 3 && starts[0] == 0 && starts[1] > 0 && std::abs(starts[2] * 2 - starts[1] * 3) <= 5,
+          "the notes start on three channels, the third at 1.5 times the second's time");
+
+    // The samples loop. Each note stops 10 s after the last note's start: 50 times the second note's time later.
+    const auto stops_after_last_start = [&](int64_t end)
+    {
+        return starts.size() == 3 && std::abs(end - (starts[2] + 50 * starts[1])) <= 50;
+    };
+    Check(ends.size() == 3 && std::all_of(ends.begin(), ends.end(), stops_after_last_start),
+          "the held notes stop 10 s after the last note's start");
+    Check(c.performance.presets.size() == 3, "each note has a preset");
+    Check(ntdlib::testing::CheckConversion(c, "three voices") == 0, "independent readers accept the files");
+}
+
+// SetVariable with byte 1 sets the MIDI controller that byte 2 names to the value in bytes 4 and 5, of 14 bits. The
+// voice's volume follows the volume controller. A voice that a macro starts shares the controllers of the voice that
+// starts it. An effect's note takes the sends that its voices set. Without byte 1, the step sets a variable. A
+// variable changes nothing by itself.
+void TestSetController()
+{
+    using ntdlib::musyx::MacroOp;
+    musyx::SongGroup group = TestSongGroup();
+    group.pool.macros[3] = {
+        Step(MacroOp::kSetVariable, {1, 7, 0, 0x00, 0x20}),
+        Step(MacroOp::kPlayMacro, {0, 4, 0, 0, 0, 50, 0xff}),
+        Step(MacroOp::kStartSample, {1}),
+        Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0xff, 0xff}),
+    };
+    group.pool.macros[4] = {Step(MacroOp::kStartSample, {1}), Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0xff, 0xff})};
+    group.pool.macros[5] = {
+        Step(MacroOp::kSetVariable, {1, 91, 0, 0x00, 0x20}),
+        Step(MacroOp::kSetVariable, {1, 93, 0, 0x00, 0x10}),
+        Step(MacroOp::kStartSample, {1}),
+        Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0xff, 0xff}),
+    };
+    group.pool.macros[6] = {Step(MacroOp::kSetVariable, {0, 7, 0, 0x10, 0x27}), Step(MacroOp::kEnd)};
+    group.pool.macros[7] = {Step(MacroOp::kSetVariable, {1, 1, 0, 0x10, 0x27}), Step(MacroOp::kEnd)};
+    musyx::Instruments instruments(group, TestVolumes());
+
+    const double share = 0x2000 / 16383.0;
+    const musyx::MacroVoice& voice = instruments.Macro(3);
+    Check(voice.volume_controller == share && musyx::VoiceVolume(voice, 1.0, share) == share &&
+              voice.approximations.empty(),
+          "the macro sets its volume controller to 0x2000 of 0x3fff, and its volume follows");
+    std::set<std::string> left_out;
+    const std::vector<musyx::EffectVoice> voices = musyx::EffectVoicesOf(instruments, 3, 60, left_out);
+    Check(voices.size() == 2 && voices[1].voice.macro == 4 && voices[1].voice.volume == share,
+          "the voice that the macro starts takes the controller");
+    Check(instruments.Macro(5).reverb_controller == 0x2000 / 16383.0 &&
+              instruments.Macro(5).chorus_controller == 0x1000 / 16383.0 && instruments.Macro(5).approximations.empty(),
+          "the macro sets the sends to aux A and aux B");
+    Check(!instruments.Macro(6).volume_controller && instruments.Macro(6).approximations.empty(),
+          "a variable changes nothing by itself");
+    Check(instruments.Macro(7).approximations ==
+              std::vector<std::string>{"controllers other than the volume and the sends that a macro sets left out"},
+          "another controller is reported");
+
+    musyx::GameEffect effect;
+    effect.name = "sends";
+    effect.row = {.id = 1, .object = 5, .max_voices = 1, .key = 60};
+    const Conversion c = musyx::ConvertEffect(effect, instruments);
+    std::map<EventKind, int> sends;
+    for (const std::vector<TrackEvent>& track : c.performance.tracks)
+    {
+        for (const TrackEvent& e : track)
+        {
+            if (e.kind == EventKind::kReverb || e.kind == EventKind::kChorus)
+            {
+                sends[e.kind] = e.value;
+            }
+        }
+    }
+    Check(sends[EventKind::kReverb] == 64 && sends[EventKind::kChorus] == 32,
+          "the effect's note sends at the levels that its voice sets");
+}
+
+// A macro that starts one sample after another plays them in parts. Each part takes the settings that the macro has
+// made by the time its sample has played for a moment, and stops where the next part starts. A sample that another
+// replaces at once never sounds. A song's note plays the first sample. An effect plays each part as a note.
+void TestVoiceParts()
+{
+    using ntdlib::musyx::MacroOp;
+    musyx::SongGroup group = TestSongGroup();
+
+    // Sample 1 at 80% of the volume controller for 200 ms. Then sample 2 two keys up at 40%. Sample 1 replaces it at
+    // once. The voice then waits for ever.
+    group.pool.macros[3] = {
+        Step(MacroOp::kVolumeSelect, {7, 80}),
+        Step(MacroOp::kStartSample, {1}),
+        Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 200, 0}),
+        Step(MacroOp::kAddKey, {2}),
+        Step(MacroOp::kVolumeSelect, {7, 40}),
+        Step(MacroOp::kStartSample, {2}),
+        Step(MacroOp::kStartSample, {1}),
+        Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0xff, 0xff}),
+        Step(MacroOp::kEnd),
+    };
+    musyx::Instruments instruments(group, TestVolumes());
+
+    const musyx::MacroVoice& voice = instruments.Macro(3);
+    Check(voice.sample == 1 && voice.sample_ms == 0.0 &&
+              voice.approximations == std::vector<std::string>{"a second sample of a voice left out"},
+          "a song's note plays the first sample and reports the second");
+    if (!Check(voice.parts.size() == 2, "the voice plays in two parts"))
+    {
+        return;
+    }
+    const musyx::MacroVoice& first = voice.parts[0];
+    Check(first.sample == 1 && first.sample_ms == 0.0 && first.stop_ms == 200.0 && first.source_volume == 0.8 &&
+              first.key_shift == 0,
+          "the first part plays sample 1 for 200 ms at 80%");
+    const musyx::MacroVoice& second = voice.parts[1];
+    Check(second.sample == 1 && second.sample_ms == 200.0 && !second.stop_ms && second.source_volume == 0.4 &&
+              second.key_shift == 2 && second.approximations.empty(),
+          "the second part plays the sample that replaces sample 2, two keys up at 40%, from 200 ms on");
+
+    musyx::GameEffect effect;
+    effect.name = "two parts";
+    effect.row = {.id = 1, .object = 3, .max_voices = 1, .key = 60};
+    std::set<std::string> left_out;
+    const std::vector<musyx::EffectNote> notes = musyx::EffectNotes(effect, instruments, left_out);
+    Check(notes.size() == 2 && notes[0].start_ms == 0.0 && notes[0].voices.size() == 1 &&
+              notes[0].voices[0].part == 1 && notes[1].start_ms == 200.0 && notes[1].voices.size() == 1 &&
+              notes[1].voices[0].part == 2 && left_out.empty(),
+          "the effect plays a note for each part");
+    Check(instruments.Voice(notes[1].voices[0]).sample_ms == 0.0 && !instruments.Voice(notes[1].voices[0]).stop_ms,
+          "the second part's note starts with its sample");
+
+    const Conversion c = musyx::ConvertEffect(effect, instruments);
+    Check(c.performance.presets.size() == 2, "each part has a preset");
+    Check(ntdlib::testing::CheckConversion(c, "two parts") == 0, "independent readers accept the files");
+}
+
+// A table of two songs that play as effects, and a table of two effects that the play function starts.
+void TestPlayedEffects()
+{
+    constexpr uint32_t kBase = 0x80200000;
+    BigEndianBytes b;
+    b.U8(3).U8(0).U16(13).U8(90).U8(10).U8(1).U8(0);
+    b.U8(1).U8(0).U16(1606).U8(100).U8(20).U8(1).U8(0);
+    b.U16(1616).U8(100).U8(1).U8(50).U8(10);
+    b.U16(1607).U8(90).U8(0).U8(75).U8(12);
+    const std::vector<uint8_t> file = DolWithData(kBase, b.Data());
+    const std::optional<ntdlib::Dol> dol = ntdlib::Dol::Parse(file);
+    if (!Check(dol.has_value(), "the test's DOL reads"))
+    {
+        return;
+    }
+
+    const std::vector<musyx::SoundRoomSong> songs = musyx::ReadEffectSongs(*dol, kBase, 2);
+    if (Check(songs.size() == 2, "the table lists two songs"))
+    {
+        Check(songs[0].name == "se-0013" && songs[0].number == 13 && songs[0].group_id == 3 && songs[0].volume == 90,
+              "the first song: its name from its number, its number, its group and its volume");
+        Check(songs[1].number == 1606 && songs[1].group_id == 1, "the second song");
+    }
+
+    const std::vector<musyx::PlayedEffect> effects = musyx::ReadPlayedEffects(*dol, kBase + 16, 2);
+    if (Check(effects.size() == 2, "the table lists two effects"))
+    {
+        Check(
+            effects[0].number == 1616 && effects[0].volume == 100 && effects[0].reverb == 50 && effects[0].chorus == 10,
+            "the first effect: its number, its volume and its sends");
+        Check(
+            effects[1].number == 1607 && effects[1].volume == 90 && effects[1].reverb == 75 && effects[1].chorus == 12,
+            "the second effect");
+    }
+    const std::string past_the_data = ErrorOf([&] { musyx::ReadPlayedEffects(*dol, kBase + 24, 2); });
+    Check(past_the_data == "main.dol has no data at the song list's address",
+          "a table past the DOL's data fails: " + past_the_data);
+}
+
 // Open the game at `path` as dolphinsf2 opens its inputs. Convert every sequence, and validate each file.
 void TestGameConvertsEverySequence(const char* path)
 {
@@ -1418,6 +1913,8 @@ int main(int argc, char** argv)
     TestMusyxVolumeTable();
     TestMusyxTableLevels();
     TestMusyxSong();
+    TestMusyxSfzSampleNames();
+    TestMusyxPushedGroups();
     TestMusyxIntegerTickStep();
     TestMusyxZoneAttenuation();
     TestMusyxSilentZone();
@@ -1430,6 +1927,16 @@ int main(int argc, char** argv)
     TestMusyxPitchWheelRange();
     TestMusyxMixedPitchWheelRanges();
     TestMusyxNoteOfNoLength();
+    TestVolumeSelect();
+    TestPanning();
+    TestMusyxSongPanning();
+    TestSetPitch();
+    TestSendMessage();
+    TestVoiceFrom();
+    TestPlayMacro();
+    TestVoiceParts();
+    TestSetController();
+    TestPlayedEffects();
 
     if (argc > 1)
     {

@@ -15,13 +15,18 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <memory>
 #include <numbers>
 #include <optional>
+#include <set>
+#include <span>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
+#include "ntdlib/musyx/samples.h"
 #include "ntdlib/musyx/song.h"
 #include "ntdlib/sequence_export/conversion.h"
 #include "ntdlib/sequence_export/jaudio/convert.h"
@@ -103,19 +108,46 @@ struct Zone
 {
     bool SameVoice(const Zone& other) const
     {
-        return macro == other.macro && key_offset == other.key_offset && pan == other.pan && volume == other.volume;
+        return macro == other.macro && key_offset == other.key_offset && pan == other.pan && volume == other.volume &&
+               from_ms == other.from_ms && part == other.part;
     }
 
     int low_key = 0;
     int high_key = 0;
     uint16_t macro = 0;
-    int key_offset = 0;  // the voice's key minus the note's
-    double pan = 64.0;   // 0 to 127, 64 the centre
-    double volume = 1.0; // the share of the note's volume that the layers give the voice
+    int key_offset = 0;   // the voice's key minus the note's
+    double pan = 64.0;    // 0 to 127, 64 the centre
+    double volume = 1.0;  // the share of the note's volume that the layers give the voice
+    double from_ms = 0.0; // the note starts this long after the voice (KeyVoice::from_ms)
+    std::size_t part = 0; // the part of the voice that the zone plays (KeyVoice::part)
+    bool effect = false;  // the zone plays a voice of an effect
 };
 
-// The zones of the preset that plays `object`, in order of their lowest keys. A macro's PianoPan replaces the pan of
-// the keymap or the layer.
+// The pan of voice `v`: the pan of the macro's last Panning or PianoPan step, else the pan of the keymap or the layer
+// (MacroVoice::pan).
+double PanOf(Instruments& instruments, const KeyVoice& v)
+{
+    const MacroVoice& voice = instruments.Macro(v.macro, v.part, 0.0);
+    if (voice.pan_last)
+    {
+        return *voice.pan;
+    }
+    if (voice.piano_pan)
+    {
+        return PianoPanAt(*voice.piano_pan, v.key);
+    }
+
+    return v.pan;
+}
+
+// The volume of a zone's voice at `volume` (VoiceVolume). An effect's voice takes the volume controller that its macro
+// sets. A song's channel holds the controller. A song's voice therefore leaves it out.
+double ZoneVolume(const MacroVoice& voice, const Zone& zone, double volume)
+{
+    return VoiceVolume(voice, volume, zone.effect ? voice.volume_controller.value_or(1.0) : 1.0);
+}
+
+// The zones of the preset that plays `object`, in order of their lowest keys.
 std::vector<Zone> ZonesOf(Instruments& instruments, uint16_t object)
 {
     std::vector<Zone> zones;
@@ -126,12 +158,11 @@ std::vector<Zone> ZonesOf(Instruments& instruments, uint16_t object)
         std::vector<bool> extended(open.size());
         for (const KeyVoice& v : VoicesOf(instruments.Group().pool, object, key))
         {
-            const std::optional<PianoPan>& piano_pan = instruments.Macro(v.macro).piano_pan;
             Zone z{.low_key = key,
                    .high_key = key,
                    .macro = v.macro,
                    .key_offset = v.key - key,
-                   .pan = piano_pan ? PianoPanAt(*piano_pan, v.key) : v.pan,
+                   .pan = PanOf(instruments, v),
                    .volume = v.volume};
             for (std::size_t i = 0; i < open.size(); i++)
             {
@@ -159,15 +190,35 @@ std::vector<Zone> ZonesOf(Instruments& instruments, uint16_t object)
     return zones;
 }
 
+// The zones of the preset that plays `note`, a note of an effect: one for each of its voices, over every key.
+std::vector<Zone> ZonesOf(Instruments& instruments, const EffectNote& note)
+{
+    std::vector<Zone> zones;
+    for (const KeyVoice& v : note.voices)
+    {
+        zones.push_back({.low_key = 0,
+                         .high_key = 127,
+                         .macro = v.macro,
+                         .key_offset = v.key - note.key,
+                         .pan = PanOf(instruments, v),
+                         .volume = v.volume,
+                         .from_ms = v.from_ms,
+                         .part = v.part,
+                         .effect = true});
+    }
+
+    return zones;
+}
+
 // The amplitude of a zone at full velocity and full controllers. MusyX multiplies the velocity, the controllers, the
 // song's volume, the game's master volume, the macro's volume and the layers' volumes. MusyX plays the product on the
 // voice's curve: the DLS curve or MusyX's volume table. SoundFont's and SFZ's default curves square the velocity and
 // the controllers. The player maps the velocities and the controllers of voices on the table to those curves. The
 // player puts the song's volume and the master volume in CC7. The zone takes the level that the voice's curve gives
-// the macro's volume times the layers' volumes, plus the macro's addition (VoiceVolume).
+// the macro's volume times the layers' volumes, plus the macro's addition (ZoneVolume).
 double ZoneGain(const Instruments& instruments, const MacroVoice& voice, const Zone& zone)
 {
-    return instruments.Level(voice, VoiceVolume(voice, zone.volume));
+    return instruments.Level(voice, ZoneVolume(voice, zone, zone.volume));
 }
 
 // The level of `zone` at MIDI velocity `velocity` over its level at full velocity, with the channel's volume and
@@ -184,7 +235,7 @@ double VelocityResponse(const Instruments& instruments, const MacroVoice& voice,
 
     const double written = velocity / 127.0;
     const double note = voice.dls_volume ? written : TableVolume(instruments.Volumes(), written * written);
-    return instruments.Level(voice, VoiceVolume(voice, note * zone.volume)) / full;
+    return instruments.Level(voice, ZoneVolume(voice, zone, note * zone.volume)) / full;
 }
 
 // The amount of a modulator from the velocity to initialAttenuation that gives `zone` the velocity response of a voice
@@ -227,7 +278,8 @@ std::string SfzVelocityCurve(const Instruments& instruments, const MacroVoice& v
 }
 
 // The tuning of a zone in cents at its sample's key, and whether its pitch follows the key. MusyX plays the voice's
-// key, moved by the macro, against the sample's key. The output's rate makes every voice a little sharp.
+// key, moved by the macro, against the sample's key. A rate that the macro sets takes the place of both keys. The
+// output's rate makes every voice a little sharp.
 struct Tuning
 {
     double cents = 0.0;
@@ -237,6 +289,10 @@ struct Tuning
 Tuning TuningOf(const MacroVoice& voice, const Zone& zone, const Sample& sample)
 {
     const double kRateCents = 1200.0 * std::log2(kOutputRate / kNominalRate);
+    if (voice.rate_hz && *voice.rate_hz > 0.0 && sample.pcm.sample_rate > 0)
+    {
+        return {1200.0 * std::log2(*voice.rate_hz / sample.pcm.sample_rate) + kRateCents, false};
+    }
     if (voice.fixed_key)
     {
         return {(*voice.fixed_key - sample.key) * 100.0 + voice.detune_cents + kRateCents, false};
@@ -690,7 +746,7 @@ sf2::Zone SoundFontZone(const Instruments& instruments, const Zone& z, const Mac
 {
     // SoundFont's key scales leave key 60 as it is. The envelopes therefore take the voice's key at the note's key 60.
     const int key60 = 60 + z.key_offset;
-    const VolumeShape shape = VolumeOf(instruments, voice, VoiceVolume(voice, z.volume), key60, 0);
+    const VolumeShape shape = VolumeOf(instruments, voice, ZoneVolume(voice, z, z.volume), key60, 0);
     const Tuning tuning = TuningOf(voice, z, sample);
     const int cents = Cents(tuning.cents);
     const std::optional<TremoloShape> tremolo = TremoloOf(voice);
@@ -748,7 +804,7 @@ sf2::Zone SoundFontZone(const Instruments& instruments, const Zone& z, const Mac
     return zone;
 }
 
-// The name of `sample` among a song's samples in the SoundFont and the SFZ files, such as "s12".
+// The name of `sample` among a song's samples in the SoundFont, such as "s12". The SFZ files take Sample::sfz_name.
 std::string SampleName(const Sample& sample)
 {
     return "s" + std::to_string(sample.id);
@@ -796,7 +852,7 @@ void SoundFontBuilder::Add(uint32_t index, const std::string& name, const std::v
     inst.zones.push_back(GlobalZone());
     for (const Zone& z : zones)
     {
-        const MacroVoice& voice = instruments_.Macro(z.macro);
+        const MacroVoice& voice = instruments_.Macro(z.macro, z.part, z.from_ms);
         const Sample* sample = instruments_.SampleOf(voice);
         if (sample == nullptr)
         {
@@ -868,8 +924,8 @@ std::string SfzRegion(const Instruments& instruments, const Zone& z, int low, in
 {
     // A voice whose envelope follows the key has a region for each key.
     const int key = low + z.key_offset;
-    const VolumeShape slow = VolumeOf(instruments, voice, VoiceVolume(voice, z.volume), key, 0);
-    const VolumeShape fast = VolumeOf(instruments, voice, VoiceVolume(voice, z.volume), key, 127);
+    const VolumeShape slow = VolumeOf(instruments, voice, ZoneVolume(voice, z, z.volume), key, 0);
+    const VolumeShape fast = VolumeOf(instruments, voice, ZoneVolume(voice, z, z.volume), key, 127);
     const Tuning tuning = TuningOf(voice, z, sample);
     const std::optional<TremoloShape> tremolo = TremoloOf(voice);
 
@@ -955,14 +1011,14 @@ std::string SfzGroup(const std::vector<Zone>& zones, Instruments& instruments, S
     std::string s = "<group>\n";
     for (const Zone& z : zones)
     {
-        const MacroVoice& voice = instruments.Macro(z.macro);
+        const MacroVoice& voice = instruments.Macro(z.macro, z.part, z.from_ms);
         const Sample* sample = instruments.SampleOf(voice);
         if (sample == nullptr)
         {
             continue;
         }
 
-        const SfzSamples::Wave& wave = samples.Get(SampleName(*sample), [sample] { return &sample->pcm; });
+        const SfzSamples::Wave& wave = samples.Get(sample->sfz_name, [sample] { return &sample->pcm; });
         const double zone_gain = ZoneGain(instruments, voice, z);
         const std::string curve = SfzVelocityCurve(instruments, voice, z);
         if (FollowsKey(voice))
@@ -1041,7 +1097,7 @@ double LoudestZone(const std::vector<std::vector<Zone>>& zones, Instruments& ins
     {
         for (const Zone& z : preset)
         {
-            const MacroVoice& voice = instruments.Macro(z.macro);
+            const MacroVoice& voice = instruments.Macro(z.macro, z.part, z.from_ms);
             if (instruments.SampleOf(voice) != nullptr)
             {
                 loudest = std::max(loudest, ZoneGain(instruments, voice, z));
@@ -1050,6 +1106,79 @@ double LoudestZone(const std::vector<std::vector<Zone>>& zones, Instruments& ins
     }
 
     return loudest;
+}
+
+// Write the SoundFont and the SFZ files of `c`, whose MIDI file `midi` describes, titled `title`. The presets play
+// `zones` and take `names`. The SoundFont's comment says that the files come from `source`, such as "song
+// title_song". `warnings` holds the warnings so far. The builder's go before them.
+void WriteInstruments(Conversion& c, const MidiReport& midi, const std::vector<std::vector<Zone>>& zones,
+                      const std::vector<std::string>& names, std::vector<std::string> warnings,
+                      Instruments& instruments, const std::string& title, const std::string& source)
+{
+    // SoundFont zones can't amplify their samples. A zone above full level makes every zone quieter. SFZ keeps the
+    // levels.
+    const double quieter = ntdlib::sequence_export::CutAboveFullLevel(c, LoudestZone(zones, instruments));
+    SoundFontBuilder builder(instruments, quieter);
+    for (std::size_t i = 0; i < zones.size(); i++)
+    {
+        builder.Add(static_cast<uint32_t>(i), names[i], zones[i]);
+    }
+    for (uint32_t preset : midi.channel_10_presets)
+    {
+        builder.AddChannel10Copy(preset);
+    }
+
+    const std::string comment = "Converted by " + std::string(kProgram) + " from " + source + ".";
+    ntdlib::sequence_export::WriteSoundFont(c, builder.Result(), title, comment, kProgram);
+    c.sfz = BuildSfz(c.performance, midi, instruments, zones, title, names);
+
+    warnings.insert(warnings.begin(), builder.Warnings().begin(), builder.Warnings().end());
+    ntdlib::sequence_export::CollectWarnings(c, midi, warnings, {});
+}
+
+// The data of the sample that `info` describes in `data`, a samples file: 8 bytes for each frame of 14 DSP-ADPCM
+// samples, 2 for each 16-bit sample and 1 for each 8-bit sample. Empty if the data runs past the file's end.
+std::span<const uint8_t> SampleBytes(const ntdlib::musyx::SampleInfo& info, std::span<const uint8_t> data)
+{
+    constexpr std::size_t kFrameSamples = 14, kFrameBytes = 8;
+    std::size_t size = info.length;
+    if (info.format == ntdlib::musyx::SampleFormat::kAdpcm || info.format == ntdlib::musyx::SampleFormat::kAdpcmPlus)
+    {
+        size = (size + kFrameSamples - 1) / kFrameSamples * kFrameBytes;
+    }
+    else if (info.format == ntdlib::musyx::SampleFormat::kPcm16)
+    {
+        size *= 2;
+    }
+
+    if (info.offset > data.size() || size > data.size() - info.offset)
+    {
+        return {};
+    }
+
+    return data.subspan(info.offset, size);
+}
+
+// Whether the sample of `a` in the samples file `a_data` and that of `b` in `b_data` are the same: their entries agree
+// apart from the offset, and their data is the same.
+bool SameSample(const ntdlib::musyx::SampleInfo& a, std::span<const uint8_t> a_data, const ntdlib::musyx::SampleInfo& b,
+                std::span<const uint8_t> b_data)
+{
+    const auto entry = [](const ntdlib::musyx::SampleInfo& s)
+    {
+        return std::tie(s.id, s.key, s.rate, s.format, s.length, s.loop_start, s.loop_length);
+    };
+    const auto adpcm = [](const ntdlib::musyx::AdpcmInfo& d)
+    {
+        return std::tie(d.pred_scale, d.loop_pred_scale, d.loop_hist1, d.loop_hist2, d.coefficients);
+    };
+    if (entry(a) != entry(b) || a.adpcm.has_value() != b.adpcm.has_value() ||
+        (a.adpcm && adpcm(*a.adpcm) != adpcm(*b.adpcm)))
+    {
+        return false;
+    }
+
+    return std::ranges::equal(SampleBytes(a, a_data), SampleBytes(b, b_data));
 }
 
 } // namespace
@@ -1064,47 +1193,124 @@ Conversion ConvertSong(const ntdlib::musyx::Song& song, const GameSong& listed, 
     const std::vector<std::string> names = PresetNames(c.performance.presets);
     std::vector<std::string> warnings;
     const std::vector<std::vector<Zone>> zones = PresetZones(c.performance, instruments, names, warnings);
-
-    // SoundFont zones can't amplify their samples. A zone above full level makes every zone quieter. SFZ keeps the
-    // levels.
-    const double quieter = ntdlib::sequence_export::CutAboveFullLevel(c, LoudestZone(zones, instruments));
-    SoundFontBuilder builder(instruments, quieter);
-    for (std::size_t i = 0; i < zones.size(); i++)
-    {
-        builder.Add(static_cast<uint32_t>(i), names[i], zones[i]);
-    }
-    for (uint32_t preset : midi.channel_10_presets)
-    {
-        builder.AddChannel10Copy(preset);
-    }
-
-    const std::string comment = "Converted by " + std::string(kProgram) + " from song " + listed.name + ".";
-    ntdlib::sequence_export::WriteSoundFont(c, builder.Result(), listed.name, comment, kProgram);
-    c.sfz = BuildSfz(c.performance, midi, instruments, zones, listed.name, names);
-
-    warnings.insert(warnings.begin(), builder.Warnings().begin(), builder.Warnings().end());
-    ntdlib::sequence_export::CollectWarnings(c, midi, warnings, {});
+    WriteInstruments(c, midi, zones, names, std::move(warnings), instruments, listed.name, "song " + listed.name);
 
     return c;
 }
 
+Conversion ConvertEffect(const GameEffect& effect, Instruments& instruments)
+{
+    Conversion c;
+    c.performance = PlayEffect(effect, instruments);
+    const MidiReport midi = ntdlib::sequence_export::WriteMidiFile(c, effect.name);
+
+    // Each of the effect's presets plays one of its notes.
+    std::set<std::string> left_out;
+    std::vector<std::vector<Zone>> zones;
+    for (const EffectNote& note : EffectNotes(effect, instruments, left_out))
+    {
+        zones.push_back(ZonesOf(instruments, note));
+    }
+    zones.resize(c.performance.presets.size());
+    const std::vector<std::string> names = PresetNames(c.performance.presets);
+    WriteInstruments(c, midi, zones, names, {}, instruments, effect.name, "effect " + effect.name);
+
+    return c;
+}
+
+std::vector<std::map<uint16_t, std::string>> SfzSampleNames(const std::vector<std::shared_ptr<const SongGroup>>& groups)
+{
+    // Each group's samples by their IDs. Instruments::GetSample takes an ID's first entry.
+    std::vector<std::map<uint16_t, const ntdlib::musyx::SampleInfo*>> entries(groups.size());
+    for (std::size_t g = 0; g < groups.size(); g++)
+    {
+        for (const ntdlib::musyx::SampleInfo& info : groups[g]->samples)
+        {
+            entries[g].try_emplace(info.id, &info);
+        }
+    }
+
+    // A sample takes the index of the first group that holds it, unless that group is the first to hold its ID.
+    std::vector<std::map<uint16_t, std::string>> names(groups.size());
+    for (std::size_t g = 0; g < groups.size(); g++)
+    {
+        for (const auto& [id, info] : entries[g])
+        {
+            std::optional<std::size_t> first_holder;
+            std::size_t first_same = g;
+            for (std::size_t h = 0; h < g; h++)
+            {
+                const auto held = entries[h].find(id);
+                if (held == entries[h].end())
+                {
+                    continue;
+                }
+
+                first_holder = first_holder.value_or(h);
+                if (SameSample(*held->second, groups[h]->sample_data, *info, groups[g]->sample_data))
+                {
+                    first_same = h;
+                    break;
+                }
+            }
+
+            const std::string number = std::to_string(id);
+            names[g][id] =
+                first_same == first_holder.value_or(g) ? "s" + number : "s" + std::to_string(first_same) + "_" + number;
+        }
+    }
+
+    return names;
+}
+
+std::map<uint16_t, std::string> GameInput::SfzNames(std::size_t group) const
+{
+    const std::vector<std::shared_ptr<const SongGroup>>& groups = game_.Groups();
+    std::map<uint16_t, std::string> names = sfz_names_.at(group);
+    for (const std::shared_ptr<const SongGroup>& pushed : groups[group]->pushed)
+    {
+        const auto found = std::find(groups.begin(), groups.end(), pushed);
+        if (found != groups.end())
+        {
+            const std::map<uint16_t, std::string>& more = sfz_names_[static_cast<std::size_t>(found - groups.begin())];
+            names.insert(more.begin(), more.end());
+        }
+    }
+
+    return names;
+}
+
 GameInput::GameInput(Game game)
-    : game_(std::move(game)), instruments_(game_.Groups().size()), errors_reported_(game_.Groups().size())
+    : game_(std::move(game)),
+      instruments_(game_.Groups().size()),
+      errors_reported_(game_.Groups().size()),
+      sfz_names_(SfzSampleNames(game_.Groups()))
 {
 }
 
 Conversion GameInput::Convert(std::size_t index, const PerformOptions& perform)
 {
-    const GameSong& listed = game_.Songs().at(index);
-    std::unique_ptr<Instruments>& instruments = instruments_.at(listed.group);
+    const std::vector<GameSong>& songs = game_.Songs();
+    const std::size_t group =
+        index < songs.size() ? songs[index].group : game_.Effects().at(index - songs.size()).group;
+    std::unique_ptr<Instruments>& instruments = instruments_.at(group);
     if (!instruments)
     {
-        instruments = std::make_unique<Instruments>(*game_.Groups()[listed.group], game_.Volumes());
+        instruments = std::make_unique<Instruments>(*game_.Groups()[group], game_.Volumes(), SfzNames(group));
     }
 
-    const std::vector<uint8_t> file = game_.ReadSong(index);
-    Conversion c = ConvertSong(ntdlib::musyx::ReadSong(file), listed, *instruments, perform);
-    std::size_t& reported = errors_reported_[listed.group];
+    Conversion c;
+    if (index < songs.size())
+    {
+        const std::vector<uint8_t> file = game_.ReadSong(index);
+        c = ConvertSong(ntdlib::musyx::ReadSong(file), songs[index], *instruments, perform);
+    }
+    else
+    {
+        c = ConvertEffect(game_.Effects()[index - songs.size()], *instruments);
+    }
+
+    std::size_t& reported = errors_reported_[group];
     for (; reported < instruments->Errors().size(); reported++)
     {
         c.warnings.push_back(instruments->Errors()[reported]);

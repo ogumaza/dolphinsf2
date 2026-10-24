@@ -74,6 +74,9 @@ constexpr uint8_t kDrumChannel = 9;
 constexpr std::size_t kChannels = 16;
 constexpr std::size_t kSections = 16;
 
+// The channels of an effect's notes, in order: every channel but the drums'.
+constexpr std::array<uint8_t, 15> kEffectChannels{0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15};
+
 // A time that never comes, for a stream with no more points.
 constexpr uint32_t kNoTime = 0x7fffffff;
 
@@ -240,10 +243,31 @@ double SecondsToTicks(double seconds, double bpm)
     return seconds * bpm * ntdlib::musyx::kTicksPerBeat / 60.0;
 }
 
+// The clock of an effect's performance: a song without tracks, at 156.25 beats a minute in 1024ths. A tick of it lasts
+// a millisecond of MusyX's clock.
+const ntdlib::musyx::Song& EffectClock()
+{
+    static const ntdlib::musyx::Song kClock = []
+    {
+        ntdlib::musyx::Song clock;
+        clock.fine_tempo = true;
+        clock.tempo = 60000 * 1024 / ntdlib::musyx::kTicksPerBeat;
+        return clock;
+    }();
+
+    return kClock;
+}
+
 class Player
 {
 public:
     Player(const ntdlib::musyx::Song& song, const GameSong& listed, Instruments& instruments);
+
+    // A player of `effect` on the effect's clock (EffectClock). StartEffect starts the effect.
+    Player(const GameEffect& effect, Instruments& instruments);
+
+    // Start the player's effect. Note i of EffectNotes plays on channel kEffectChannels[i] from the note's start.
+    void StartEffect(const GameEffect& effect);
 
     // Run until the song ends, the main loop has played `passes` passes, or the time limit.
     void Run(std::size_t passes);
@@ -304,6 +328,10 @@ private:
     void Controller(uint8_t channel, uint8_t controller, uint8_t value, int64_t tick);
     void NoteOn(uint8_t channel, uint8_t key, uint8_t velocity, uint32_t end, std::size_t section, int64_t tick);
 
+    // Start a note of `voices`. NoteOn takes the voices that the channel's object starts for the key.
+    void NoteOfVoices(uint8_t channel, uint8_t key, uint8_t velocity, uint32_t end, std::size_t section, int64_t tick,
+                      std::vector<KeyVoice> voices);
+
     // Add `e` to the events of `channel` at `tick`. The event's kind gives its rank among the tick's events, unless
     // `rank` gives it.
     void Record(uint8_t channel, int64_t tick, TrackEvent e, std::optional<Rank> rank = std::nullopt);
@@ -345,6 +373,15 @@ private:
     // The seconds that the sample of voice `v` plays, or nothing if it loops. `key` is the key that the voice starts
     // with.
     std::optional<double> SampleSecondsOf(const MacroVoice& v, int key);
+
+    // The seconds after its start at which a held note of `voices` falls silent by itself: where the macro of each
+    // voice that plays a sample stops it or fades it to silence, or where the sample ends. Return nothing if one of
+    // them sounds on.
+    std::optional<double> HeldSilence(const std::vector<KeyVoice>& voices);
+
+    // The send that the voices of `note`, a note of an effect, set through `send` (MacroVoice::reverb_controller or
+    // chorus_controller), from 0 to 127. A channel has one send: the voices' largest. Nothing if no voice sets it.
+    std::optional<uint8_t> NoteSend(const EffectNote& note, std::optional<double> MacroVoice::* send);
 
     // The seconds where voice `v` falls silent, for a voice that goes on with its held fade through the release
     // (FadesThroughRelease) and a note from `on_seconds`: where the fade does, or where a sample ends before that.
@@ -389,6 +426,7 @@ private:
     uint64_t runs_ = 0;
     bool ended_ = false;
     bool truncated_ = false;
+    bool effect_ = false; // the player plays an effect, whose notes play the voices that macros start (EffectNotes)
     std::map<std::string, uint32_t> approximations_;
 };
 
@@ -430,6 +468,80 @@ Player::Player(const ntdlib::musyx::Song& song, const GameSong& listed, Instrume
     // The performance starts at the master's tempo, after the tempo table's changes at tick 0.
     ApplyTempos(sections_[master_], true);
     SetTempo(0, sections_[master_]);
+}
+
+Player::Player(const GameEffect& effect, Instruments& instruments)
+    : song_(EffectClock()),
+      group_(instruments.Group()),
+      instruments_(instruments),
+      song_volume_(effect.group_volume),
+      master_volume_(effect.master_volume),
+      page_of_program_(PagesByProgram(group_.group.pages)),
+      drum_of_program_(PagesByProgram(group_.group.drum_pages)),
+      effect_(true)
+{
+    wheel_.fill(kWheelCentre);
+    bend_range_.fill({kBendRange, kBendRange});
+    for (SectionState& s : sections_)
+    {
+        s.bpm = song_.tempo;
+    }
+
+    ApplyTempos(sections_[master_], true);
+    SetTempo(0, sections_[master_]);
+}
+
+void Player::StartEffect(const GameEffect& effect)
+{
+    // MusyX starts an effect's controllers at the defaults of a channel. The game sets some of them. They apply to
+    // every voice of the effect.
+    const ntdlib::musyx::Effect& row = effect.row;
+    const int pan = std::clamp(effect.pan.value_or(row.pan) + effect.pan_controller - 64, 0, 127);
+    const uint8_t velocity = effect.volume.value_or(row.volume) & 0x7f;
+    std::set<std::string> left_out;
+    const std::vector<EffectNote> notes = EffectNotes(effect, instruments_, left_out);
+    for (const std::string& what : left_out)
+    {
+        approximations_[what]++;
+    }
+
+    // A note lasts until its voices fall silent by themselves. A note whose voices sound on stops kHeldEffectSeconds
+    // after the effect's last change: the last start of a note, or the last end of a note that falls silent.
+    std::vector<std::optional<double>> silences;
+    double last_change = 0.0;
+    for (const EffectNote& note : notes)
+    {
+        silences.push_back(HeldSilence(note.voices));
+        last_change = std::max(last_change, note.start_ms / 1000.0 + silences.back().value_or(0.0));
+    }
+
+    for (std::size_t i = 0; i < notes.size(); i++)
+    {
+        const EffectNote& note = notes[i];
+        const uint8_t channel = kEffectChannels[i];
+        TrackEvent preset{.kind = EventKind::kPreset};
+        preset.preset =
+            seqlib::midi::PresetIndex(presets_, PresetKey{.bank = kEffectBank, .program = static_cast<uint32_t>(i)});
+        Record(channel, 0, preset);
+        Controller(channel, 7, effect.volume_controller, 0);
+        Controller(channel, 10, static_cast<uint8_t>(pan), 0);
+        Controller(channel, 11, 127, 0);
+        Controller(channel, 91, NoteSend(note, &MacroVoice::reverb_controller).value_or(effect.reverb), 0);
+        Controller(channel, 93, NoteSend(note, &MacroVoice::chorus_controller).value_or(effect.chorus), 0);
+        wheel_[channel] = std::clamp<int>(effect.pitch_wheel, 0, 0x3fff);
+
+        const double start = note.start_ms / 1000.0;
+        const double end = silences[i] ? start + *silences[i] : last_change + kHeldEffectSeconds;
+        NoteOfVoices(channel, note.key, velocity, static_cast<uint32_t>(TickAt(end)), 0, TickAt(start), note.voices);
+
+        // The pitch wheel bends over the range of the note's first voice.
+        if (wheel_[channel] != kWheelCentre)
+        {
+            TrackEvent bend{.kind = EventKind::kPitch};
+            bend.semitones = Semitones(channel, wheel_[channel]);
+            Record(channel, 0, bend);
+        }
+    }
 }
 
 std::size_t Player::SectionOf(std::size_t track) const
@@ -841,6 +953,12 @@ void Player::NoteOn(uint8_t channel, uint8_t key, uint8_t velocity, uint32_t end
         return;
     }
 
+    NoteOfVoices(channel, key, velocity, end, section, tick, VoicesOf(group_.pool, *channel_object_[channel], key));
+}
+
+void Player::NoteOfVoices(uint8_t channel, uint8_t key, uint8_t velocity, uint32_t end, std::size_t section,
+                          int64_t tick, std::vector<KeyVoice> voices)
+{
     // A velocity of 0 is a note-off in MIDI. MusyX plays the note silent.
     if (velocity == 0)
     {
@@ -853,12 +971,12 @@ void Player::NoteOn(uint8_t channel, uint8_t key, uint8_t velocity, uint32_t end
     n.key = key;
     n.id = next_note_++;
     n.on = tick;
-    n.voices = VoicesOf(group_.pool, *channel_object_[channel], key);
+    n.voices = std::move(voices);
 
     // The channel bends over the range of the note's first voice.
     if (!n.voices.empty())
     {
-        const MacroVoice& voice = instruments_.Macro(n.voices.front().macro);
+        const MacroVoice& voice = instruments_.Voice(n.voices.front());
         n.bend_range = {voice.bend_up, voice.bend_down};
         SetBendRange(channel, n.bend_range, tick);
     }
@@ -945,7 +1063,7 @@ void Player::SetCurve(NoteRecord& n)
     const MacroVoice* first = nullptr;
     for (const KeyVoice& kv : n.voices)
     {
-        const MacroVoice& voice = instruments_.Macro(kv.macro);
+        const MacroVoice& voice = instruments_.Voice(kv);
         if (!voice.sample)
         {
             continue;
@@ -967,7 +1085,7 @@ void Player::SetCurve(NoteRecord& n)
     // A note on the table gets another velocity. A SoundFont's attack that the velocity scales takes that one.
     const auto scales_attack = [this](const KeyVoice& kv)
     {
-        const MacroVoice& voice = instruments_.Macro(kv.macro);
+        const MacroVoice& voice = instruments_.Voice(kv);
         return voice.envelope && voice.envelope->dls && voice.envelope->attack_tc_per_velocity != 0.0;
     };
     if (n.on_table && std::any_of(n.voices.begin(), n.voices.end(), scales_attack))
@@ -1204,8 +1322,20 @@ double Player::EndNotes(Performance& perf, int64_t last_tick)
         std::set<std::string> approximated;
         for (const KeyVoice& kv : n.voices)
         {
-            const MacroVoice& v = instruments_.Macro(kv.macro);
+            const MacroVoice& v = instruments_.Voice(kv);
             approximated.insert(v.approximations.begin(), v.approximations.end());
+            if (!effect_ && !v.started.empty())
+            {
+                approximated.insert(kCommandsLeftOut);
+            }
+            if (!effect_ && (v.volume_controller || v.reverb_controller || v.chorus_controller))
+            {
+                approximated.insert("volumes and sends that a macro sets left out");
+            }
+            if (v.pan_last && v.pan_moves)
+            {
+                approximated.insert("pans that move keep their first pan");
+            }
             if (!v.sample)
             {
                 continue;
@@ -1271,13 +1401,65 @@ double Player::VoiceEnd(const MacroVoice& v, int key, double on_seconds, double 
 
 std::optional<double> Player::SampleSecondsOf(const MacroVoice& v, int key)
 {
-    // The voice's key, moved by the macro, against the sample's.
+    // The voice's key, moved by the macro, against the sample's. A rate that the macro sets takes the place of both.
     const Sample* sample = instruments_.GetSample(*v.sample);
     const int voice_key = v.fixed_key.value_or(key + v.key_shift);
-    const double ratio =
-        sample != nullptr ? std::pow(2.0, (voice_key - sample->key) / 12.0 + v.detune_cents / 1200.0) : 1.0;
+    double ratio = sample != nullptr ? std::pow(2.0, (voice_key - sample->key) / 12.0 + v.detune_cents / 1200.0) : 1.0;
+    if (sample != nullptr && v.rate_hz && *v.rate_hz > 0.0 && sample->pcm.sample_rate > 0)
+    {
+        ratio = *v.rate_hz / sample->pcm.sample_rate;
+    }
 
     return instruments_.SampleSeconds(*v.sample, ratio);
+}
+
+std::optional<uint8_t> Player::NoteSend(const EffectNote& note, std::optional<double> MacroVoice::* send)
+{
+    std::optional<double> largest;
+    for (const KeyVoice& kv : note.voices)
+    {
+        if (const std::optional<double>& value = instruments_.Voice(kv).*send)
+        {
+            largest = std::max(largest.value_or(0.0), *value);
+        }
+    }
+    if (!largest)
+    {
+        return std::nullopt;
+    }
+
+    return static_cast<uint8_t>(std::lround(*largest * 127.0));
+}
+
+std::optional<double> Player::HeldSilence(const std::vector<KeyVoice>& voices)
+{
+    double silence = 0.0;
+    for (const KeyVoice& kv : voices)
+    {
+        const MacroVoice& v = instruments_.Voice(kv);
+        if (!v.sample)
+        {
+            continue;
+        }
+
+        std::optional<double> end;
+        if (const std::optional<double> ms = HeldSilenceMs(v))
+        {
+            end = *ms / 1000.0;
+        }
+        if (const std::optional<double> length = SampleSecondsOf(v, kv.key))
+        {
+            end = std::min(end.value_or(*length), *length);
+        }
+        if (!end)
+        {
+            return std::nullopt;
+        }
+
+        silence = std::max(silence, *end);
+    }
+
+    return silence;
 }
 
 double Player::FadeEnd(const MacroVoice& v, int key, double on_seconds)
@@ -1436,6 +1618,55 @@ Performance PlaySong(const ntdlib::musyx::Song& song, const GameSong& listed, In
     player.Run(static_cast<std::size_t>(std::max(options.loops, 1)) + kMorePasses + 1);
 
     return player.Finish(options);
+}
+
+std::vector<EffectNote> EffectNotes(const GameEffect& effect, Instruments& instruments,
+                                    std::set<std::string>& approximations)
+{
+    std::vector<EffectNote> notes;
+    for (const EffectVoice& ev : EffectVoicesOf(instruments, effect.row.object, effect.row.key & 0x7f, approximations))
+    {
+        KeyVoice voice = ev.voice;
+        voice.from_ms = instruments.Macro(voice.macro, voice.part, 0.0).sample_ms;
+        if (!instruments.Voice(voice).sample)
+        {
+            continue;
+        }
+
+        // The voices that start their samples at the same time share a note.
+        const double start = ev.start_ms + voice.from_ms;
+        const auto at_start = [start](const EffectNote& n)
+        {
+            return n.start_ms == start;
+        };
+        auto note = std::find_if(notes.begin(), notes.end(), at_start);
+        if (note == notes.end())
+        {
+            if (notes.size() == kEffectChannels.size())
+            {
+                approximations.insert("voices of effects that start at more than 15 times left out");
+                continue;
+            }
+
+            notes.push_back({.start_ms = start, .key = static_cast<uint8_t>(voice.key), .voices = {}});
+            note = std::prev(notes.end());
+        }
+        note->voices.push_back(voice);
+    }
+    std::stable_sort(notes.begin(), notes.end(),
+                     [](const EffectNote& a, const EffectNote& b) { return a.start_ms < b.start_ms; });
+
+    return notes;
+}
+
+Performance PlayEffect(const GameEffect& effect, Instruments& instruments)
+{
+    // An effect has no loop. The performance ends when the effect's last note falls silent.
+    Player player(effect, instruments);
+    player.StartEffect(effect);
+    player.Run(1);
+
+    return player.Finish({});
 }
 
 } // namespace dolphinsf2::musyx

@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -35,9 +36,18 @@ constexpr std::size_t kGroupSamples = 0x40;
 constexpr std::size_t kLooseSongs = 0x48;
 
 // The settings give the number of base groups in their byte at 0x28. The table's indexes of the base groups follow in
-// one byte each.
+// one byte each. They give the number of effects in a halfword at 6. Word 12 of the header gives the offset of the
+// table of effects.
 constexpr std::size_t kBaseGroupCount = 0x28;
 constexpr std::size_t kBaseGroups = 0x29;
+constexpr std::size_t kEffectCount = 6;
+constexpr std::size_t kEffectTable = 0x30;
+
+// An entry of the table of effects starts with two halfwords: the MusyX ID of the group that holds the effect and the
+// effect's ID. The volume, the pan, the pitch wheel's offset in a signed halfword, the surround pan, the send to aux A
+// and the send to aux B follow (msmSePlay at 0x80119a94 in main.dol). An ID of 0xffff stands for no effect.
+constexpr std::size_t kEffectEntrySize = 0x10;
+constexpr uint16_t kNoEffect = 0xffff;
 
 // An entry of the table of groups gives the group's MusyX ID in its first halfword. The words at 4 and 8 give the
 // offset and the size of the group's data in the groups' data. The words at 12 and 16 give those of its samples in the
@@ -185,8 +195,9 @@ MsmSong MsmFile::Song(uint32_t number) const
 
 MsmGroup MsmFile::Group(uint16_t id) const
 {
+    // The table's first entry holds no group.
     const xsflib::Reader r = Reader();
-    for (std::size_t i = 0; i < GroupCount(); i++)
+    for (std::size_t i = 1; i < GroupCount(); i++)
     {
         if (r.U16(r.U32(kGroupTable) + kGroupEntrySize * i) == id)
         {
@@ -195,6 +206,33 @@ MsmGroup MsmFile::Group(uint16_t id) const
     }
 
     throw FormatError(path_ + " has no group " + std::to_string(id));
+}
+
+std::vector<MsmEffect> MsmFile::Effects() const
+{
+    const xsflib::Reader r = Reader();
+    const std::size_t table = r.U32(kEffectTable);
+    const uint32_t count = r.U16(r.U32(kSettings) + kEffectCount);
+    std::vector<MsmEffect> effects;
+    for (uint32_t i = 0; i < count; i++)
+    {
+        const std::size_t entry = table + kEffectEntrySize * i;
+        if (r.U16(entry + 2) == kNoEffect)
+        {
+            continue;
+        }
+
+        effects.push_back({.number = i,
+                           .group_id = r.U16(entry),
+                           .id = r.U16(entry + 2),
+                           .volume = r.U8(entry + 4),
+                           .pan = r.U8(entry + 5),
+                           .pitch = static_cast<int16_t>(r.U16(entry + 6)),
+                           .reverb = r.U8(entry + 9),
+                           .chorus = r.U8(entry + 10)});
+    }
+
+    return effects;
 }
 
 std::vector<MsmGroup> MsmFile::BaseGroups() const
@@ -263,6 +301,25 @@ std::vector<SoundTestSong> ReadSoundTest(std::span<const uint8_t> module, const 
     }
 
     return songs;
+}
+
+std::map<uint32_t, std::string> ReadSoundTestEffects(std::span<const uint8_t> module, const std::string& module_path,
+                                                     uint32_t offset, uint32_t count, std::span<const uint8_t> messages,
+                                                     const std::string& messages_path)
+{
+    const std::string past_end = module_path + "'s list of effects runs past the file's end";
+    const xsflib::Reader r(module, true, {.bounds_message = xsflib::BoundsMessage::kFixed, .fixed_message = past_end});
+    std::map<uint32_t, std::string> names;
+    for (uint32_t i = 0; i < count; i++)
+    {
+        const std::size_t entry = offset + kTestEntrySize * i;
+        if (r.U32(entry) != 0 && r.U16(entry + 8) == kEffectKind)
+        {
+            names[r.U32(entry + 12)] = MessageText(messages, r.U32(entry + 4), messages_path);
+        }
+    }
+
+    return names;
 }
 
 } // namespace dolphinsf2::musyx

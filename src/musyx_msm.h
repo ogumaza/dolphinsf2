@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <span>
 #include <string>
 #include <vector>
@@ -27,6 +28,22 @@ struct MsmSong
     uint16_t song_id = 0;
     uint8_t volume = 127;
     std::span<const uint8_t> data;
+};
+
+// An effect of the sound manager's table of effects: its number in the table, the MusyX group that holds it, its ID in
+// that group's table of effects, and the sound manager's settings for it. msmSePlay passes the settings to MusyX as
+// the effect's controllers: the volume (CC7), the pan (CC10), the sends (CC91 and CC93) and the pitch wheel's offset
+// from its centre.
+struct MsmEffect
+{
+    uint32_t number = 0;
+    uint16_t group_id = 0;
+    uint16_t id = 0;
+    uint8_t volume = 127;
+    uint8_t pan = 64;
+    int16_t pitch = 0;
+    uint8_t reverb = 0;
+    uint8_t chorus = 0;
 };
 
 // The four parts of a group. The pool, the project and the sample directory each run from the part's start to the end
@@ -54,6 +71,10 @@ public:
     // The group whose MusyX ID is `id`. Throw FormatError if the file has no such group or the group's parts lie
     // outside the file.
     MsmGroup Group(uint16_t id) const;
+
+    // The effects of the table of effects, in its order. An entry whose ID is 0xffff holds no effect. The list leaves
+    // it out. Throw FormatError if the table lies outside the file.
+    std::vector<MsmEffect> Effects() const;
 
     // The base groups in the sound manager's order. The sound manager loads them first and keeps them loaded. Throw
     // FormatError if the settings' list of them names a group that the table lacks or a group's parts lie outside the
@@ -94,5 +115,12 @@ struct SoundTestSong
 std::vector<SoundTestSong> ReadSoundTest(std::span<const uint8_t> module, const std::string& module_path,
                                          uint32_t offset, uint32_t count, std::span<const uint8_t> messages,
                                          const std::string& messages_path);
+
+// The names of the effects that a list in the form of the sound test names, by the effects' numbers in the sound
+// manager's table of effects. The game's list of voices is one. Of two entries for one effect, the later counts. The
+// arguments are those of ReadSoundTest. Throw FormatError if an entry or a name lies outside its file.
+std::map<uint32_t, std::string> ReadSoundTestEffects(std::span<const uint8_t> module, const std::string& module_path,
+                                                     uint32_t offset, uint32_t count, std::span<const uint8_t> messages,
+                                                     const std::string& messages_path);
 
 } // namespace dolphinsf2::musyx

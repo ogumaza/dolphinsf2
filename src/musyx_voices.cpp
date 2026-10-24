@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -50,6 +51,25 @@ constexpr int kMostSteps = 4096;
 
 // The depth of the layers and keymaps that a note goes through at most. A layer can start a layer.
 constexpr int kMostLevels = 8;
+
+// The voices that MusyX has, and so the most that an effect can play.
+constexpr std::size_t kMostEffectVoices = 64;
+
+// MIDI's volume controller, the one source of a voice's volume that dolphinsf2 follows (VolumeSelect).
+constexpr uint8_t kVolumeController = 7;
+
+// MIDI's controllers of the sends to aux A and aux B. A macro can set them (SetVariable).
+constexpr uint8_t kReverbController = 91;
+constexpr uint8_t kChorusController = 93;
+
+// A controller's full value in a macro's steps. The steps hold 14 bits.
+constexpr uint16_t kFullController = 0x3fff;
+
+// The approximation that a voice's report gives for the controllers that its macro sets and dolphinsf2 leaves out.
+constexpr char kControllersLeftOut[] = "controllers other than the volume and the sends that a macro sets left out";
+
+// A message to this macro reaches no voice (SendMessage).
+constexpr uint16_t kNoMacro = 0xffff;
 
 // A wait's time that never ends.
 constexpr uint16_t kWaitForever = 0xffff;
@@ -135,6 +155,9 @@ std::optional<Envelope> EnvelopeOf(const Pool& pool, uint16_t id, bool dls)
     return e;
 }
 
+// The approximation that a voice's report gives for the samples after its first.
+constexpr char kLaterSamplesLeftOut[] = "a second sample of a voice left out";
+
 // What a run of a macro's steps found.
 struct Run
 {
@@ -144,6 +167,7 @@ struct Run
     std::vector<VolumeRamp> ramps;    // the Envelope steps, each from its time after the note's start
     bool sample_started = false;
     bool envelope_before_sample = false;
+    std::vector<MacroVoice> parts; // a part for each sample, in order (MacroVoice::parts)
 };
 
 // The wait of a step: its time, in ticks or milliseconds, and what else ends it.
@@ -224,6 +248,10 @@ private:
     // Add `what` to the voice's approximations, once.
     void Note(const std::string& what);
 
+    // Add the part of the latest sample to the run's parts, with the voice's settings now, if it isn't there yet. A
+    // part's settings are those when time first passes after its sample starts.
+    void SettlePart();
+
     const Pool& pool_;
     const double release_ms_;
     const int volume_scale_divisor_;
@@ -232,6 +260,14 @@ private:
     double now_ = 0.0;
     bool released_;
     std::optional<Place> trap_; // where the trap of the release goes on
+
+    // The latest sample and its start, until its part settles (SettlePart).
+    struct OpenPart
+    {
+        uint16_t sample = 0;
+        double start_ms = 0.0;
+    };
+    std::optional<OpenPart> open_part_;
 
     // The tremolo's setup: the LFO that it follows, the two LFOs' periods, and SetupTremolo's scale and addition.
     std::optional<uint8_t> tremolo_lfo_;
@@ -254,6 +290,7 @@ Run MacroRun::Follow(uint16_t macro)
     {
         if (Step((*place_.steps)[place_.at++]) == Next::kEnd)
         {
+            SettlePart();
             return std::move(run_);
         }
 
@@ -271,6 +308,7 @@ Run MacroRun::Follow(uint16_t macro)
         run_.voice.tremolo =
             Tremolo{lfo_period_ms_[*tremolo_lfo_], 1.0 - tremolo_scale_, 1.0 - tremolo_scale_ * tremolo_mod_add_};
     }
+    SettlePart();
 
     return std::move(run_);
 }
@@ -324,7 +362,18 @@ MacroRun::Next MacroRun::Step(const MacroStep& s)
     case MacroOp::kSetKey:
         v.fixed_key = s.Byte(1) & 0x7f;
         v.detune_cents = static_cast<int8_t>(s.Byte(2));
+        v.rate_hz.reset();
         return Pass(KeyWaitOf(s));
+
+    case MacroOp::kSetPitch:
+        // Bytes 1 to 3 hold the rate in Hz. The games' steps leave bytes 4 to 7 at 0. A step that sets them is
+        // reported.
+        v.rate_hz = (s.Byte(1) << 16) | (s.Byte(2) << 8) | s.Byte(3);
+        if (s.Byte(4) != 0 || s.Byte(5) != 0 || s.Byte(6) != 0 || s.Byte(7) != 0)
+        {
+            Note(kCommandsLeftOut);
+        }
+        break;
 
     case MacroOp::kPianoPan:
         // Byte 1 holds the scale, byte 2 the centre key and byte 3 the centre pan.
@@ -333,6 +382,50 @@ MacroRun::Next MacroRun::Step(const MacroStep& s)
                                .centre_pan = s.Byte(3),
                                .key_shift = v.key_shift,
                                .fixed_key = v.fixed_key};
+        v.pan_last = false;
+        break;
+
+    case MacroOp::kPanning:
+        // Byte 1 holds the pan. MusyX then moves the pan by byte 4, a signed number, over the time in bytes 2 and 3.
+        v.pan = s.Byte(1) & 0x7f;
+        v.pan_last = true;
+        if (s.Byte(4) != 0 && s.Half(2) != 0)
+        {
+            v.pan_moves = true;
+        }
+        break;
+
+    case MacroOp::kPlayMacro:
+        // Byte 1 adds to the key, a signed number. Bytes 2 and 3 name the macro, and bytes 4 and 5 its first step.
+        v.started.push_back({.macro = s.Half(2),
+                             .step = s.Half(4),
+                             .key_add = static_cast<int8_t>(s.Byte(1)),
+                             .key_shift = v.key_shift,
+                             .fixed_key = v.fixed_key,
+                             .at_ms = now_,
+                             .volume_controller = v.volume_controller});
+        break;
+
+    case MacroOp::kVolumeSelect:
+        // Byte 1 names the controller and bytes 2 and 3 hold its share in percent. Byte 4 picks how the source joins
+        // the others: 0 replaces them. Byte 5 makes byte 1 name a variable. Byte 6 holds a finer part of the share.
+        // MusyX starts a voice on the volume controller in full.
+        if (s.Byte(1) == kVolumeController && s.Byte(4) == 0 && s.Byte(5) == 0 && s.Byte(6) == 0)
+        {
+            v.source_volume = std::max(static_cast<int16_t>(s.Half(2)), int16_t{0}) / 100.0;
+        }
+        else
+        {
+            Note("volume sources other than a share of the volume controller left out");
+        }
+        break;
+
+    case MacroOp::kSendMessage:
+        // Bytes 2 and 3 name the macro whose voices get the message, unless byte 1 makes them name a variable.
+        if (s.Byte(1) != 0 || s.Half(2) != kNoMacro)
+        {
+            Note(kCommandsLeftOut);
+        }
         break;
 
     case MacroOp::kStartSample:
@@ -340,15 +433,27 @@ MacroRun::Next MacroRun::Step(const MacroStep& s)
         {
             Note("samples that start after their first sample play from their start");
         }
+
+        // A sample takes the place of the one that plays. One that starts at the same time never sounds.
+        if (open_part_ && open_part_->start_ms == now_)
+        {
+            open_part_->sample = s.Half(1);
+        }
+        else
+        {
+            SettlePart();
+            open_part_ = OpenPart{.sample = s.Half(1), .start_ms = now_};
+        }
         if (!run_.sample_started)
         {
             v.sample = s.Half(1);
+            v.sample_ms = now_;
             run_.sample_started = true;
             run_.envelope_before_sample = v.envelope.has_value();
         }
         else
         {
-            Note("a second sample of a voice left out");
+            Note(kLaterSamplesLeftOut);
         }
         break;
 
@@ -499,8 +604,44 @@ MacroRun::Next MacroRun::Step(const MacroStep& s)
     case MacroOp::kSrcModeSelect:
         break;
 
+    // SetVariable sets a variable, or with byte 1 a MIDI controller that byte 2 names. Bytes 4 and 5 hold the value. A
+    // variable changes the sound only through a step that reads it. Such a step is reported.
+    case MacroOp::kSetVariable:
+        if (s.Byte(1) != 0)
+        {
+            const double value = std::min(s.Half(4), kFullController) / static_cast<double>(kFullController);
+            switch (s.Byte(2))
+            {
+            case kVolumeController:
+                v.volume_controller = value;
+                break;
+            case kReverbController:
+                v.reverb_controller = value;
+                break;
+            case kChorusController:
+                v.chorus_controller = value;
+                break;
+            default:
+                Note(kControllersLeftOut);
+                break;
+            }
+        }
+        break;
+
+    // The arithmetic on variables. Byte 1 makes the result a controller.
+    case MacroOp::kAddVariables:
+    case MacroOp::kSubtractVariables:
+    case MacroOp::kMultiplyVariables:
+    case MacroOp::kDivideVariables:
+    case MacroOp::kAddImmediate:
+        if (s.Byte(1) != 0)
+        {
+            Note(kControllersLeftOut);
+        }
+        break;
+
     default:
-        Note("SoundMacro commands that dolphinsf2 doesn't follow left out");
+        Note(kCommandsLeftOut);
         break;
     }
 
@@ -549,6 +690,7 @@ MacroRun::Next MacroRun::Pass(const Wait& wait)
     {
         return Next::kStep;
     }
+    SettlePart();
 
     const double length = wait.time == kWaitForever ? kNever : (wait.ms ? wait.time : wait.time * kTickMs);
     double end = wait.absolute ? length : now_ + length;
@@ -574,6 +716,21 @@ MacroRun::Next MacroRun::Pass(const Wait& wait)
     released_ = released_ || release_ms_ <= now_;
 
     return Next::kStep;
+}
+
+void MacroRun::SettlePart()
+{
+    if (!open_part_)
+    {
+        return;
+    }
+
+    MacroVoice part = run_.voice;
+    part.sample = open_part_->sample;
+    part.sample_ms = open_part_->start_ms;
+    part.started.clear();
+    run_.parts.push_back(std::move(part));
+    open_part_.reset();
 }
 
 void MacroRun::SetVibrato(const MacroStep& s)
@@ -840,12 +997,67 @@ MacroVoice FollowMacro(const Pool& pool, uint16_t macro, int volume_scale_diviso
         voice.approximations.push_back("releases early in a note act as late ones do");
     }
 
+    // A part of a voice that starts one sample after another stops where the next part starts. The last stops where
+    // the voice does. Each part follows the voice's ramps, tremolo and release.
+    if (held.parts.size() > 1)
+    {
+        for (std::size_t i = 0; i < held.parts.size(); i++)
+        {
+            MacroVoice& part = held.parts[i];
+            part.stop_ms = i + 1 < held.parts.size() ? held.parts[i + 1].sample_ms : voice.stop_ms;
+            part.held_ramps = voice.held_ramps;
+            part.tremolo = voice.tremolo;
+            part.key_off = voice.key_off;
+            part.release_fade = voice.release_fade;
+            part.approximations = voice.approximations;
+            std::erase(part.approximations, std::string(kLaterSamplesLeftOut));
+        }
+        voice.parts = std::move(held.parts);
+    }
+
     return voice;
 }
 
-double VoiceVolume(const MacroVoice& voice, double volume)
+MacroVoice VoiceFrom(const MacroVoice& voice, double ms)
 {
-    return std::min(voice.volume * volume + voice.volume_add, 1.0);
+    MacroVoice later = voice;
+    later.sample_ms = std::max(voice.sample_ms - ms, 0.0);
+    if (voice.stop_ms)
+    {
+        if (*voice.stop_ms < ms)
+        {
+            later.sample.reset();
+        }
+        later.stop_ms = std::max(*voice.stop_ms - ms, 0.0);
+    }
+
+    // A ramp that starts before the note leaves the volume where it is at the note's start. The volume there depends
+    // on the note's volume.
+    later.held_ramps.clear();
+    for (VolumeRamp r : voice.held_ramps)
+    {
+        if (r.start_ms >= ms)
+        {
+            r.start_ms -= ms;
+            later.held_ramps.push_back(r);
+        }
+    }
+    if (later.held_ramps.size() < voice.held_ramps.size())
+    {
+        later.approximations.push_back("volume ramps before a voice's sample starts left out");
+    }
+    if (later.vibrato)
+    {
+        later.vibrato->delay_ms = std::max(later.vibrato->delay_ms - ms, 0.0);
+    }
+    later.started.clear();
+
+    return later;
+}
+
+double VoiceVolume(const MacroVoice& voice, double volume, double controller)
+{
+    return std::min(voice.volume * volume + voice.volume_add, 1.0) * std::min(voice.source_volume * controller, 1.0);
 }
 
 std::optional<double> HeldSilenceMs(const MacroVoice& voice)
@@ -912,7 +1124,8 @@ double TableVolume(const VolumeTable& volumes, double level)
     return (static_cast<double>(i) + (level - volumes[i]) / (volumes[i + 1] - volumes[i])) / 127.0;
 }
 
-Instruments::Instruments(const SongGroup& group, const VolumeTable& volumes) : group_(group), volumes_(volumes)
+Instruments::Instruments(const SongGroup& group, const VolumeTable& volumes, std::map<uint16_t, std::string> sfz_names)
+    : group_(group), volumes_(volumes), sfz_names_(std::move(sfz_names))
 {
 }
 
@@ -925,6 +1138,91 @@ const MacroVoice& Instruments::Macro(uint16_t macro)
     }
 
     return it->second;
+}
+
+const MacroVoice& Instruments::Macro(uint16_t macro, std::size_t part, double from_ms)
+{
+    if (part == 0 && from_ms == 0.0)
+    {
+        return Macro(macro);
+    }
+
+    const std::tuple<uint16_t, std::size_t, double> key{macro, part, from_ms};
+    auto it = later_macros_.find(key);
+    if (it == later_macros_.end())
+    {
+        const MacroVoice& whole = Macro(macro);
+        it = later_macros_.emplace(key, VoiceFrom(part == 0 ? whole : whole.parts.at(part - 1), from_ms)).first;
+    }
+
+    return it->second;
+}
+
+const MacroVoice& Instruments::Voice(const KeyVoice& voice)
+{
+    return Macro(voice.macro, voice.part, voice.from_ms);
+}
+
+std::vector<EffectVoice> EffectVoicesOf(Instruments& instruments, uint16_t object, int key,
+                                        std::set<std::string>& approximations)
+{
+    std::vector<EffectVoice> voices;
+    for (const KeyVoice& v : VoicesOf(instruments.Group().pool, object, key))
+    {
+        voices.push_back({v, 0.0});
+    }
+
+    // A voice that a macro starts starts with the key of the voice that starts it, its pan and its share of the
+    // volume. It shares that voice's controllers: it takes the volume controller that the voice has set, unless its
+    // macro sets the controller. It can start more voices. A macro that starts itself would go on for ever: MusyX runs
+    // out of voices.
+    for (std::size_t i = 0; i < voices.size(); i++)
+    {
+        const EffectVoice from = voices[i];
+        for (const StartedVoice& s : instruments.Macro(from.voice.macro).started)
+        {
+            if (s.step != 0)
+            {
+                approximations.insert("voices that start partway through a macro left out");
+                continue;
+            }
+            if (voices.size() == kMostEffectVoices)
+            {
+                approximations.insert("voices beyond MusyX's 64 left out");
+                return voices;
+            }
+
+            const int start_key = s.fixed_key.value_or(from.voice.key + s.key_shift) + s.key_add;
+            const double controller =
+                instruments.Macro(s.macro).volume_controller ? 1.0 : s.volume_controller.value_or(1.0);
+            const KeyVoice started{.macro = s.macro,
+                                   .key = std::clamp(start_key, 0, 127),
+                                   .pan = from.voice.pan,
+                                   .volume = from.voice.volume * controller};
+            voices.push_back({started, from.start_ms + s.at_ms});
+        }
+    }
+
+    // A voice that starts one sample after another plays its parts.
+    std::vector<EffectVoice> parts;
+    for (const EffectVoice& v : voices)
+    {
+        const std::size_t count = instruments.Macro(v.voice.macro).parts.size();
+        if (count == 0)
+        {
+            parts.push_back(v);
+        }
+        for (std::size_t i = 1; i <= count; i++)
+        {
+            EffectVoice part = v;
+            part.voice.part = i;
+            parts.push_back(part);
+        }
+    }
+    std::stable_sort(parts.begin(), parts.end(),
+                     [](const EffectVoice& a, const EffectVoice& b) { return a.start_ms < b.start_ms; });
+
+    return parts;
 }
 
 double Instruments::Level(const MacroVoice& voice, double volume) const
@@ -940,15 +1238,28 @@ const Sample* Instruments::GetSample(uint16_t id)
         return it->second.get();
     }
 
-    std::unique_ptr<Sample> sample;
-    const auto info = std::find_if(group_.samples.begin(), group_.samples.end(),
-                                   [id](const ntdlib::musyx::SampleInfo& s) { return s.id == id; });
+    // The group's entry for the sample, or that of the first group pushed with it that holds one (SongGroup::pushed).
+    const auto entry_in = [id](const SongGroup& group) -> const ntdlib::musyx::SampleInfo*
+    {
+        const auto found = std::find_if(group.samples.begin(), group.samples.end(),
+                                        [id](const ntdlib::musyx::SampleInfo& s) { return s.id == id; });
+        return found != group.samples.end() ? &*found : nullptr;
+    };
+    const SongGroup* holder = &group_;
+    const ntdlib::musyx::SampleInfo* info = entry_in(group_);
+    for (std::size_t p = 0; info == nullptr && p < group_.pushed.size(); p++)
+    {
+        holder = group_.pushed[p].get();
+        info = entry_in(*holder);
+    }
+
     // A voice whose sample isn't in the directory plays nothing in the game either.
-    if (info != group_.samples.end())
+    std::unique_ptr<Sample> sample;
+    if (info != nullptr)
     {
         try
         {
-            ntdlib::musyx::DecodedSample decoded = ntdlib::musyx::DecodeSample(*info, group_.sample_data);
+            ntdlib::musyx::DecodedSample decoded = ntdlib::musyx::DecodeSample(*info, holder->sample_data);
             sample = std::make_unique<Sample>();
             sample->pcm.channels.push_back(std::move(decoded.pcm));
             sample->pcm.loop = decoded.loop && decoded.loop_start < decoded.loop_end;
@@ -957,6 +1268,8 @@ const Sample* Instruments::GetSample(uint16_t id)
             sample->pcm.sample_rate = static_cast<float>(info->rate);
             sample->key = info->key;
             sample->id = id;
+            const auto named = sfz_names_.find(id);
+            sample->sfz_name = named != sfz_names_.end() ? named->second : "s" + std::to_string(id);
         }
         catch (const xsflib::FormatError& e)
         {
