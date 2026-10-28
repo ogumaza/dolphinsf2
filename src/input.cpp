@@ -37,13 +37,15 @@ namespace
 {
 
 // The games of the first JAudio whose sound effects dolphinsf2 converts, by the SHA-1s of the start-up archives of
-// their USA releases. Each of these games plays its effects in the first sequence of its sound table
-// (GameOptions::jaudio1_effects). Pikmin 2's first sequence isn't an effects sequence. dolphinsf2 leaves out the
-// effects of Pikmin 2 and of the other games.
-constexpr std::array<std::string_view, 3> kEffectsGames{
+// their USA releases (GameOptions::jaudio1_effects). Each of these games plays its effects in its effects sequence:
+// the first sequence of its sound table, or the one that ntdlib's rules for the game name. dolphinsf2 leaves out the
+// effects of the other games.
+constexpr std::array<std::string_view, 5> kEffectsGames{
     "65ea70655099a196e0707bf4e4ce61e7818553d9", // The Wind Waker
     "c66c0103a5c7c1292b5fc6c3371ed1458035cde7", // The Wind Waker HD
     "7436b12c7470a2ed14f865e0a6aa96ccfa1af758", // Pac-Man Vs.
+    "a8b63d2f333c34aaf9cb859f37f23011149af917", // Pikmin 2
+    "6747c3c7bce964bc62f817e1c8c32711c905c4c3", // Pikmin 2 on the Wii
 };
 
 // The options for the JAudio game whose start-up archive is `archive`. A game of kEffectsGames lists its effects too.

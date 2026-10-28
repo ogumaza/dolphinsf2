@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <numbers>
 #include <optional>
 #include <set>
 #include <string>
@@ -50,6 +51,19 @@ struct Envelope
     double attack_tc_per_velocity = 0.0;
     double decay_tc_per_key = 0.0;
 };
+
+// The sustain under which a linear envelope's decay counts as a fall to silence: 40 dB down. MusyX ends a voice whose
+// decay reaches a sustain of 0. A voice held further down plays far under the music, and its note ends there too.
+constexpr double kSilentSustain = 0.01;
+
+// The files fit a linear fall to silence by its energy: a fall of kEnergyFitDb in the game's time. The game's straight
+// line from full level falls as 1 - t/T, with an energy of T/3. A fall of r dB in T has an energy of 10 T / (r ln 10).
+// The two match at r = 30 / ln 10, about 13 dB.
+constexpr double kEnergyFitDb = 30.0 / std::numbers::ln10;
+
+// The decibels that a SoundFont envelope's decay and release fall in their time. A voice of the files counts as silent
+// after this fall.
+constexpr double kSoundFontFallDb = 100.0;
 
 // The milliseconds of `timecents`. MusyX turns a DLS envelope's time into whole milliseconds this way.
 double DlsMilliseconds(double timecents);
@@ -228,8 +242,15 @@ MacroVoice VoiceFrom(const MacroVoice& voice, double ms);
 // to 1. MusyX plays a volume above full at full volume.
 double VoiceVolume(const MacroVoice& voice, double volume, double controller);
 
+// The milliseconds after its note's start at which a held note of `voice` ends through its envelope: where the decay of
+// a linear envelope whose sustain is under kSilentSustain ends. A voice whose release outlasts its decay would ring on
+// through that release in the files. The game's voice is silent there. Its note ends where the files' decay has fallen
+// kSoundFontFallDb. Nothing for any other voice.
+std::optional<double> DecayedMs(const MacroVoice& voice);
+
 // The milliseconds after its note's start at which a held note of `voice` falls silent: at the end of the cut after
-// stop_ms, or at the end of a held ramp that leaves its volume at 0. Return nothing if the note sounds on.
+// stop_ms, at the end of a held ramp that leaves its volume at 0, or where its envelope's decay ends (DecayedMs).
+// Return nothing if the note sounds on.
 std::optional<double> HeldSilenceMs(const MacroVoice& voice);
 
 // Whether `voice` fades to silence while its note is held and goes on with the fade through the release: a voice that

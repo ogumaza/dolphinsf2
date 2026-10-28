@@ -32,6 +32,7 @@
 #include "ntdlib/sequence_export/jaudio/convert.h"
 #include "seqlib/sf2/presets.h"
 #include "seqlib/sf2/soundfont.h"
+#include "seqlib/sf2/units.h"
 #include "seqlib/sfz/opcodes.h"
 #include "seqlib/sfz/text.h"
 #include "seqlib/sfz/track_file.h"
@@ -56,17 +57,16 @@ constexpr double kAtOnce = std::numeric_limits<double>::infinity();
 // MusyX's milliseconds in real ones. Its clock counts the output's samples as if they came at kNominalRate.
 constexpr double kMsScale = kNominalRate / kOutputRate;
 
-// The decibels that decays and releases fall in their time. In SoundFont, they fall 100 dB. In SFZ, they fall by a
-// factor of e^-8: 8 × 20 / ln 10 dB. sfzformat.com gives that curve on its page on ampeg_attack.
-constexpr double kSoundFontFallDb = 100.0;
+// The decibels that an SFZ envelope's decay and release fall in their time: a factor of e^-8, or 8 × 20 / ln 10 dB.
+// sfzformat.com gives that curve on its page on ampeg_attack. In SoundFont, they fall kSoundFontFallDb.
 constexpr double kSfzFallDb = 8.0 * 20.0 / std::numbers::ln10;
 
 // The lowest volume that sfzformat.com documents for an SFZ region, in decibels. Every quieter region takes it. A
 // region at a gain of 0 would otherwise get -inf. sfizz 1.2 can't read that.
 constexpr double kSfzLowestVolumeDb = -144.0;
 
-// A linear fall that ends in silence is fitted to reach the level that it reaches 20 dB down. A fall to a level less
-// than twice as far down is fitted halfway down in decibels. A macro's fades are fitted the same way.
+// A macro's fades and the fade of a stopped voice are fitted to reach the level that they reach 20 dB down. A fade to a
+// level less than twice as far down is fitted halfway down in decibels.
 constexpr double kFitDb = 20.0;
 
 // The step in MusyX milliseconds in which FadeRate follows a macro's fade, and the most steps it takes. A fade longer
@@ -309,7 +309,7 @@ double ZonePan(const MacroVoice& voice, const Zone& zone)
 }
 
 // The rate in decibels a millisecond of a fall that is linear in amplitude, from full level to `to` in `ms`, fitted as
-// a fall that is linear in decibels.
+// a fall that is linear in decibels. A fall to a level under kSilentSustain is fitted by its energy (kEnergyFitDb).
 double LinearFallRate(double ms, double to)
 {
     const double range_db = to > 0.0 ? -20.0 * std::log10(to) : kAtOnce;
@@ -317,10 +317,23 @@ double LinearFallRate(double ms, double to)
     {
         return kAtOnce;
     }
+    if (to < kSilentSustain)
+    {
+        return kEnergyFitDb / ms;
+    }
 
-    const double fit_db = range_db <= 2.0 * kFitDb ? range_db / 2.0 : kFitDb;
+    // A fall to a sustain above silence reaches the level halfway down in decibels when the game's line does.
+    const double fit_db = range_db / 2.0;
     const double level = std::pow(10.0, -fit_db / 20.0);
     return fit_db / (ms * (1.0 - level) / (1.0 - to));
+}
+
+// The rate in decibels a millisecond of the fade that ends a stopped voice, a line from full level to silence in `ms`.
+// It reaches the level kFitDb down when the line does.
+double CutRate(double ms)
+{
+    const double level = std::pow(10.0, -kFitDb / 20.0);
+    return kFitDb / (ms * (1.0 - level));
 }
 
 // A volume envelope in SoundFont's and SFZ's terms, in real milliseconds: an attack that rises linearly in amplitude, a
@@ -553,10 +566,24 @@ VolumeShape VolumeOf(const Instruments& instruments, const MacroVoice& voice, do
         release_ms = e ? e->release_ms : 0.0;
     }
     release_ms *= kMsScale;
-    if (release_ms > 0.0)
+    if (release_ms <= 0.0)
     {
-        // A linear release falls from where it starts to silence in its time.
-        shape.release_db_per_ms = dls ? kDlsFallDb / release_ms : LinearFallRate(release_ms, 0.0);
+        return shape;
+    }
+
+    // A DLS release falls kDlsFallDb in its time. A linear release falls from where it starts to silence in its time.
+    // A stopped voice fades out in kCutMs.
+    if (dls)
+    {
+        shape.release_db_per_ms = kDlsFallDb / release_ms;
+    }
+    else if (voice.key_off == KeyOff::kRelease)
+    {
+        shape.release_db_per_ms = LinearFallRate(release_ms, 0.0);
+    }
+    else
+    {
+        shape.release_db_per_ms = CutRate(release_ms);
     }
 
     return shape;
@@ -646,11 +673,6 @@ int Cents(double cents)
     return static_cast<int>(std::lround(std::clamp(cents, -1.0 * kWidestCents, 1.0 * kWidestCents)));
 }
 
-int LfoFrequency(double hz)
-{
-    return std::clamp(static_cast<int>(std::lround(1200.0 * std::log2(hz / 8.176))), -16000, 4500);
-}
-
 // The instrument's global zone holds seqlib's kGlobalZoneModulators. MusyX doesn't filter by velocity. Its pitch wheel
 // has its full range. CC10 pans at the amount of 500 that most synthesizers play (kCc10ToPan). The mod wheel gives only
 // the macros' vibrato. SoundFont's default CC1 modulator would add 50 cents.
@@ -693,7 +715,7 @@ void AddVibrato(sf2::Zone& zone, const Vibrato& v)
     {
         AddGenerator(zone, sf2::kDelayVibLfo, ToTimecents(v.delay_ms * kMsScale, -12000, 5000));
     }
-    AddGenerator(zone, sf2::kFreqVibLfo, LfoFrequency(1000.0 / (v.period_ms * kMsScale)));
+    AddGenerator(zone, sf2::kFreqVibLfo, sf2::LfoFrequency(1000.0 / (v.period_ms * kMsScale)));
     if (!v.mod_scales_depth && v.depth_cents != 0.0)
     {
         AddGenerator(zone, sf2::kVibLfoToPitch, Cents(v.depth_cents));
@@ -727,7 +749,7 @@ void AddPitchEnvelope(sf2::Zone& zone, const PitchEnvelope& envelope, int key)
 // Add `tremolo` to `zone`'s modulation LFO. The mod wheel moves the tremolo's depth.
 void AddTremolo(sf2::Zone& zone, const TremoloShape& tremolo)
 {
-    AddGenerator(zone, sf2::kFreqModLfo, LfoFrequency(tremolo.hz));
+    AddGenerator(zone, sf2::kFreqModLfo, sf2::LfoFrequency(tremolo.hz));
     AddGenerator(zone, sf2::kModLfoToVolume, static_cast<int>(std::lround(tremolo.half_range_db * 10.0)));
     if (tremolo.half_mod_range_db != 0.0)
     {

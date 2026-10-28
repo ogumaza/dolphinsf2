@@ -627,6 +627,42 @@ void TestHeldFade()
     Check(stopped.held_ramps.empty() && stopped.stop_ms == 500.0, "a ramp after the stop is left out");
 }
 
+// A held note whose linear envelope decays to silence ends where the decay does. Macros 1 and 2 set linear envelopes
+// with an attack of 20 ms, a decay of 300 ms and a sustain of 0, start sample 1 and release the envelope at the note's
+// release. Envelope 3 releases over 100 ms. Envelope 4 releases over 1,800 ms, more slowly than its decay falls. Its
+// note ends where the files' decay has fallen silent.
+void TestDecayToSilence()
+{
+    using ntdlib::musyx::MacroOp;
+    ntdlib::musyx::Pool pool;
+    const auto releasing = [](uint32_t table)
+    {
+        return std::vector<ntdlib::musyx::MacroStep>{
+            Step(MacroOp::kSetAdsr, {table, 0, 0}),
+            Step(MacroOp::kStartSample, {1}),
+            Step(MacroOp::kWaitMs, {1, 0, 0, 0, 0, 0xff, 0xff}),
+            Step(MacroOp::kKeyOff),
+            Step(MacroOp::kEnd),
+        };
+    };
+    pool.macros[1] = releasing(3);
+    pool.macros[2] = releasing(4);
+    pool.tables[3] = {20, 0, 0x2c, 0x01, 0, 0, 100, 0};
+    pool.tables[4] = {20, 0, 0x2c, 0x01, 0, 0, 0x08, 0x07};
+
+    const musyx::MacroVoice fast = musyx::FollowMacro(pool, 1, 127);
+    const musyx::MacroVoice slow = musyx::FollowMacro(pool, 2, 127);
+
+    Check(fast.key_off == musyx::KeyOff::kRelease && slow.key_off == musyx::KeyOff::kRelease,
+          "both voices release their envelopes");
+    Check(musyx::DecayedMs(fast) == 320.0 && musyx::HeldSilenceMs(fast) == 320.0,
+          "a release faster than the decay: the note ends with the decay, after the attack");
+    const double silent = 20.0 + 300.0 * musyx::kSoundFontFallDb / musyx::kEnergyFitDb;
+    Check(musyx::DecayedMs(slow) == silent && musyx::HeldSilenceMs(slow) == silent,
+          "a release slower than the decay: the note ends where the files' decay has fallen silent, at " +
+              std::to_string(musyx::DecayedMs(slow).value_or(0.0)) + " ms");
+}
+
 // A song group with one program. Program 0 plays macro 1. The macro picks the DLS volume curve without ITD, sets DLS
 // envelope 2, starts sample 1, waits for the note's release and releases the envelope. Envelope 2 starts at full level
 // at once, holds it and releases over 100 ms. Sample 1 is a PCM16 sine of 3200 samples at 32000 Hz, at key 60, that
@@ -1369,6 +1405,33 @@ void TestMusyxTempoTable()
     Check(ticks == " 0 384 768", "the tempo changes at ticks 0, 384 and 768, the pass's end:" + ticks);
 }
 
+// MusyX sends a section's clock back once the section has no events left. Here track 1 plays its pattern on past its
+// loop entry at tick 768, to a volume change at tick 1000. The loop comes there for both tracks, and the second pass
+// starts at tick 1000.
+void TestMusyxLoopWaitsForPatterns()
+{
+    const musyx::SongGroup group = TestSongGroup();
+    musyx::Instruments instruments(group, TestVolumes());
+    ntdlib::musyx::Song song = TestSong(true, false);
+    ntdlib::musyx::Track track;
+    track.number = 1;
+    track.channel = 1;
+    track.entries.push_back({.tick = 0, .pattern = 1, .volume = 100});
+    track.entries.push_back({.tick = 768, .pattern = ntdlib::musyx::kLoopBack, .loop_target = 0});
+    song.tracks.push_back(track);
+    ntdlib::musyx::Pattern pattern;
+    pattern.events.push_back(
+        {.tick = 1000, .kind = ntdlib::musyx::PatternEventKind::kController, .controller = 7, .value = 64});
+    pattern.end_tick = 1152;
+    song.patterns.push_back(pattern);
+
+    const Performance perf = musyx::PlaySong(song, {"wait", "G/A/A", 5, 127}, instruments, {});
+
+    Check(perf.loop && perf.loop->start == 0 && perf.loop->end == 1000 && perf.end_tick == 1000,
+          "the loop runs from tick 0 to 1000: " +
+              (perf.loop ? std::to_string(perf.loop->start) + " to " + std::to_string(perf.loop->end) : "none"));
+}
+
 // A macro's PitchWheelRange gives its voice the pitch wheel's range. This one sets 12 semitones up and 6 down. The
 // channel takes its latest note's range. The pattern moves the wheel halfway up from its centre during the note. It
 // then moves the wheel halfway down.
@@ -1909,6 +1972,7 @@ int main(int argc, char** argv)
     TestScaleVolume();
     TestReleaseFade();
     TestHeldFade();
+    TestDecayToSilence();
     TestMusyxSongVolume();
     TestMusyxVolumeTable();
     TestMusyxTableLevels();
@@ -1924,6 +1988,7 @@ int main(int argc, char** argv)
     TestMusyxHeldFade();
     TestMusyxGlobalZone();
     TestMusyxTempoTable();
+    TestMusyxLoopWaitsForPatterns();
     TestMusyxPitchWheelRange();
     TestMusyxMixedPitchWheelRanges();
     TestMusyxNoteOfNoLength();

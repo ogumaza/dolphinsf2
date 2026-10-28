@@ -28,10 +28,14 @@ Games known to work:
   never went on sale.
 
 Other games that use JAudio may convert too. Some play music from streamed audio files rather
-than sequences. dolphinsf2 leaves those out. The Wind Waker, The Wind Waker HD and Pac-Man Vs.
-play all their sound effects in one sequence. dolphinsf2 converts each effect as that sequence
-plays it when the game starts the effect. It leaves out the effects of other games that use the
-first JAudio (see [The first JAudio's sound effects](#the-first-jaudios-sound-effects)).
+than sequences. dolphinsf2 leaves those out. Pikmin 2 converts only in part. Many of its pieces
+of music come out with no notes. In each of them, the root track runs an interrupt routine in
+every tick. Some of those routines poll the game once a beat and never return. dolphinsf2
+doesn't play such a track as the game does. It stops the track and reports that the track runs
+without waiting. The Wind Waker, The Wind Waker HD, Pac-Man Vs. and Pikmin 2 play all their
+sound effects in one sequence. dolphinsf2 converts each effect as that sequence plays it when
+the game starts the effect. It leaves out the effects of other games that use the first JAudio
+(see [The first JAudio's sound effects](#the-first-jaudios-sound-effects)).
 
 A MusyX game lists its songs in a table in its code. dolphinsf2 reads that table in Mario Golf:
 Toadstool Tour, Mario Power Tennis and Pokémon Colosseum. Mario Party 4 keeps its songs and
@@ -182,7 +186,8 @@ notes and controllers. dolphinsf2 follows these parts of JAudio2's sequence play
   count.
 - Oscillators: the envelopes that move a note's volume and pitch. They move on sub-frame by
   sub-frame. Release tables and direct releases take over at a note's release. A track can
-  replace an instrument's oscillators. A note ends when its volume oscillator stops.
+  replace an instrument's oscillators. A note ends when its volume oscillator stops. It also
+  ends where the oscillator holds at zero and no release can raise it.
 - The DSP's 64 voices and the game's priorities. A note takes a free voice. Without one, it
   takes the oldest voice whose priority is at or below the note's priority. A released note
   counts at its release priority.
@@ -216,14 +221,17 @@ notes at half the level of the others. That level approximates the game's mix.
 
 ### The first JAudio's sound effects
 
-The Wind Waker, The Wind Waker HD and Pac-Man Vs. play all their sound effects in one sequence:
-the first sequence of the sound table. The sound library starts it when the game starts.
-dolphinsf2 recognizes these games by the start-up archives of their USA releases. It converts
-the effects of no other game that uses the first JAudio. Pikmin 2's first sequence isn't an
-effects sequence. Pikmin 2 starts its effects another way. dolphinsf2 leaves them out.
+The Wind Waker, The Wind Waker HD, Pac-Man Vs. and Pikmin 2 play all their sound effects in one
+sequence. In the first three, it's the first sequence of the sound table. The sound library
+starts it when the game starts. Pikmin 2's code names another sequence of the table.
+dolphinsf2 recognizes these games by the start-up archives of their USA releases. For Pikmin 2,
+those are the archives on the GameCube and on the Wii. dolphinsf2 converts the effects of no
+other game that uses the first JAudio. Many of Pikmin 2's effects play quieter than in the
+game.
 
-In The Wind Waker, the effects sequence gives each category of effects four slots. A slot is a
-track that waits for an effect. To start an effect, the library writes four of the slot's ports:
+The effects sequence gives each category of effects a number of slots. The start-up archive's
+table of scenes sets the counts. In The Wind Waker, each category has four. A slot is a track
+that waits for an effect. To start an effect, the library writes four of the slot's ports:
 a wait for the distance, the map's information, the effect's number and a request. The slot's
 track then plays the effect. dolphinsf2 plays each effect that way, in the first slot of its
 category. The library's writes come after the first tick of the effects sequence. An effect's
@@ -345,6 +353,12 @@ regions become zones with:
 - A vibrato LFO at the track's speed and delay. CC1 sets its depth.
 - Loops repeated as needed to meet SoundFont padding rules: 8 samples before, at least 32
   within, and 32 after. Playback doesn't change.
+
+Programs 0xf0 and up play the DSP's built-in oscillators. The square wave, the sawtooth, the
+pulse of 25% duty, the triangle and the sine become looping samples of one cycle, one for each
+program. Each preset of such a program has one zone, for every key and velocity. The zone holds
+the oscillators' envelope: full volume until the release, then a fall to silence over about
+17 ms. The DSP changes its noise and its ramp as it plays. No sample can hold them.
 
 An ADPCM wave's loop repeats from the decoder history that the wave system stores. Where that
 history differs from the decoder's state at the loop start, dolphinsf2 unrolls the loop once.
@@ -540,8 +554,8 @@ in MIDI, SoundFont or SFZ:
   Depth changes work through CC1 up to a semitone. A deeper vibrato is kept to a semitone and
   reported. SoundFont's LFO is a triangle wave. The game uses a sine.
 - **Omitted features.** dolphinsf2 leaves these out and reports them: tremolo, track filters,
-  notes on the DSP's built-in oscillators (programs 0xf0 and up), sample skips and notes on a
-  missing bank.
+  notes on the DSP's noise, ramp and other oscillators that no sample can hold, sample skips and
+  notes on a missing bank.
 - **Effect send.** Synths play CC91 as reverb. In the game, the send reaches whatever effect the
   game has set up. There may be none.
 - **Volume limits.** JAudio2 multiplies the volumes of a track, the tracks above it and the
@@ -558,10 +572,14 @@ For MusyX games, the files differ from the game in these ways too. dolphinsf2 re
 nine where a song has them:
 
 - **Linear envelopes.** A linear envelope's decay and release fall in a straight line in
-  amplitude. SoundFont and SFZ envelopes fall in decibels. A fall to silence is fitted to reach
-  the game's level 20 dB down. So is a macro's fade, while its note is held or after the note's
-  release. A note's decay or release therefore fades more evenly than in the game. The fitted
-  fall goes on after the game's note has fallen silent.
+  amplitude. SoundFont and SFZ envelopes fall in decibels. A fall to silence, or to a sustain
+  more than 40 dB down, is fitted to hold the same energy as the game's line. It falls about
+  13 dB in the game's time. It lies up to 0.8 dB under the game's level until about 60% of the
+  fall, and above it after that. A note whose decay falls that far ends where the game's decay
+  does. A note whose release takes longer than its decay ends where the fitted decay has fallen
+  silent. A release goes on falling after the game's has ended. A decay to a higher sustain
+  reaches the level halfway down in decibels when the game's line does. A macro's fade, while
+  its note is held or after the note's release, is fitted to reach the game's level 20 dB down.
 - **Pitch envelopes** fall in a straight line in SoundFont and SFZ. MusyX's pitch envelopes fall
   in decibels of their range. The fit reaches half the range at the same time.
 - **Volume curves.** MusyX looks up the product of a voice's volumes in its volume table.

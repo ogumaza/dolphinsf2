@@ -1060,6 +1060,20 @@ double VoiceVolume(const MacroVoice& voice, double volume, double controller)
     return std::min(voice.volume * volume + voice.volume_add, 1.0) * std::min(voice.source_volume * controller, 1.0);
 }
 
+std::optional<double> DecayedMs(const MacroVoice& voice)
+{
+    if (!voice.envelope || voice.envelope->dls || voice.envelope->sustain >= kSilentSustain)
+    {
+        return std::nullopt;
+    }
+
+    // The files' decay and release fall kEnergyFitDb in their times. A release longer than the decay falls more slowly.
+    const Envelope& e = *voice.envelope;
+    const bool slow_release = voice.key_off == KeyOff::kRelease && e.release_ms > e.decay_ms;
+
+    return e.attack_ms + (slow_release ? e.decay_ms * kSoundFontFallDb / kEnergyFitDb : e.decay_ms);
+}
+
 std::optional<double> HeldSilenceMs(const MacroVoice& voice)
 {
     // A ramp that leaves the volume at 0 does so whatever the volume was before it.
@@ -1072,6 +1086,10 @@ std::optional<double> HeldSilenceMs(const MacroVoice& voice)
     if (voice.stop_ms)
     {
         silent = std::min(silent.value_or(kNever), *voice.stop_ms + kCutMs);
+    }
+    if (const std::optional<double> decayed = DecayedMs(voice))
+    {
+        silent = std::min(silent.value_or(kNever), *decayed);
     }
 
     return silent;

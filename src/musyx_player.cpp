@@ -297,14 +297,14 @@ private:
     // Handle the section's events that are due. Return false if the section has none left.
     bool HandleEvents(std::size_t section);
 
-    // Send the clock of section `section` back to its loop start, for the loop at `loop_time` of the clock. The tracks
+    // Send the clock of section `section` back to its loop start, at the tick that the clock has reached. The tracks
     // that loop start again.
-    void StartLoop(std::size_t section, uint32_t loop_time);
+    void StartLoop(std::size_t section);
 
     // Handle event `e` of section `section`, and put its track's next event in the section's list. For a track's loop,
-    // return the loop's time instead. The section loops once its list is empty. StartLoop then puts the tracks' next
-    // events in it.
-    std::optional<uint32_t> HandleEvent(const Event& e, std::size_t section);
+    // put nothing in the list and return true. The section loops once its list is empty. StartLoop then puts the
+    // tracks' next events in it.
+    bool HandleEvent(const Event& e, std::size_t section);
 
     std::optional<Event> NextEvent(std::size_t track);
     static void Insert(SectionState& s, const Event& e);
@@ -365,8 +365,8 @@ private:
     double EndNotes(Performance& perf, int64_t last_tick);
 
     // The seconds where voice `v` ends, for a note from `on_seconds` to `off_seconds`. `key` is the key that the voice
-    // starts with. A voice that ignores the release plays its sample to the end. A voice that stops by itself ends
-    // then. Add to `approximated` what the end approximates.
+    // starts with. A voice that ignores the release plays its sample to the end. A voice that stops by itself or
+    // decays to silence ends then. Add to `approximated` what the end approximates.
     double VoiceEnd(const MacroVoice& v, int key, double on_seconds, double off_seconds,
                     std::set<std::string>& approximated);
 
@@ -704,7 +704,9 @@ int64_t Player::TickOf(std::size_t section, uint32_t time) const
 bool Player::HandleEvents(std::size_t section)
 {
     SectionState& s = sections_[section];
-    std::optional<uint32_t> loop_time; // the latest loop of a track since the section's clock last went back
+    // MusyX sends the clock back once the section's list is empty, at the tick that the clock has reached. A loop
+    // therefore comes after the last of its tracks' loop events.
+    bool loop_due = false; // a track has looped since the section's clock last went back
     bool looped = false;
     while (true)
     {
@@ -715,7 +717,7 @@ bool Player::HandleEvents(std::size_t section)
         }
         if (s.pending.empty())
         {
-            if (!loop_time)
+            if (!loop_due)
             {
                 return false;
             }
@@ -726,29 +728,29 @@ bool Player::HandleEvents(std::size_t section)
                 throw FormatError("the song loops without time passing");
             }
             looped = true;
-            StartLoop(section, *loop_time);
-            loop_time.reset();
+            StartLoop(section);
+            loop_due = false;
             continue;
         }
 
         const Event e = s.pending.front();
         s.pending.erase(s.pending.begin());
-        if (const std::optional<uint32_t> loop_at = HandleEvent(e, section))
+        if (HandleEvent(e, section))
         {
-            loop_time = std::max(loop_time.value_or(0), *loop_at);
+            loop_due = true;
         }
     }
 }
 
-void Player::StartLoop(std::size_t section, uint32_t loop_time)
+void Player::StartLoop(std::size_t section)
 {
-    // The other clock starts at the loop start, with this clock's fraction of a tick. The tempo table starts again,
-    // and its changes up to the loop start apply.
+    // The other clock starts at the loop start where this clock stands, with its fraction of a tick. The tempo table
+    // starts again, and its changes up to the loop start apply.
     SectionState& s = sections_[section];
     const auto clock = static_cast<std::size_t>(s.clock);
     const auto other = clock ^ 1;
     const uint32_t loop_start = LoopStart(section);
-    s.offset[other] = s.offset[clock] + static_cast<int64_t>(loop_time) - loop_start;
+    s.offset[other] = s.offset[clock] + static_cast<int64_t>(s.time[clock] >> 16) - loop_start;
     s.time[other] = static_cast<uint64_t>(loop_start) << 16 | (s.time[clock] & 0xffff);
     s.clock = static_cast<int>(other);
     s.last_run_tick = static_cast<int64_t>(loop_start) - 1;
@@ -778,7 +780,7 @@ void Player::StartLoop(std::size_t section, uint32_t loop_time)
     }
 }
 
-std::optional<uint32_t> Player::HandleEvent(const Event& e, std::size_t section)
+bool Player::HandleEvent(const Event& e, std::size_t section)
 {
     TrackState& t = tracks_[e.track];
     const uint8_t channel = song_.tracks[e.track].channel;
@@ -854,7 +856,7 @@ std::optional<uint32_t> Player::HandleEvent(const Event& e, std::size_t section)
         }
 
     case EventType::kLoop:
-        return e.time;
+        return true;
     }
 
     if (const std::optional<Event> next = NextEvent(e.track))
@@ -862,7 +864,7 @@ std::optional<uint32_t> Player::HandleEvent(const Event& e, std::size_t section)
         Insert(sections_[section], *next);
     }
 
-    return std::nullopt;
+    return false;
 }
 
 void Player::ProgramChange(uint8_t channel, uint8_t program, int64_t tick)
@@ -1378,13 +1380,19 @@ double Player::EndNotes(Performance& perf, int64_t last_tick)
 double Player::VoiceEnd(const MacroVoice& v, int key, double on_seconds, double off_seconds,
                         std::set<std::string>& approximated)
 {
-    // A voice whose held fade goes on through the release doesn't stop at its note's end.
+    // A voice whose held fade goes on through the release doesn't stop at its note's end. A voice whose envelope decays
+    // to silence ends where DecayedMs says, after its note's end too if it ignores the release.
+    const std::optional<double> decayed = DecayedMs(v);
     double end = off_seconds;
     if (v.key_off == KeyOff::kIgnored)
     {
         if (const std::optional<double> length = SampleSecondsOf(v, key))
         {
             end = on_seconds + *length;
+        }
+        else if (decayed)
+        {
+            end = on_seconds + *decayed / 1000.0;
         }
         else if (!FadesThroughRelease(v))
         {
@@ -1394,6 +1402,10 @@ double Player::VoiceEnd(const MacroVoice& v, int key, double on_seconds, double 
     if (v.stop_ms)
     {
         end = std::min(end, on_seconds + *v.stop_ms / 1000.0);
+    }
+    if (decayed)
+    {
+        end = std::min(end, on_seconds + *decayed / 1000.0);
     }
 
     return end;
