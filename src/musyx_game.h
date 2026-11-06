@@ -10,7 +10,10 @@
 // projects, pools and sample directories, in FSYS archives (ntdlib/disc/fsys.h). There the code's table gives each
 // song's group. WarioWare keeps its groups in one MusyX project and its songs in one file. Its sound room gives each
 // song's group (ReadSoundRoom). The NDDEMO disc's code lists the paths of its songs' files (ReadSongPaths). One song
-// group plays them all. Nintendo Puzzle Collection keeps its music in the modules of its code.
+// group plays them all. Nintendo Puzzle Collection keeps its music in the modules of its code. Ten more games keep
+// their sounds in layouts of their own: Star Fox Adventures, Paper Mario: The Thousand-Year Door, Pokémon Channel, the
+// two Rogue Squadron games, Resident Evil, Resident Evil Zero, Tales of Symphonia and the two Metroid Prime games. A
+// catalogue lists each one's sounds and the groups that each sound pushes (musyx_catalogue.h).
 
 #pragma once
 
@@ -49,6 +52,14 @@ enum class TickStep : uint8_t
     kInteger,
 };
 
+// A MIDI controller that the game's code sets on a song's channel once the song plays, through sndSeqCntrl.
+struct SongControl
+{
+    uint8_t channel = 0;
+    uint8_t controller = 0;
+    uint8_t value = 0;
+};
+
 // A song that the game's code lists: its name, its file, the ID that names its MIDI setup, its volume and the game's
 // master volume for music. MusyX multiplies a voice's volume by both before the volume curve. The song also holds how
 // the game's sequencer counts time.
@@ -61,6 +72,15 @@ struct GameSong
     uint8_t master_volume = 127; // in 127ths
     std::size_t group = 0;       // the song group that plays the song: its index in Game::Groups
     TickStep tick_step = TickStep::kFloat;
+
+    // The time over which the game raises the song's volume from 0 to `volume` as it starts the song, in milliseconds.
+    // MusyX's fader moves in a line, a step every 5 ms (sndSeqVolume).
+    double fade_in_ms = 0.0;
+
+    // The controllers that the game's code sets on the song's channels `controls_ms` milliseconds after the song's
+    // start, in their order. Resident Evil's rooms set the levels and the pans of some songs' channels.
+    std::vector<SongControl> controls = {};
+    double controls_ms = 0.0;
 };
 
 // A sound effect that the game's code starts. MusyX plays an effect as one note of its row in its group's table of
@@ -257,6 +277,9 @@ struct PuzzleRules;
 // What the code of a game by Camelot says about its effects (see musyx_game.cpp).
 struct CamelotEffectRules;
 
+// What the code of a game with a catalogue of its sounds says about how it plays them (see musyx_catalogue.h).
+struct CatalogueRules;
+
 class Game
 {
 public:
@@ -320,6 +343,10 @@ private:
     // Read the song groups and the songs of Nintendo Puzzle Collection's modules (musyx_puzzle.h). Throw FormatError if
     // a module or a file of sound data can't be read.
     void ReadPuzzleGame(const PuzzleRules& rules);
+
+    // Read the song groups, the songs and the effects of a game with a catalogue of its sounds (musyx_catalogue.h).
+    // Throw FormatError if a file is missing or damaged.
+    void ReadCatalogueGame(const CatalogueRules& rules);
 
     // Read the group whose first file has number `first_file` (PathOf): the group's pool, project, sample directory
     // and samples, one file after another. The group is the project's first group of `type`, or the one whose ID is

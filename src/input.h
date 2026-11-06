@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 // The games that dolphinsf2 converts, as it opens them: a JAudio game, from its start-up archive, its disc image or its
-// extracted disc, or one of the MusyX games that dolphinsf2 converts, from its disc image or its extracted disc.
+// extracted disc, or one of the MusyX games, the games with the Nintendo 64's sound library or the game with Square's
+// Red driver that dolphinsf2 converts, from its disc image or its extracted disc.
 
 #pragma once
 
@@ -15,11 +16,14 @@
 
 #include "jaudio.h"
 #include "musyx_convert.h"
+#include "n64_game.h"
+#include "red_music.h"
 
 namespace dolphinsf2
 {
 
-// A game being converted: a JAudio game (ntdlib's GameInput), or one of the MusyX games that dolphinsf2 converts.
+// A game being converted: a JAudio game (ntdlib's GameInput), or one of the MusyX games, the games with the Nintendo
+// 64's sound library or the game with Square's Red driver that dolphinsf2 converts.
 class Input
 {
 public:
@@ -27,10 +31,11 @@ public:
     // FormatError, with what to do where it can say, if it's none of them.
     static Input Open(const std::filesystem::path& path);
 
-    // Print the warnings of a JAudio game's files, each after `name`. A MusyX game prints none.
+    // Print the warnings of a JAudio game's files, each after `name`. The other games print none.
     void PrintWarnings(const std::string& name) const;
 
-    // The game's sequences in order. For a MusyX game, these are the songs and then the effects.
+    // The game's sequences in order. For a MusyX game, these are the songs and then the effects. For a game with the
+    // Nintendo 64's sound library or Square's Red driver, they are its pieces.
     std::vector<ntdlib::sequence_export::Sequence> Sequences() const;
 
     // Convert sequence `index` of Sequences, with the errors of the banks or the instruments since the last conversion
@@ -40,13 +45,16 @@ public:
 private:
     Input() = default;
 
-    // Open the game on the disc image or the extracted disc at `path`: a JAudio game, or one of the MusyX games that
-    // dolphinsf2 converts. Only a MusyX game requires the disc's main.dol. Throw FormatError if it's neither.
+    // Open the game on the disc image or the extracted disc at `path`: a JAudio game, a game with Square's Red driver,
+    // or one of the MusyX games or the games with the Nintendo 64's sound library that dolphinsf2 converts. Throw
+    // FormatError if it's none of them.
     static Input OpenDisc(const std::filesystem::path& path);
 
-    // One of the two is set.
+    // One of the four is set.
     std::unique_ptr<GameInput> jaudio_;
     std::unique_ptr<musyx::GameInput> musyx_;
+    std::unique_ptr<n64::GameInput> n64_;
+    std::unique_ptr<red::GameInput> red_;
 };
 
 } // namespace dolphinsf2

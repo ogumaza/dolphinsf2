@@ -74,6 +74,10 @@ constexpr double kFitDb = 20.0;
 constexpr double kFadeStepMs = 0.25;
 constexpr double kMostFadeSteps = 100000.0;
 
+// The shortest delay of a volume envelope in real milliseconds. SoundFont's shortest delay is -12000 timecents, about
+// 1 ms. A shorter delay stays out of both files.
+constexpr double kShortestDelayMs = 1.0;
+
 // The sustain level that DLS envelopes treat as silence: their voice ends after the decay.
 constexpr double kDlsSilence = 1.0e-4; // below -80 dB, above -96.5 dB
 
@@ -109,7 +113,7 @@ struct Zone
     bool SameVoice(const Zone& other) const
     {
         return macro == other.macro && key_offset == other.key_offset && pan == other.pan && volume == other.volume &&
-               from_ms == other.from_ms && part == other.part;
+               from_ms == other.from_ms && part == other.part && controls == other.controls;
     }
 
     int low_key = 0;
@@ -120,14 +124,18 @@ struct Zone
     double volume = 1.0;  // the share of the note's volume that the layers give the voice
     double from_ms = 0.0; // the note starts this long after the voice (KeyVoice::from_ms)
     std::size_t part = 0; // the part of the voice that the zone plays (KeyVoice::part)
+    ChannelControls controls; // the channel's controllers that the voice reads (KeyVoice::controls)
     bool effect = false;  // the zone plays a voice of an effect
+    // The DSP plays the zone's voice at its highest pitch at every key of the zone (AtHighestPitch). An effect's note
+    // bends to that pitch instead (PitchCurve).
+    bool highest_pitch = false;
 };
 
 // The pan of voice `v`: the pan of the macro's last Panning or PianoPan step, else the pan of the keymap or the layer
 // (MacroVoice::pan).
 double PanOf(Instruments& instruments, const KeyVoice& v)
 {
-    const MacroVoice& voice = instruments.Macro(v.macro, v.part, 0.0);
+    const MacroVoice& voice = instruments.Macro(v.macro, v.part, 0.0, v.controls);
     if (voice.pan_last)
     {
         return *voice.pan;
@@ -147,8 +155,9 @@ double ZoneVolume(const MacroVoice& voice, const Zone& zone, double volume)
     return VoiceVolume(voice, volume, zone.effect ? voice.volume_controller.value_or(1.0) : 1.0);
 }
 
-// The zones of the preset that plays `object`, in order of their lowest keys.
-std::vector<Zone> ZonesOf(Instruments& instruments, uint16_t object)
+// The zones of the preset that plays `object`, in order of their lowest keys. A voice that reads its channel's
+// controllers takes their values from `controls`, with its start volume in place of the velocity (VoiceControls).
+std::vector<Zone> ZonesOf(Instruments& instruments, uint16_t object, const ChannelControls& controls)
 {
     std::vector<Zone> zones;
     std::vector<Zone> open; // the runs that the last key extended
@@ -156,14 +165,16 @@ std::vector<Zone> ZonesOf(Instruments& instruments, uint16_t object)
     {
         std::vector<Zone> next;
         std::vector<bool> extended(open.size());
-        for (const KeyVoice& v : VoicesOf(instruments.Group().pool, object, key))
+        for (KeyVoice& v : VoicesOf(instruments.Group().pool, object, key))
         {
+            v.controls = VoiceControls(controls, v.volume);
             Zone z{.low_key = key,
                    .high_key = key,
                    .macro = v.macro,
                    .key_offset = v.key - key,
                    .pan = PanOf(instruments, v),
-                   .volume = v.volume};
+                   .volume = v.volume,
+                   .controls = v.controls};
             for (std::size_t i = 0; i < open.size(); i++)
             {
                 if (!extended[i] && open[i].SameVoice(z))
@@ -185,6 +196,38 @@ std::vector<Zone> ZonesOf(Instruments& instruments, uint16_t object)
         open = std::move(next);
     }
     zones.insert(zones.end(), open.begin(), open.end());
+
+    // A voice's pitch rises with the key. Each zone therefore splits at the lowest key whose voice the DSP plays at its
+    // highest pitch. The keys below keep the zone's place in the order.
+    const std::size_t count = zones.size();
+    for (std::size_t i = 0; i < count; i++)
+    {
+        const MacroVoice& voice = instruments.Macro(zones[i].macro, zones[i].part, zones[i].from_ms, zones[i].controls);
+        const Sample* sample = instruments.SampleOf(voice);
+        if (sample == nullptr)
+        {
+            continue;
+        }
+
+        int key = zones[i].low_key;
+        while (key <= zones[i].high_key && !AtHighestPitch(voice, *sample, key + zones[i].key_offset))
+        {
+            key++;
+        }
+        if (key == zones[i].low_key)
+        {
+            zones[i].highest_pitch = true;
+        }
+        else if (key <= zones[i].high_key)
+        {
+            Zone high = zones[i];
+            high.low_key = key;
+            high.highest_pitch = true;
+            zones[i].high_key = key - 1;
+            zones.push_back(high);
+        }
+    }
+
     std::stable_sort(zones.begin(), zones.end(), [](const Zone& a, const Zone& b) { return a.low_key < b.low_key; });
 
     return zones;
@@ -200,7 +243,7 @@ std::vector<Zone> ZonesOf(Instruments& instruments, const EffectNote& note)
                          .high_key = 127,
                          .macro = v.macro,
                          .key_offset = v.key - note.key,
-                         .pan = PanOf(instruments, v),
+                         .pan = PanOf(instruments, v) + note.pan_shift,
                          .volume = v.volume,
                          .from_ms = v.from_ms,
                          .part = v.part,
@@ -279,7 +322,7 @@ std::string SfzVelocityCurve(const Instruments& instruments, const MacroVoice& v
 
 // The tuning of a zone in cents at its sample's key, and whether its pitch follows the key. MusyX plays the voice's
 // key, moved by the macro, against the sample's key. A rate that the macro sets takes the place of both keys. The
-// output's rate makes every voice a little sharp.
+// output's rate makes every voice a little sharp. A zone at the DSP's highest pitch plays at that pitch at every key.
 struct Tuning
 {
     double cents = 0.0;
@@ -289,6 +332,10 @@ struct Tuning
 Tuning TuningOf(const MacroVoice& voice, const Zone& zone, const Sample& sample)
 {
     const double kRateCents = 1200.0 * std::log2(kOutputRate / kNominalRate);
+    if (zone.highest_pitch && sample.pcm.sample_rate > 0)
+    {
+        return {1200.0 * std::log2(HighestPitchHz() / sample.pcm.sample_rate), false};
+    }
     if (voice.rate_hz && *voice.rate_hz > 0.0 && sample.pcm.sample_rate > 0)
     {
         return {1200.0 * std::log2(*voice.rate_hz / sample.pcm.sample_rate) + kRateCents, false};
@@ -336,10 +383,11 @@ double CutRate(double ms)
     return kFitDb / (ms * (1.0 - level));
 }
 
-// A volume envelope in SoundFont's and SFZ's terms, in real milliseconds: an attack that rises linearly in amplitude, a
-// hold, and a decay and a release that fall linearly in decibels.
+// A volume envelope in SoundFont's and SFZ's terms, in real milliseconds: a delay, an attack that rises linearly in
+// amplitude, a hold, and a decay and a release that fall linearly in decibels.
 struct VolumeShape
 {
+    double delay_ms = 0.0;
     double attack_ms = 0.0;
     double hold_ms = 0.0;
     double decay_db_per_ms = kAtOnce;
@@ -394,12 +442,14 @@ struct HeldShape
 };
 
 // The shape of a held note of `voice` at `volume`. Its envelope, if any, has the attack `attack_ms` and the decay
-// `decay_ms`. The note's level is the envelope's amplitude times the curve's level of the volume that the ramps give,
-// over the level at `volume`. A voice that stops by itself falls to silence in kCutMs from its stop. The decay starts
-// where the level first falls, after the attack. It reaches the level kFitDb down when the note does, or halfway down
-// in decibels to a level less than twice as far down. Return nothing if the level doesn't fall.
+// `decay_ms`. The files play the attack `played_attack_ms`: the envelope's or the fade-in's, the longer. The note's
+// level is the envelope's amplitude times the curve's level of the volume that the ramps give, over the level at
+// `volume`. A voice that stops by itself falls to silence in kCutMs from its stop. The decay starts where the level
+// first falls, after the played attack. The hold fills the time between them. The decay reaches the level kFitDb down
+// when the note does, or halfway down in decibels to a level less than twice as far down. Return nothing if the level
+// doesn't fall.
 std::optional<HeldShape> HeldShapeOf(const Instruments& instruments, const MacroVoice& voice, double volume,
-                                     double attack_ms, double decay_ms)
+                                     double attack_ms, double decay_ms, double played_attack_ms)
 {
     const double full = instruments.Level(voice, volume);
     if (full <= 0.0)
@@ -451,7 +501,7 @@ std::optional<HeldShape> HeldShapeOf(const Instruments& instruments, const Macro
     // The time at which the note's level reaches the fit's, step by step from the decay's start.
     const double fit_db = range_db <= 2.0 * kFitDb ? range_db / 2.0 : kFitDb;
     const double fit = std::pow(10.0, -fit_db / 20.0);
-    const double start = std::max(falls, attack_ms);
+    const double start = std::max(falls, played_attack_ms);
     const double step = std::max(kFadeStepMs, (settles - start) / kMostFadeSteps);
     double crossed = start;
     double before = level(start);
@@ -464,17 +514,64 @@ std::optional<HeldShape> HeldShapeOf(const Instruments& instruments, const Macro
     }
 
     HeldShape shape;
-    shape.hold_ms = start - attack_ms;
+    shape.hold_ms = start - played_attack_ms;
     shape.decay_db_per_ms = crossed > start ? fit_db / (crossed - start) : kAtOnce;
     shape.sustain_db = last > 0.0 ? -range_db : -kSilentCentibels / 10.0;
 
     return shape;
 }
 
+// The delay in MusyX milliseconds before the attack of `voice` at `volume`, whose fade-in of `fade_ms` sets the attack.
+// FadeIn moves the volume in a line from silence (0x80153c10 in Pokémon Colosseum), and the voice's curve gives its
+// level. The envelope's attack of `attack_ms` and its decay of `decay_ms`, if the voice has an envelope, scale that
+// level. The files' attack rises in a line in amplitude. After the delay, the attack reaches the level kFitDb below the
+// fade's end when the voice does. It ends when the fade does.
+double FadeInDelayMs(const Instruments& instruments, const MacroVoice& voice, double volume, double attack_ms,
+                     double decay_ms, double fade_ms)
+{
+    const double full = instruments.Level(voice, volume);
+    if (full <= 0.0)
+    {
+        return 0.0;
+    }
+
+    const std::optional<Envelope>& e = voice.envelope;
+    const auto level = [&](double ms)
+    {
+        double l = instruments.Level(voice, volume * std::min(ms / fade_ms, 1.0)) / full;
+        if (e)
+        {
+            l *= HeldEnvelopeAmplitude(*e, attack_ms, decay_ms, ms);
+        }
+
+        return l;
+    };
+
+    // The time at which the voice's level reaches the fit's, step by step from the voice's start.
+    const double share = std::pow(10.0, -kFitDb / 20.0);
+    const double fit = share * level(fade_ms);
+    const double step = std::max(kFadeStepMs, fade_ms / kMostFadeSteps);
+    double crossed = fade_ms;
+    double before = 0.0;
+    for (double at = step; at < fade_ms; at += step)
+    {
+        const double l = level(at);
+        if (l >= fit)
+        {
+            crossed = at - step * (l - fit) / (l - before);
+            break;
+        }
+        before = l;
+    }
+
+    return std::max((crossed - share * fade_ms) / (1.0 - share), 0.0);
+}
+
 // The rate in decibels a MusyX millisecond of the release that fits the fade of `voice` after its note's release
 // (KeyOff::kFade), for the voice at `volume`. The fade's ramps move the volume in lines, and the voice's curve gives
-// their levels. The stop then ends the voice with a fade of kCutMs, in a line in amplitude. The release reaches the
-// level kFitDb down when the voice does.
+// their levels. A KeyOff at the stop then plays the envelope's release (ReleaseFade::releases): a linear one falls in a
+// line in amplitude to silence in its time, and a DLS one falls kDlsFallDb in its time. Any other stop ends the voice
+// with a fade of kCutMs, in a line in amplitude. The release reaches the level kFitDb down when the voice does.
 double FadeRate(const Instruments& instruments, const MacroVoice& voice, double volume)
 {
     const double full = instruments.Level(voice, volume);
@@ -500,9 +597,21 @@ double FadeRate(const Instruments& instruments, const MacroVoice& voice, double 
         before = level;
     }
 
-    // The cut from the level at the stop.
+    // The level at the stop. A voice without an envelope releases at once.
     const double last =
         instruments.Level(voice, FadeVolume(voice.release_fade, volume, std::max(stop_ms - step, 0.0)).value());
+    const std::optional<Envelope>& e = voice.envelope;
+    if (voice.release_fade.releases && e && e->release_ms > 0.0)
+    {
+        if (e->dls)
+        {
+            return kFitDb / (stop_ms + e->release_ms * 20.0 * std::log10(last / fit) / kDlsFallDb);
+        }
+
+        return kFitDb / (stop_ms + e->release_ms * (1.0 - fit / last));
+    }
+
+    // The cut from the level at the stop.
     return kFitDb / (stop_ms + kCutMs * (1.0 - fit / last));
 }
 
@@ -518,8 +627,9 @@ VolumeShape VolumeOf(const Instruments& instruments, const MacroVoice& voice, do
     {
         if (dls)
         {
-            attack_ms = DlsMilliseconds(e->attack_timecents + velocity * e->attack_tc_per_velocity);
-            decay_ms = DlsMilliseconds(e->decay_timecents + key * e->decay_tc_per_key);
+            attack_ms = e->times_in_ms ? e->attack_ms
+                                       : DlsMilliseconds(e->attack_timecents + velocity * e->attack_tc_per_velocity);
+            decay_ms = e->times_in_ms ? e->decay_ms : DlsMilliseconds(e->decay_timecents + key * e->decay_tc_per_key);
             shape.attack_ms = attack_ms * kMsScale;
             const double real_decay_ms = decay_ms * kMsScale;
             shape.decay_db_per_ms = real_decay_ms > 0.0 ? kDlsFallDb / real_decay_ms : kAtOnce;
@@ -536,9 +646,21 @@ VolumeShape VolumeOf(const Instruments& instruments, const MacroVoice& voice, do
         shape.sustain_db = silent ? -kSilentCentibels / 10.0 : 20.0 * std::log10(e->sustain);
     }
 
+    // A fade-in at the voice's start becomes the attack. The longer of the two plays. A fade-in that plays starts after
+    // a delay (FadeInDelayMs).
+    const double fade_ms = std::max(voice.fade_in_ms - voice.sample_ms, 0.0);
+    const double played_attack_ms = std::max(attack_ms, fade_ms);
+    if (fade_ms > attack_ms)
+    {
+        const double delay_ms = FadeInDelayMs(instruments, voice, volume, attack_ms, decay_ms, fade_ms) * kMsScale;
+        shape.delay_ms = delay_ms >= kShortestDelayMs ? delay_ms : 0.0;
+    }
+    shape.attack_ms = played_attack_ms * kMsScale - shape.delay_ms;
+
     // The fades of a held note, with the envelope's decay, give the hold, the decay and the sustain (HeldShapeOf).
     const std::optional<HeldShape> held =
-        voice.held_ramps.empty() ? std::nullopt : HeldShapeOf(instruments, voice, volume, attack_ms, decay_ms);
+        voice.held_ramps.empty() ? std::nullopt
+                                 : HeldShapeOf(instruments, voice, volume, attack_ms, decay_ms, played_attack_ms);
     if (held)
     {
         shape.hold_ms = held->hold_ms * kMsScale;
@@ -652,6 +774,27 @@ std::optional<TremoloShape> TremoloOf(const MacroVoice& voice)
     return TremoloShape{1000.0 / (t.period_ms * kMsScale), range / 2.0, (range_db(t.full_mod_depth) - range) / 2.0};
 }
 
+// The depth in cents of `lfo`, an LFO on the pitch wheel of `voice`: its share of the wheel's ranges. MusyX swings the
+// pitch up by the upper range and down by the lower one. The files swing it by their mean either way.
+double WheelLfoCents(const MacroVoice& voice, const WheelLfo& lfo)
+{
+    return lfo.share * 100.0 * (voice.bend_up + voice.bend_down) / 2.0;
+}
+
+// The LFO on the pitch wheel of `voice` that a file plays, if any. A SoundFont plays it on the modulation LFO, which
+// a tremolo may hold. The LFO then plays only if it runs at the tremolo's rate from the note's start.
+std::optional<WheelLfo> PlayedWheelLfo(const MacroVoice& voice)
+{
+    const std::optional<TremoloShape> tremolo = TremoloOf(voice);
+    if (!voice.wheel_lfo ||
+        (tremolo && (voice.wheel_lfo->delay_ms > 0.0 || voice.wheel_lfo->period_ms != voice.tremolo->period_ms)))
+    {
+        return std::nullopt;
+    }
+
+    return voice.wheel_lfo;
+}
+
 // SoundFont's units.
 int FallTimecents(double db_per_ms)
 {
@@ -746,6 +889,21 @@ void AddPitchEnvelope(sf2::Zone& zone, const PitchEnvelope& envelope, int key)
     }
 }
 
+// Add `lfo`, an LFO on the pitch wheel of `voice`, to `zone`'s modulation LFO. A zone with a tremolo has the LFO's
+// rate already (PlayedWheelLfo). A SoundFont's LFOs are triangles. MusyX's are sines.
+void AddWheelLfo(sf2::Zone& zone, const MacroVoice& voice, const WheelLfo& lfo, bool tremolo)
+{
+    if (lfo.delay_ms > 0.0)
+    {
+        AddGenerator(zone, sf2::kDelayModLfo, ToTimecents(lfo.delay_ms * kMsScale, -12000, 5000));
+    }
+    if (!tremolo)
+    {
+        AddGenerator(zone, sf2::kFreqModLfo, sf2::LfoFrequency(1000.0 / (lfo.period_ms * kMsScale)));
+    }
+    AddGenerator(zone, sf2::kModLfoToPitch, Cents(WheelLfoCents(voice, lfo)));
+}
+
 // Add `tremolo` to `zone`'s modulation LFO. The mod wheel moves the tremolo's depth.
 void AddTremolo(sf2::Zone& zone, const TremoloShape& tremolo)
 {
@@ -779,6 +937,10 @@ sf2::Zone SoundFontZone(const Instruments& instruments, const Zone& z, const Mac
     values.keys = {z.low_key, z.high_key};
     values.attenuation = -200.0 * std::log10(gain) + quieter + (tremolo ? tremolo->half_range_db * 10.0 : 0.0);
     values.pan = static_cast<int>(std::lround(ZonePan(voice, z) * kPanRange));
+    if (shape.delay_ms > 0.0)
+    {
+        values.delay = ToTimecents(shape.delay_ms, -12000, kLongestTimecents);
+    }
     values.attack = ToTimecents(shape.attack_ms, -12000, kLongestTimecents);
     values.hold = ToTimecents(shape.hold_ms, -12000, kLongestHoldTimecents);
     values.decay = FallTimecents(shape.decay_db_per_ms);
@@ -821,6 +983,17 @@ sf2::Zone SoundFontZone(const Instruments& instruments, const Zone& z, const Mac
     if (tremolo)
     {
         AddTremolo(zone, *tremolo);
+    }
+    if (const std::optional<WheelLfo> lfo = PlayedWheelLfo(voice))
+    {
+        AddWheelLfo(zone, voice, *lfo, tremolo.has_value());
+    }
+
+    // A song's voice that doesn't follow the channel's pitch wheel takes a modulator of amount 0 in place of the global
+    // zone's modulator from the wheel. An effect's notes bend along their voices' pitch (PitchCurve).
+    if (!voice.follows_wheel && !z.effect)
+    {
+        zone.modulators.push_back({sf2::kSrcPitchWheel, sf2::kFineTune, 0, sf2::kSrcPitchWheelSensitivity});
     }
 
     return zone;
@@ -874,7 +1047,7 @@ void SoundFontBuilder::Add(uint32_t index, const std::string& name, const std::v
     inst.zones.push_back(GlobalZone());
     for (const Zone& z : zones)
     {
-        const MacroVoice& voice = instruments_.Macro(z.macro, z.part, z.from_ms);
+        const MacroVoice& voice = instruments_.Macro(z.macro, z.part, z.from_ms, z.controls);
         const Sample* sample = instruments_.SampleOf(voice);
         if (sample == nullptr)
         {
@@ -986,7 +1159,8 @@ std::string SfzRegion(const Instruments& instruments, const Zone& z, int low, in
     {
         return db_per_ms == kAtOnce ? 0.0 : kSfzFallDb / db_per_ms / 1000.0;
     };
-    s += seqlib::sfz::AmpEnvelopeOpcodes({.attack = slow.attack_ms / 1000.0,
+    s += seqlib::sfz::AmpEnvelopeOpcodes({.delay = slow.delay_ms / 1000.0,
+                                          .attack = slow.attack_ms / 1000.0,
                                           .hold = slow.hold_ms / 1000.0,
                                           .decay = fall_seconds(slow.decay_db_per_ms),
                                           .sustain = 100.0 * std::pow(10.0, slow.sustain_db / 20.0),
@@ -1008,6 +1182,19 @@ std::string SfzRegion(const Instruments& instruments, const Zone& z, int low, in
     if (tremolo)
     {
         s += SfzTremolo(*tremolo);
+    }
+    if (const std::optional<WheelLfo> lfo = PlayedWheelLfo(voice))
+    {
+        s += " lfo3_wave=1 lfo3_freq=" + Number(1000.0 / (lfo->period_ms * kMsScale), 6);
+        if (lfo->delay_ms > 0.0)
+        {
+            s += " lfo3_delay=" + Number(lfo->delay_ms * kMsScale / 1000.0, 6);
+        }
+        s += " lfo3_pitch=" + Number(WheelLfoCents(voice, *lfo), 3);
+    }
+    if (!voice.follows_wheel && !z.effect)
+    {
+        s += " bend_up=0 bend_down=0";
     }
 
     // A key group: a voice of the group stops the others.
@@ -1033,7 +1220,7 @@ std::string SfzGroup(const std::vector<Zone>& zones, Instruments& instruments, S
     std::string s = "<group>\n";
     for (const Zone& z : zones)
     {
-        const MacroVoice& voice = instruments.Macro(z.macro, z.part, z.from_ms);
+        const MacroVoice& voice = instruments.Macro(z.macro, z.part, z.from_ms, z.controls);
         const Sample* sample = instruments.SampleOf(voice);
         if (sample == nullptr)
         {
@@ -1098,14 +1285,22 @@ std::vector<std::vector<Zone>> PresetZones(const Performance& perf, Instruments&
     std::vector<std::vector<Zone>> zones(perf.presets.size());
     for (std::size_t i = 0; i < zones.size(); i++)
     {
-        const std::optional<uint16_t> object = PresetObject(instruments.Group(), perf.presets[i]);
+        // A variant preset plays its page with the channel's controllers at its values.
+        PresetKey key = perf.presets[i];
+        ChannelControls controls;
+        if (const Instruments::Variant* v = instruments.VariantOf(key.bank))
+        {
+            key = {.bank = v->bank, .program = v->program};
+            controls = v->controls;
+        }
+        const std::optional<uint16_t> object = PresetObject(instruments.Group(), key);
         if (!object)
         {
             warnings.push_back(names[i] + ": the song group has no page for it");
             continue;
         }
 
-        zones[i] = ZonesOf(instruments, *object);
+        zones[i] = ZonesOf(instruments, *object, controls);
     }
 
     return zones;
@@ -1119,7 +1314,7 @@ double LoudestZone(const std::vector<std::vector<Zone>>& zones, Instruments& ins
     {
         for (const Zone& z : preset)
         {
-            const MacroVoice& voice = instruments.Macro(z.macro, z.part, z.from_ms);
+            const MacroVoice& voice = instruments.Macro(z.macro, z.part, z.from_ms, z.controls);
             if (instruments.SampleOf(voice) != nullptr)
             {
                 loudest = std::max(loudest, ZoneGain(instruments, voice, z));

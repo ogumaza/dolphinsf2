@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
-// dolphinsf2: convert the music of GameCube games that use JAudio or MusyX to MIDI, SoundFont and SFZ. It converts the
-// files of Wii and Wii U games that use JAudio too.
+// dolphinsf2: convert the music of GameCube games that use JAudio, MusyX, the Nintendo 64's sound library or Square's
+// Red driver to MIDI, SoundFont and SFZ. It converts the files of Wii and Wii U games that use JAudio too.
 //
 //     dolphinsf2 [options] <start-up archive | disc image | main.dol> [...]
 //
@@ -33,9 +33,9 @@ namespace
 void Usage()
 {
     std::puts(
-        "dolphinsf2: convert the music of GameCube games that use JAudio or MusyX to\n"
-        "MIDI, SoundFont 2 and SFZ. It converts the files of Wii and Wii U games that\n"
-        "use JAudio too.\n"
+        "dolphinsf2: convert the music of GameCube games that use JAudio, MusyX, the\n"
+        "Nintendo 64's sound library or Square's Red driver to MIDI, SoundFont 2 and\n"
+        "SFZ. It converts the files of Wii and Wii U games that use JAudio too.\n"
         "\n"
         "usage: dolphinsf2 [options] <start-up archive | disc image | main.dol> [...]\n"
         "\n"
@@ -54,7 +54,8 @@ void Usage()
         "  --only REGEX   convert matching sequence names (for example --only BGM)\n"
         "  --loops N      repeat the main loop N times (default 1)\n"
         "                 MIDI loop markers are included for players that support them\n"
-        "  --seed N       initial game random state (default 0; JAudio only)\n"
+        "  --seed N       initial game random state (default 0; JAudio2 games,\n"
+        "                 Luigi's Mansion and the Animal Crossing games)\n"
         "  --port N=V     set port N (0-15) of each sequence to V before it starts;\n"
         "                 repeat for more ports (JAudio only)\n"
         "  --voices N     drop the notes that the game drops for lack of a voice,\n"

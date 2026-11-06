@@ -110,17 +110,17 @@ struct SoundTestSong
 
 // The songs that the sound test lists. They keep the sound test's order. `module` is the file of the code module that
 // holds the sound test: `count` entries from offset `offset`. `module_path` is that file's path on the disc. The
-// game's message file `messages` holds the names. `messages_path` is its path. Throw FormatError if an entry or a name
-// lies outside its file.
+// game's message file `messages` holds the names. `messages_path` is its path. With `japanese`, the messages take the
+// glyphs of the game's Japanese font. Throw FormatError if an entry or a name lies outside its file.
 std::vector<SoundTestSong> ReadSoundTest(std::span<const uint8_t> module, const std::string& module_path,
                                          uint32_t offset, uint32_t count, std::span<const uint8_t> messages,
-                                         const std::string& messages_path);
+                                         const std::string& messages_path, bool japanese);
 
 // The names of the effects that a list in the form of the sound test names, by the effects' numbers in the sound
 // manager's table of effects. The game's list of voices is one. Of two entries for one effect, the later counts. The
 // arguments are those of ReadSoundTest. Throw FormatError if an entry or a name lies outside its file.
 std::map<uint32_t, std::string> ReadSoundTestEffects(std::span<const uint8_t> module, const std::string& module_path,
                                                      uint32_t offset, uint32_t count, std::span<const uint8_t> messages,
-                                                     const std::string& messages_path);
+                                                     const std::string& messages_path, bool japanese);
 
 } // namespace dolphinsf2::musyx

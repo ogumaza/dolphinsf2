@@ -48,11 +48,18 @@ struct EffectNote
     double start_ms = 0.0;
     uint8_t key = 60;
     std::vector<KeyVoice> voices;
+    // The note's zones add this to their voices' pans, and its CC10 takes it away. CC10 moves a pan by at most 64
+    // either way. The shift keeps CC10 within 0 to 127 while the voices' pans move (PanCurve).
+    double pan_shift = 0.0;
 };
 
-// The notes that play `effect` with the voices of `instruments` (EffectVoicesOf), in order: one for each time at which
-// voices start their samples, at the key of the first such voice. A MIDI file has 15 channels for them: channel 10
-// plays drums. Add to `approximations` what the notes leave out.
+// The pan of the channels of `effect`: the effect's pan, moved by the game's pan controller.
+int EffectPan(const GameEffect& effect);
+
+// The notes that play `effect` with the voices of `instruments` (EffectVoicesOf), in order: one for each set of voices
+// that start their samples at the same time and whose pitches and pans follow the same curves, at the key of the first
+// such voice. A MIDI file has 15 channels for them: channel 10 plays drums. Add to `approximations` what the notes
+// leave out.
 std::vector<EffectNote> EffectNotes(const GameEffect& effect, Instruments& instruments,
                                     std::set<std::string>& approximations);
 

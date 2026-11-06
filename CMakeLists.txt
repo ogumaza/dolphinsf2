@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.20)
 # the macOS app. A release changes it here and adds its notes in docs/release-notes/.
 # C is for the compression libraries below. A build that doesn't find them installed compiles them from their C
 # sources.
-project(dolphinsf2 VERSION 1.6.0 LANGUAGES C CXX)
+project(dolphinsf2 VERSION 1.7.0 LANGUAGES C CXX)
 
 # The libraries that dolphinsf2 shares with the other converters and the PSF players: seqlib for MIDI, SoundFont 2
 # and SFZ, xsflib for the common code and the build's templates, and ntdlib for Nintendo's formats. All three are
@@ -29,12 +29,19 @@ xsflib_add_libraries(seqlib xsflib ntdlib)
 add_library(dolphinsf2_core STATIC
   src/disc.cpp
   src/input.cpp
+  src/musyx_catalogue.cpp
   src/musyx_game.cpp
   src/musyx_msm.cpp
   src/musyx_puzzle.cpp
   src/musyx_voices.cpp
   src/musyx_player.cpp
   src/musyx_convert.cpp
+  src/fade_fit.cpp
+  src/n64_sound.cpp
+  src/n64_player.cpp
+  src/n64_convert.cpp
+  src/n64_game.cpp
+  src/red_music.cpp
   src/rel_module.cpp
   src/yay0.cpp)
 target_include_directories(dolphinsf2_core PUBLIC src)

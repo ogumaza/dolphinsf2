@@ -32,6 +32,7 @@
 #include "xsflib/bytes.h"
 #include "xsflib/sha1.h"
 
+#include "musyx_catalogue.h"
 #include "musyx_msm.h"
 #include "musyx_puzzle.h"
 
@@ -42,7 +43,8 @@ namespace dolphinsf2::musyx
 // test that lists the songs. `sound_test_entries` entries start at offset `sound_test` of the code module's file
 // `module`. The message file `messages` holds the songs' names. Every kind of rules gives the address of MusyX's volume
 // table in main.dol and the game's master volume for music. The module's list of `voice_entries` voices at `voices`
-// names some of the effects (ReadSoundTestEffects).
+// names some of the effects (ReadSoundTestEffects). With `japanese_messages`, the messages take the game's Japanese
+// font.
 struct SoundManagerRules
 {
     std::string_view dol_sha1;
@@ -55,6 +57,7 @@ struct SoundManagerRules
     uint8_t master_volume = 127;
     uint32_t voices = 0;
     uint32_t voice_entries = 0;
+    bool japanese_messages = false;
 };
 
 // What the code of a game that keeps its music in FSYS archives says about it. The module `module` in the archive
@@ -268,9 +271,28 @@ constexpr std::array<Rules, 2> kGames{{
 // Every volume group plays at full volume. The game plays an effect through msmSePlay (0x80119a94). That function
 // starts the effect through sndFXStartParaInfo with a volume and a pan of 0xff and studio 0. It passes the settings of
 // the effect's entry as controllers (MsmEffect). It then sets the effect's surround pan.
-constexpr std::array<SoundManagerRules, 1> kSoundManagerGames{{
+//
+// Mario Party 4 (USA, disc version 0). Its main.dol differs from disc version 1's only in three of the debugger's
+// functions. The options module, the messages and the sound manager's file are disc version 1's byte for byte.
+//
+// Mario Party 4 (Europe, disc versions 0 and 2). Both discs hold the same main.dol. Its sound manager and MusyX are the
+// American code at other addresses. msmSePlay is at 0x801198c4, and the volume table at 0x8015cec0. The options module
+// holds the American sound test and list of voices 0x68 bytes lower. The English messages give the American names,
+// apart from five. The sound manager's file is the American one byte for byte.
+//
+// Mario Party 4 (Japan). Its sound manager and MusyX are the American code at other addresses. msmSePlay is at
+// 0x80119684, and the volume table at 0x8013f7c0. The options module holds the American sound test and list of voices
+// at the American offsets. The messages name the sounds in the game's Japanese font. The sound manager's file leaves
+// out two macros and two samples of group 0x5A. That group holds se-2066 to se-2071.
+constexpr std::array<SoundManagerRules, 4> kSoundManagerGames{{
     {"64b42eac733a57a53d2ce25e7e47f54fc1e31915", "sound/mpgcsnd.msm", "dll/option.rel", 0xac58, 140, "mess/board_e.dat",
      0x8013fb20, 127, 0xb518, 123},
+    {"ff8d894776d37167e454ae3f0c9e644407c1e6b1", "sound/mpgcsnd.msm", "dll/option.rel", 0xac58, 140, "mess/board_e.dat",
+     0x8013fb20, 127, 0xb518, 123},
+    {"65ef91650e9201047f50a3c39c7693a21fff2b29", "sound/mpgcsnd.msm", "dll/option.rel", 0xabf0, 140, "mess/board_e.dat",
+     0x8015cec0, 127, 0xb4b0, 123},
+    {"abe951fa239e7cb5de67e1ac091cfbc14010d6e0", "sound/mpgcsnd.msm", "dll/option.rel", 0xac58, 140, "mess/board.dat",
+     0x8013f7c0, 127, 0xb518, 123, true},
 }};
 
 // The games that keep their music in FSYS archives that dolphinsf2 converts.
@@ -917,6 +939,13 @@ std::optional<Game> Game::Open(std::shared_ptr<ntdlib::disc::GameFiles> disc)
         return game;
     }
 
+    if (const CatalogueRules* rules = FindCatalogueGame(sha1))
+    {
+        game.ReadVolumes(rules->volume_table);
+        game.ReadCatalogueGame(*rules);
+        return game;
+    }
+
     const Rules* rules = RulesOf(kGames, sha1);
     if (rules == nullptr)
     {
@@ -983,8 +1012,8 @@ void Game::ReadSoundManager(const SoundManagerRules& rules)
 
     // The index in groups_ of each song group, by the group's MusyX ID. Each group is read once.
     std::map<uint16_t, std::size_t> indexes;
-    for (const SoundTestSong& listed :
-         ReadSoundTest(module, rules.module, rules.sound_test, rules.sound_test_entries, messages, rules.messages))
+    for (const SoundTestSong& listed : ReadSoundTest(module, rules.module, rules.sound_test, rules.sound_test_entries,
+                                                     messages, rules.messages, rules.japanese_messages))
     {
         const MsmSong song = sound_file.Song(listed.number);
         const auto [found, added] = indexes.try_emplace(song.group_id, groups_.size());
@@ -1001,8 +1030,8 @@ void Game::ReadSoundManager(const SoundManagerRules& rules)
 
     // The effects in the order of their table, each named after its number and its name in the list of voices. Each
     // effects group is read once. MusyX starts no effect that its group lacks.
-    const std::map<uint32_t, std::string> names =
-        ReadSoundTestEffects(module, rules.module, rules.voices, rules.voice_entries, messages, rules.messages);
+    const std::map<uint32_t, std::string> names = ReadSoundTestEffects(
+        module, rules.module, rules.voices, rules.voice_entries, messages, rules.messages, rules.japanese_messages);
     std::map<uint16_t, std::size_t> effect_groups;
     for (const MsmEffect& listed : sound_file.Effects())
     {
@@ -1254,6 +1283,15 @@ void Game::ReadPuzzleGame(const PuzzleRules& rules)
 {
     PuzzleMusic music =
         ReadPuzzleCollection([this](const std::string& path) { return ReadFile(path); }, rules.master_volume);
+    groups_ = std::move(music.groups);
+    songs_ = std::move(music.songs);
+    song_data_ = std::move(music.song_data);
+    effects_ = std::move(music.effects);
+}
+
+void Game::ReadCatalogueGame(const CatalogueRules& rules)
+{
+    CatalogueMusic music = BuildMusic(rules.gather(*disc_), rules);
     groups_ = std::move(music.groups);
     songs_ = std::move(music.songs);
     song_data_ = std::move(music.song_data);

@@ -13,7 +13,6 @@
 #include <ios>
 #include <memory>
 #include <optional>
-#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -24,35 +23,41 @@
 #include "ntdlib/sequence_export/frame.h"
 #include "xsflib/ascii.h"
 #include "xsflib/files.h"
-#include "xsflib/sha1.h"
 
 #include "disc.h"
 #include "jaudio.h"
 #include "musyx_convert.h"
 #include "musyx_game.h"
+#include "n64_game.h"
+#include "red_music.h"
 
 namespace dolphinsf2
 {
 namespace
 {
 
-// The games of the first JAudio whose sound effects dolphinsf2 converts, by the SHA-1s of the start-up archives of
-// their USA releases (GameOptions::jaudio1_effects). Each of these games plays its effects in its effects sequence:
-// the first sequence of its sound table, or the one that ntdlib's rules for the game name. dolphinsf2 leaves out the
-// effects of the other games.
-constexpr std::array<std::string_view, 5> kEffectsGames{
+// The games of the first JAudio whose sound effects dolphinsf2 converts, by the SHA-1s of their start-up archives
+// (GameOptions::jaudio1_effects). The European releases of The Wind Waker, The Wind Waker HD and Pac-Man Vs. and the
+// Japanese release of Pac-Man Vs. have the USA releases' archives. Each of these games plays its effects in its
+// effects sequence: the first sequence of its sound table, or the one that ntdlib's rules for the game name.
+// dolphinsf2 leaves out the effects of the other games.
+constexpr std::array<std::string_view, 10> kEffectsGames{
     "65ea70655099a196e0707bf4e4ce61e7818553d9", // The Wind Waker
+    "0a0f93a5bb97313d895e0a5a16604ad77f567547", // The Wind Waker, Japan
     "c66c0103a5c7c1292b5fc6c3371ed1458035cde7", // The Wind Waker HD
+    "aa3077a9dafc178e46b80b4e5d975550cb28c517", // The Wind Waker HD, Japan
+    "4a60396b9c35333f3083848be1f49c82bf9ba4df", // Luigi's Mansion
     "7436b12c7470a2ed14f865e0a6aa96ccfa1af758", // Pac-Man Vs.
     "a8b63d2f333c34aaf9cb859f37f23011149af917", // Pikmin 2
     "6747c3c7bce964bc62f817e1c8c32711c905c4c3", // Pikmin 2 on the Wii
+    "00c63687e6963ad89e1d86f02070e1f552623632", // Super Mario Sunshine
+    "9ae6b40b8e9eacfda6ed0b5d59ff1e680373a018", // Pikmin's bank file
 };
 
-// The options for the JAudio game whose start-up archive is `archive`. A game of kEffectsGames lists its effects too.
-GameOptions OptionsFor(std::span<const uint8_t> archive)
+// Whether `game` is one of kEffectsGames.
+bool ListsEffects(const Game& game)
 {
-    const std::string sha1 = xsflib::Sha1::Hex(xsflib::Sha1::Of(archive));
-    return {.jaudio1_effects = std::find(kEffectsGames.begin(), kEffectsGames.end(), sha1) != kEffectsGames.end()};
+    return std::find(kEffectsGames.begin(), kEffectsGames.end(), game.ArchiveSha1()) != kEffectsGames.end();
 }
 
 // The JAudio game among the files of `disc`, or nothing if the disc has no start-up archive. Throw FormatError if the
@@ -66,10 +71,7 @@ std::optional<Game> JaudioGameOn(const std::shared_ptr<ntdlib::disc::GameFiles>&
     }
 
     // FromDiscFiles has read the archive already. A game of kEffectsGames opens a second time, with its effects.
-    std::vector<uint8_t> archive;
-    disc->read_file(game->DiscPath(), archive);
-    const GameOptions options = OptionsFor(archive);
-    return options.jaudio1_effects ? Game::FromDiscFiles(disc, kProgram, options) : std::move(game);
+    return ListsEffects(*game) ? Game::FromDiscFiles(disc, kProgram, {.jaudio1_effects = true}) : std::move(game);
 }
 
 // Whether the disc reader takes the file at `path` for a GameCube disc image.
@@ -114,17 +116,14 @@ Input Input::Open(const std::filesystem::path& path)
         return OpenDisc(path);
     }
 
-    // A start-up archive: JAudio2's BAA, or JAudio1's AAF.
-    if (IsStartUpArchive(header))
+    // A start-up archive: JAudio2's BAA, or JAudio1's AAF, compressed with Yaz0 or not. A game of kEffectsGames opens
+    // a second time, with its effects.
+    if (IsStartUpArchiveFile(path))
     {
-        std::vector<uint8_t> archive;
-        if (!xsflib::ReadFile(path, archive))
-        {
-            throw FormatError("can't read it");
-        }
-
+        Game game = Game::FromFolder(path, kProgram);
         Input input;
-        input.jaudio_ = std::make_unique<GameInput>(Game::FromFolder(path, kProgram, OptionsFor(archive)));
+        input.jaudio_ = std::make_unique<GameInput>(
+            ListsEffects(game) ? Game::FromFolder(path, kProgram, {.jaudio1_effects = true}) : std::move(game));
 
         return input;
     }
@@ -159,6 +158,22 @@ std::vector<ntdlib::sequence_export::Sequence> Input::Sequences() const
             sequences.push_back({i, sounds[i].name});
         }
     }
+    else if (n64_)
+    {
+        const std::vector<n64::Piece>& pieces = n64_->Pieces();
+        for (std::size_t i = 0; i < pieces.size(); i++)
+        {
+            sequences.push_back({i, pieces[i].name});
+        }
+    }
+    else if (red_)
+    {
+        const std::vector<std::string>& pieces = red_->Pieces();
+        for (std::size_t i = 0; i < pieces.size(); i++)
+        {
+            sequences.push_back({i, pieces[i]});
+        }
+    }
     else
     {
         // The effects follow the songs (musyx::GameInput::Convert).
@@ -180,26 +195,46 @@ std::vector<ntdlib::sequence_export::Sequence> Input::Sequences() const
 
 Conversion Input::Convert(std::size_t index, const PerformOptions& perform)
 {
-    return jaudio_ ? jaudio_->Convert(index, perform, kProgram) : musyx_->Convert(index, perform);
+    if (jaudio_)
+    {
+        return jaudio_->Convert(index, perform, kProgram);
+    }
+
+    if (red_)
+    {
+        return red_->Convert(index, perform);
+    }
+
+    return n64_ ? n64_->Convert(index, perform) : musyx_->Convert(index, perform);
 }
 
 Input Input::OpenDisc(const std::filesystem::path& path)
 {
+    // Pikmin's sequence index and the MusyX games' tables are in main.dol.
     Input input;
-    if (std::optional<Game> game = JaudioGameOn(LoadDisc(path, false)))
+    const std::shared_ptr<ntdlib::disc::GameFiles> disc = LoadDisc(path, true);
+    if (std::optional<Game> game = JaudioGameOn(disc))
     {
         input.jaudio_ = std::make_unique<GameInput>(std::move(*game));
         return input;
     }
-    if (std::optional<musyx::Game> game = musyx::Game::Open(LoadDisc(path, true)))
+    if (std::optional<musyx::Game> game = musyx::Game::Open(disc))
     {
         input.musyx_ = std::make_unique<musyx::GameInput>(std::move(*game));
         return input;
     }
+    if ((input.n64_ = n64::GameInput::Open(disc)))
+    {
+        return input;
+    }
+    if ((input.red_ = red::GameInput::Open(disc)))
+    {
+        return input;
+    }
 
     throw FormatError(
-        "no JAudio start-up archive (.baa or .aaf) on the disc, and not one of the MusyX games that dolphinsf2 "
-        "converts");
+        "no JAudio start-up archive (.baa or .aaf) or Red music on the disc, and not one of the MusyX games or the "
+        "games with the Nintendo 64's sound library that dolphinsf2 converts");
 }
 
 } // namespace dolphinsf2
