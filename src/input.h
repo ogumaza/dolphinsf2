@@ -39,7 +39,7 @@ public:
     std::vector<ntdlib::sequence_export::Sequence> Sequences() const;
 
     // Convert sequence `index` of Sequences, with the errors of the banks or the instruments since the last conversion
-    // as warnings.
+    // as warnings. When the conversion fails, those errors follow its message.
     Conversion Convert(std::size_t index, const PerformOptions& perform);
 
 private:

@@ -53,7 +53,8 @@ public:
 
     // Convert the game's song `index`, with the instruments' errors since the last conversion as warnings. An index
     // past the songs converts an effect: index 0 of Game::Effects follows the last song. Throw FormatError if the song
-    // can't be read or played.
+    // can't be read or played. When the instruments have recorded errors since the last conversion, the error message
+    // ends with "; " and those errors.
     Conversion Convert(std::size_t index, const PerformOptions& perform);
 
 private:

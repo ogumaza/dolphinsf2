@@ -2,32 +2,27 @@
 
 // The music and sound effects of a GameCube game that plays them through Factor 5's MusyX: the songs and effects that
 // the game's code lists or starts, and the groups that play them (GameSong, GameEffect). ntdlib's musyx module reads
-// the files. dolphinsf2 recognizes a game by the SHA-1 of its main.dol. It converts two games by Camelot,
-// Mario Party 4, Pokémon Colosseum, WarioWare, Inc.: Mega Party Game$!, the NDDEMO disc and Nintendo Puzzle Collection.
-// Camelot names each file on its discs with three capital letters, a path of three levels (PathOf). One song group
-// plays all of a Camelot game's songs. Mario Party 4 keeps its groups and its songs in the file of Hudson's sound
-// manager (musyx_msm.h). There each song names its group. Pokémon Colosseum keeps its songs, and its song groups'
-// projects, pools and sample directories, in FSYS archives (ntdlib/disc/fsys.h). There the code's table gives each
-// song's group. WarioWare keeps its groups in one MusyX project and its songs in one file. Its sound room gives each
-// song's group (ReadSoundRoom). The NDDEMO disc's code lists the paths of its songs' files (ReadSongPaths). One song
-// group plays them all. Nintendo Puzzle Collection keeps its music in the modules of its code. Ten more games keep
-// their sounds in layouts of their own: Star Fox Adventures, Paper Mario: The Thousand-Year Door, Pokémon Channel, the
-// two Rogue Squadron games, Resident Evil, Resident Evil Zero, Tales of Symphonia and the two Metroid Prime games. A
-// catalogue lists each one's sounds and the groups that each sound pushes (musyx_catalogue.h).
+// the files. dolphinsf2 recognizes a game by the SHA-1 of its main.dol. It converts Camelot's Mario Golf: Toadstool
+// Tour and Mario Power Tennis, Mario Party 4, and WarioWare, Inc.: Mega Party Game$!. Camelot names each file on its
+// discs with three capital letters, a path of three levels (PathOf). One song group plays all of a Camelot game's
+// songs. Mario Party 4 keeps its groups and its songs in the file of Hudson's sound manager (ntdlib/musyx/msm.h). There
+// each song names its group. WarioWare keeps its groups in one MusyX project and its songs in one file. Its sound room
+// gives each song's group (ReadSoundRoom). Thirteen more games keep their sounds in layouts of their own: Star Fox
+// Adventures, Paper Mario: The Thousand-Year Door, Pokémon Channel, Pokémon Colosseum, the two Rogue Squadron games,
+// Resident Evil, Resident Evil Zero, Tales of Symphonia, the two Metroid Prime games, Nintendo Puzzle Collection and
+// the NDDEMO disc. A catalogue lists each one's sounds and the groups that each sound pushes (musyx_catalogue.h).
 
 #pragma once
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <vector>
 
-#include "ntdlib/disc/fsys.h"
 #include "ntdlib/disc/game.h"
 #include "ntdlib/dol.h"
 #include "ntdlib/musyx/pool.h"
@@ -83,6 +78,10 @@ struct GameSong
     double controls_ms = 0.0;
 };
 
+// The highest value of the pitch wheel and the other 14-bit controllers of MusyX, and the centre of the wheel.
+constexpr int kWheelHighest = 0x3fff;
+constexpr int kWheelCentre = 0x2000;
+
 // A sound effect that the game's code starts. MusyX plays an effect as one note of its row in its group's table of
 // effects: the row's object at the row's key (ntdlib::musyx::Effect). The game passes a volume and a pan to
 // sndFXStartEx. MusyX takes the row's volume or pan for a value of 0xFF. The volume is the note's velocity. The game
@@ -95,8 +94,8 @@ struct GameEffect
     std::string name;
     std::size_t group = 0; // the group whose pool and samples play the effect: its index in Game::Groups
     ntdlib::musyx::Effect row;
-    std::optional<uint8_t> volume; // the volume that the game starts the effect at, or nothing for the row's
-    std::optional<uint8_t> pan;    // the pan, 0 to 127, or nothing for the row's
+    std::optional<uint8_t> volume; // the volume that the game starts the effect at, or nothing or 0xFF for the row's
+    std::optional<uint8_t> pan;    // the pan, 0 to 127, or nothing or 0xFF for the row's
     uint8_t group_volume = 127;    // the volume of the effect's volume group, in 127ths
     uint8_t master_volume = 127;   // the game's master volume for effects, in 127ths
 
@@ -107,25 +106,11 @@ struct GameEffect
     uint8_t pan_controller = 64;     // CC10
     uint8_t reverb = 0;              // CC91, the send to aux A
     uint8_t chorus = 0;              // CC93, the send to aux B
-    uint16_t pitch_wheel = 0x2000;
+    uint16_t pitch_wheel = kWheelCentre;
 };
-
-// The effects that the effects groups of `groups`, a project's groups, list, in the project's order: the rows that
-// let MusyX start the effect. MusyX never starts an effect whose row allows no voices. Each effect plays in the group
-// whose index in Game::Groups is `group`, and takes the name that `name` gives its ID.
-std::vector<GameEffect> ProjectEffects(const std::vector<ntdlib::musyx::Group>& groups, std::size_t group,
-                                       const std::function<std::string(uint16_t id)>& name);
 
 // The row of the effect `id` in `group`'s table of effects. Null if the table lacks it or its row allows no voices.
 const ntdlib::musyx::Effect* FindEffect(const ntdlib::musyx::Group& group, uint16_t id);
-
-// The name of an effect that nothing names: `prefix`, a hyphen and the effect's ID in four digits, such as
-// "snd_se-0857".
-std::string EffectName(const std::string& prefix, uint16_t id);
-
-// The paths that a table in `dol` lists: `count` words at `address`, each the address of a path. Throw FormatError if
-// `dol` has no data where a word or a path should be.
-std::vector<std::string> ReadSongPaths(const ntdlib::Dol& dol, uint32_t address, uint32_t count);
 
 // A list of songs in main.dol: `count` entries of `entry_size` bytes at `address`. An entry ends with three words: the
 // song's file number, its ID, and its volume in the top byte. Before them, the entry holds the song's name, or the
@@ -145,41 +130,6 @@ std::string PathOf(uint32_t number);
 // The songs of `list` in `dol`, the game's main.dol. Throw FormatError if `dol` has no data where an entry or a name
 // should be.
 std::vector<GameSong> ReadSongList(const ntdlib::Dol& dol, const SongList& list);
-
-// A song that a game's table of sounds lists: its entry's index in the table, the MusyX ID of its song group, its song
-// ID and the FSYS ID of its file.
-struct TableSong
-{
-    uint32_t sound = 0;
-    uint16_t group = 0;
-    uint16_t id = 0;
-    uint32_t file = 0;
-};
-
-// The songs that the table of `sound_count` sounds at offset `sounds` of `module` lists, in the table's order. The
-// table of `file_count` files at offset `files` gives their files. A sound's entry has 12 bytes. Its first byte has bit
-// 7 set for a sound effect. A song's entry gives its song group at +1, its file's number in the table of files at +3
-// and its song ID in a big-endian half at +4. The byte at +2 picks the reverb that the game plays the song with. A
-// file's entry has 8 bytes. Its first word is the file's FSYS ID. An ID of 0 names no file, and the list leaves out a
-// song with such a file. `name` names the module in the errors. Throw FormatError if a table runs past the module's
-// end, or if a song names a file past the table of files.
-std::vector<TableSong> ReadSoundTable(std::span<const uint8_t> module, const std::string& name, uint32_t sounds,
-                                      uint32_t sound_count, uint32_t files, uint32_t file_count);
-
-// A sound effect that a game's table of sounds lists: its entry's index in the table, the MusyX ID of its effects group
-// and the effect's ID.
-struct TableEffect
-{
-    uint32_t sound = 0;
-    uint16_t group = 0;
-    uint16_t id = 0;
-};
-
-// The effects that the table of `sound_count` sounds at offset `sounds` of `module` lists, in the table's order (see
-// ReadSoundTable). An effect's entry gives its effects group at +1 and its ID in a big-endian half at +4. `name` names
-// the module in the errors. Throw FormatError if the table runs past the module's end.
-std::vector<TableEffect> ReadEffectTable(std::span<const uint8_t> module, const std::string& name, uint32_t sounds,
-                                         uint32_t sound_count);
 
 // A song that a game's sound room lists: its name, its number, the ID of the song group that plays it, and its volume.
 // The number is the song's ID in the group's MIDI setups and its place in the file of songs.
@@ -254,6 +204,10 @@ const ntdlib::musyx::Group* FindGroup(const std::vector<ntdlib::musyx::Group>& g
 void AddMissingSamples(SongGroup& group, const std::vector<ntdlib::musyx::SampleInfo>& samples,
                        std::span<const uint8_t> data);
 
+// Give `pool` the objects of `other` that it doesn't have. An object of `pool` keeps its place over an object of
+// `other` with the same ID.
+void MergePool(ntdlib::musyx::Pool& pool, const ntdlib::musyx::Pool& other);
+
 // Give `group` the objects of `pushed` that it lacks. Its voices then find the samples that it lacks in `pushed` too
 // (SongGroup::pushed). MusyX finds a voice's objects and samples in every group that the game has pushed. The group's
 // objects and samples come first, then those of each group of `pushed` in turn.
@@ -262,17 +216,8 @@ void AddPushedGroups(SongGroup& group, const std::vector<std::shared_ptr<const S
 // What the code of a game with Hudson's sound manager says about its music (see musyx_game.cpp).
 struct SoundManagerRules;
 
-// What the code of a game that keeps its music in FSYS archives says about it (see musyx_game.cpp).
-struct FsysRules;
-
 // What the code of a game with Intelligent Systems' sound layer says about its music (see musyx_game.cpp).
 struct SoundRoomRules;
-
-// What the code of a game that lists the paths of its songs' files says about its music (see musyx_game.cpp).
-struct PathTableRules;
-
-// What the code of Nintendo Puzzle Collection says about its music (see musyx_game.cpp).
-struct PuzzleRules;
 
 // What the code of a game by Camelot says about its effects (see musyx_game.cpp).
 struct CamelotEffectRules;
@@ -280,6 +225,7 @@ struct CamelotEffectRules;
 // What the code of a game with a catalogue of its sounds says about how it plays them (see musyx_catalogue.h).
 struct CatalogueRules;
 
+// A MusyX game: its songs, its effects, the groups that play them and its volume table. The game's code gives them.
 class Game
 {
 public:
@@ -323,26 +269,9 @@ private:
     // FormatError if the files can't be read.
     void ReadSoundManager(const SoundManagerRules& rules);
 
-    // Read the song groups and the songs that the code's table lists in a game whose music lies in FSYS archives.
-    // Throw FormatError if the files or the tables can't be read.
-    void ReadFsysGame(const FsysRules& rules);
-
-    // Read the effects that the table in `module` lists in such a game, and their groups. `common` holds the files of
-    // the archive that holds the module. Throw FormatError if the files or the table can't be read.
-    void ReadFsysEffects(const FsysRules& rules, const std::vector<ntdlib::disc::FsysFile>& common,
-                         std::span<const uint8_t> module);
-
     // Read the song groups and the songs that the sound room of a game with Intelligent Systems' sound layer lists.
     // Throw FormatError if the files or the code's tables can't be read.
     void ReadSoundRoomGame(const SoundRoomRules& rules);
-
-    // Read the song group and the songs of a game whose code lists the paths of its songs' files. Throw FormatError if
-    // the project's files or the code's table can't be read.
-    void ReadPathTableGame(const PathTableRules& rules);
-
-    // Read the song groups and the songs of Nintendo Puzzle Collection's modules (musyx_puzzle.h). Throw FormatError if
-    // a module or a file of sound data can't be read.
-    void ReadPuzzleGame(const PuzzleRules& rules);
 
     // Read the song groups, the songs and the effects of a game with a catalogue of its sounds (musyx_catalogue.h).
     // Throw FormatError if a file is missing or damaged.

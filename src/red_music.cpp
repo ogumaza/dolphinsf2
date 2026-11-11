@@ -15,7 +15,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -30,17 +29,20 @@
 #include <utility>
 #include <vector>
 
+#include "ntdlib/disc/game.h"
 #include "ntdlib/sequence_export/conversion.h"
-#include "ntdlib/wave/decode.h"
 #include "seqlib/midi/recorder.h"
 #include "seqlib/sf2/presets.h"
 #include "seqlib/sf2/soundfont.h"
 #include "seqlib/sfz/opcodes.h"
 #include "seqlib/sfz/text.h"
-#include "seqlib/sfz/track_file.h"
+#include "xsflib/ascii.h"
 #include "xsflib/bytes.h"
 
 #include "fade_fit.h"
+#include "instrument_files.h"
+#include "output_units.h"
+#include "red_bank.h"
 
 namespace dolphinsf2::red
 {
@@ -61,26 +63,6 @@ constexpr std::string_view kWaveFolder = "dvd/sound/wave/";
 // is in little-endian order.
 constexpr std::size_t kPieceHeader = 0x20;
 
-// A bank's header: the bytes of its samples at 4, its instruments at 8 and a table of their first regions at 0x20. The
-// samples end the file.
-constexpr std::size_t kBankTable = 0x20;
-constexpr std::size_t kRegionSize = 0x60;
-
-// A region's flags: the next record holds the right side of a stereo wave, the instrument's last region, and that the
-// instrument's first region starts a list of splits. Only the first region's flags decide that (_WaveSplitSelect).
-constexpr uint32_t kRegionStereo = 0x1;
-constexpr uint32_t kRegionLast = 0x200;
-constexpr uint32_t kRegionSplits = 0x30000;
-
-// A region's fixed pan: its byte at 0x1b holds this flag and the pan.
-constexpr uint8_t kFixedPan = 0x80;
-
-// The rate of the DSP's mixing in hertz, and the samples of one of AX's frames. A wave plays at this rate at a ratio of
-// 1, on key 60 with a pitch of 0.
-constexpr double kDspRate = 32028.5;
-constexpr double kFrameSamples = 160.0;
-constexpr double kFramesPerSecond = kDspRate / kFrameSamples;
-
 // The driver runs a tick each time that the tempos of the frames add up to this value. The pieces have 48 ticks a beat.
 constexpr double kTempoPerTick = 250.0;
 constexpr double kTicksPerBeat = 48.0;
@@ -88,19 +70,8 @@ constexpr double kTicksPerBeat = 48.0;
 // The key at which a wave plays at its pitch.
 constexpr uint8_t kRootKey = 60;
 
-// The driver's scale of a level: a value of x gives (x + 1) / 128. Its centre pan and its highest pan.
-constexpr double kLevelScale = 128.0;
-constexpr int kCentre = 64;
-constexpr int kHighestPan = 127;
-
-// The longest performance, in seconds: a piece that hasn't repeated or ended by then stops there.
-constexpr double kLimitSeconds = 15.0 * 60.0;
-
 // The most channels of a MIDI file.
 constexpr std::size_t kChannels = 16;
-
-// The lowest volume that an SFZ region takes, in decibels.
-constexpr double kSfzLowestVolumeDb = -144.0;
 
 // The amplitude of a side at `pan`, from 0 at the side itself to 127 at the other side: the driver's table
 // (t_PanningData). The table runs in two lines, through 182/256 at the pan 64.
@@ -123,228 +94,10 @@ double LevelOf(int value)
     return value == 0 ? 0.0 : (value + 1) / kLevelScale;
 }
 
-// A region of a bank's instrument: the keys that it plays, the wave's place in the bank and how it plays.
-struct Region
+} // namespace
+
+namespace
 {
-    uint32_t sample = 0; // the byte offset of its wave in the bank's samples
-    int32_t loop = -1;   // the nibble at which the loop starts, or less than 0 for no loop
-    uint32_t end = 0;    // the last nibble
-    int pitch = 0;       // in 1/256 of a semitone
-    uint8_t low = 0;
-    uint8_t high = 127;
-    uint8_t volume = 127;
-    int pan = -1; // 0 to 127, or -1 for the track's pan
-    int16_t yn1 = 0;
-    int16_t yn2 = 0;
-    std::array<uint16_t, 4> times{};
-    std::array<uint8_t, 4> levels{};
-    std::array<int16_t, 16> coefs{};
-};
-
-// The sample of a nibble in DSP-ADPCM: a frame holds 16 nibbles, and its first 2 hold the frame's header.
-uint32_t SampleOfNibble(uint32_t nibble)
-{
-    return nibble / 16 * 14 + std::max(nibble % 16, 2u) - 2;
-}
-
-// A bank's instruments, and its waves once they're decoded.
-class Bank
-{
-public:
-    Bank(int number, std::vector<uint8_t> data) : number_(number), data_(std::move(data))
-    {
-        Read();
-    }
-
-    // The regions of instrument `instrument`, or nothing if the bank has no such instrument.
-    std::span<const Region> Regions(std::size_t instrument) const
-    {
-        return instrument < instruments_.size() ? std::span<const Region>(instruments_[instrument])
-                                                : std::span<const Region>();
-    }
-
-    int Number() const
-    {
-        return number_;
-    }
-
-    // The decoded wave of `region`, or nullptr if its wave starts past the end of the bank.
-    const Pcm* Wave(const Region& region)
-    {
-        const auto [found, inserted] = waves_.try_emplace(region.sample);
-        if (inserted)
-        {
-            found->second = Decode(region);
-        }
-
-        return found->second ? &*found->second : nullptr;
-    }
-
-private:
-    uint32_t Word(std::size_t at) const
-    {
-        if (at + 4 > data_.size())
-        {
-            throw FormatError("a bank ends inside its header or a region");
-        }
-
-        return xsflib::LoadBe32(data_.data() + at);
-    }
-
-    Region ReadRegion(std::size_t at) const
-    {
-        if (at + kRegionSize > data_.size())
-        {
-            throw FormatError("a bank ends inside a region");
-        }
-
-        const uint8_t* p = data_.data() + at;
-        Region r;
-        r.sample = xsflib::LoadBe32(p + 4);
-        r.loop = static_cast<int32_t>(xsflib::LoadBe32(p + 8));
-        r.end = xsflib::LoadBe32(p + 0xc);
-        r.pitch = static_cast<int32_t>(xsflib::LoadBe32(p + 0x14)) >> 16;
-        r.volume = p[0x1a] & 0x7f;
-        if ((p[0x1b] & kFixedPan) != 0)
-        {
-            const int pan = p[0x1b] & 0x7f;
-            r.pan = pan == 0 ? kCentre : pan;
-        }
-        for (std::size_t i = 0; i < r.coefs.size(); i++)
-        {
-            r.coefs[i] = static_cast<int16_t>(xsflib::LoadBe16(p + 0x22 + 2 * i));
-        }
-        r.yn1 = static_cast<int16_t>(xsflib::LoadBe16(p + 0x46));
-        r.yn2 = static_cast<int16_t>(xsflib::LoadBe16(p + 0x48));
-        for (std::size_t i = 0; i < r.times.size(); i++)
-        {
-            r.times[i] = xsflib::LoadBe16(p + 0x50 + 2 * i);
-            r.levels[i] = p[0x58 + i];
-        }
-
-        return r;
-    }
-
-    void Read()
-    {
-        if (data_.size() < kBankTable || data_[0] != 'W' || data_[1] != 'D')
-        {
-            throw FormatError("a bank doesn't start with the magic WD");
-        }
-
-        const uint32_t samples = Word(4);
-        const uint32_t count = Word(8);
-        if (samples > data_.size() || uint64_t{count} * 4 + kBankTable > data_.size())
-        {
-            throw FormatError("a bank's samples or its table of instruments run past its end");
-        }
-        samples_ = data_.size() - samples;
-
-        instruments_.resize(count);
-        for (uint32_t i = 0; i < count; i++)
-        {
-            const std::size_t first = Word(kBankTable + std::size_t{i} * 4);
-            if (first != 0)
-            {
-                ReadInstrument(first, instruments_[i]);
-            }
-        }
-    }
-
-    // The driver takes the first region whose highest key isn't below the key. The last region takes every key above.
-    void ReadInstrument(std::size_t at, std::vector<Region>& regions) const
-    {
-        const bool splits = (Word(at) & kRegionSplits) != 0;
-        int low = 0;
-        while (low <= 127)
-        {
-            const uint32_t flags = Word(at);
-            const std::size_t records = (flags & kRegionStereo) != 0 ? 2 : 1;
-            const bool last = !splits || (flags & kRegionLast) != 0;
-            const int high = last ? 127 : static_cast<int8_t>(ReadByte(at + 0x18));
-            if (high >= low)
-            {
-                for (std::size_t side = 0; side < records; side++)
-                {
-                    Region r = ReadRegion(at + side * kRegionSize);
-                    r.low = static_cast<uint8_t>(low);
-                    r.high = static_cast<uint8_t>(high);
-                    if (records == 2)
-                    {
-                        r.pan = side == 0 ? 0 : kHighestPan;
-                    }
-                    if (r.end != 0)
-                    {
-                        regions.push_back(r);
-                    }
-                }
-                low = high + 1;
-            }
-
-            if (last)
-            {
-                break;
-            }
-
-            at += records * kRegionSize;
-        }
-    }
-
-    uint8_t ReadByte(std::size_t at) const
-    {
-        if (at >= data_.size())
-        {
-            throw FormatError("a bank ends inside a region");
-        }
-
-        return data_[at];
-    }
-
-    std::optional<Pcm> Decode(const Region& region) const
-    {
-        const uint64_t start = uint64_t{samples_} + region.sample;
-        if (start >= data_.size())
-        {
-            return std::nullopt;
-        }
-
-        // The right side of a stereo wave can end past the bank's samples. The wave then ends with the bank.
-        const uint32_t end = static_cast<uint32_t>(std::min<uint64_t>(region.end, (data_.size() - start) * 2 - 1));
-
-        ntdlib::wave::EncodedChannel channel;
-        channel.data = std::span<const uint8_t>(data_).subspan(static_cast<std::size_t>(start));
-        channel.coefs = &region.coefs;
-        channel.yn1 = region.yn1;
-        channel.yn2 = region.yn2;
-
-        ntdlib::wave::EncodedWave wave;
-        wave.encoding = ntdlib::wave::Encoding::kDspAdpcm;
-        wave.sum = ntdlib::wave::DspAdpcmSum::kAccelerator;
-        wave.loop_end = SampleOfNibble(end) + 1;
-        if (region.loop >= 0 && SampleOfNibble(static_cast<uint32_t>(region.loop)) < wave.loop_end)
-        {
-            wave.loop = true;
-            wave.loop_start = SampleOfNibble(static_cast<uint32_t>(region.loop));
-        }
-        wave.channels.push_back(channel);
-
-        ntdlib::wave::Pcm decoded = ntdlib::wave::DecodeWave(wave);
-        Pcm pcm;
-        pcm.loop = decoded.loop;
-        pcm.loop_start = decoded.loop_start;
-        pcm.loop_end = decoded.loop_end;
-        pcm.channels = std::move(decoded.channels);
-        pcm.sample_rate = static_cast<float>(kDspRate);
-
-        return pcm;
-    }
-
-    int number_ = 0;
-    std::vector<uint8_t> data_;
-    std::size_t samples_ = 0;
-    std::vector<std::vector<Region>> instruments_;
-    std::map<uint32_t, std::optional<Pcm>> waves_;
-};
 
 // A piece's file: its bank, its volume and the data of each track.
 struct PieceFile
@@ -422,10 +175,12 @@ double Conflict(const TrackNotes& a, const TrackNotes& b)
     return total;
 }
 
-// The channel of each track, and how many pairs of tracks that share a channel conflict.
+// The channel of each track, and how many pairs of tracks that share a channel conflict. `noted` says whether each
+// track plays notes. Without it, every track does.
 struct ChannelChoice
 {
     std::vector<uint8_t> channels;
+    std::vector<bool> noted;
     uint32_t conflicts = 0;
 };
 
@@ -487,6 +242,7 @@ ChannelChoice ChannelsOf(const std::vector<TrackNotes>& tracks)
                 }
             }
         }
+
         for (const std::size_t x : groups[best_a])
         {
             for (const std::size_t y : groups[best_b])
@@ -494,11 +250,16 @@ ChannelChoice ChannelsOf(const std::vector<TrackNotes>& tracks)
                 choice.conflicts += conflict[x][y] > 0.0 ? 1 : 0;
             }
         }
+
         groups[best_a].insert(groups[best_a].end(), groups[best_b].begin(), groups[best_b].end());
         groups.erase(groups.begin() + static_cast<std::ptrdiff_t>(best_b));
     }
 
     choice.channels.assign(tracks.size(), 0);
+    for (const TrackNotes& t : tracks)
+    {
+        choice.noted.push_back(!t.empty());
+    }
     for (std::size_t g = 0; g < groups.size(); g++)
     {
         for (const std::size_t t : groups[g])
@@ -575,15 +336,21 @@ public:
             outputs_[c].midi_track = static_cast<uint8_t>(c);
         }
 
-        std::array<std::size_t, kChannels> counts{};
-        for (const uint8_t channel : channels_)
+        // A channel is shared when more than one of its tracks plays notes. A track without notes sends no
+        // controllers to the channel that it shares.
+        const auto noted = [&channels](std::size_t t)
         {
-            counts[channel]++;
+            return channels.noted.empty() || channels.noted[t];
+        };
+        std::array<std::size_t, kChannels> counts{};
+        for (std::size_t t = 0; t < channels_.size(); t++)
+        {
+            counts[channels_[t]] += noted(t) ? 1 : 0;
         }
 
         for (std::size_t t = 0; t < channels_.size(); t++)
         {
-            shared_[t] = counts[channels_[t]] > 1;
+            shared_[t] = !noted(t) || counts[channels_[t]] > 1;
         }
 
         if (channels.conflicts != 0)
@@ -703,7 +470,7 @@ void Performer::SendControllers(std::size_t index)
     const double level = (piece_.volume + 1) / kLevelScale * LevelOf(t.volume) * total;
     recorder_.SendSetting(out_.performance, out, tick_, EventKind::kVolume, 127);
     recorder_.SendSetting(out_.performance, out, tick_, EventKind::kExpression,
-                          static_cast<uint8_t>(std::clamp(std::lround(127.0 * std::sqrt(level)), 0L, 127L)));
+                          static_cast<uint8_t>(SquaredValue(level)));
     recorder_.SendSetting(out_.performance, out, tick_, EventKind::kPan,
                           static_cast<uint8_t>(std::lround(1.0 + SinePlace(t.pan) * 126.0)));
     recorder_.SendSetting(out_.performance, out, tick_, EventKind::kReverb,
@@ -729,7 +496,7 @@ void Performer::StartNotes(std::size_t index)
 
         // The driver leaves out the velocity's factor at a velocity of 0.
         const double factor = p.velocity == 0 ? 1.0 : (p.velocity + 1) / kLevelScale;
-        const auto velocity = static_cast<uint8_t>(std::clamp(std::lround(127.0 * std::sqrt(factor)), 1L, 127L));
+        const auto velocity = static_cast<uint8_t>(std::max(SquaredValue(factor), 1));
         SendControllers(index);
         recorder_.SendPreset(out_.performance, out, tick_, PresetOf(t.instrument));
         Held held;
@@ -1063,28 +830,31 @@ FadeShape ShapeOf(const Region& r)
     return shape;
 }
 
-// The region's pitch in cents.
+// The region's pitch in cents, held to SoundFont's range.
 int CentsOf(const Region& r)
 {
-    return static_cast<int>(std::lround(r.pitch * 100.0 / 256.0));
+    return ClampedCents(r.pitch * 100.0 / 256.0);
 }
 
+// The name of the sample of region `r` of `bank`: the number of the bank and the start of the wave, then the variant
+// of a region that decodes the wave another way.
 std::string SampleName(const Bank& bank, const Region& r)
 {
-    return "w" + std::to_string(bank.Number()) + "_" + std::to_string(r.sample);
+    const std::string name = "w" + std::to_string(bank.Number()) + "_" + std::to_string(r.sample);
+    return r.variant == 0 ? name : name + "_" + std::to_string(r.variant);
 }
 
-sf2::Zone SoundFontZone(const Region& r, const SoundFontSamples::Sample& sample)
+// The SoundFont zone of `r` with the envelope `shape` (ShapeOf) and `sample`, at `quieter` centibels below its level.
+sf2::Zone SoundFontZone(const Region& r, const FadeShape& shape, const SoundFontSamples::Sample& sample, double quieter)
 {
-    const FadeShape shape = ShapeOf(r);
     const int cents = CentsOf(r);
 
     sf2::ZoneValues values;
     values.keys = {r.low, r.high};
-    values.attenuation = -200.0 * std::log10(std::max(shape.peak * LevelOf(r.volume), 1e-9));
+    values.attenuation = -200.0 * std::log10(std::max(shape.peak * LevelOf(r.volume), 1e-9)) + quieter;
     if (r.pan >= 0)
     {
-        values.pan = static_cast<int>(std::lround((SinePlace(r.pan) * 2.0 - 1.0) * 500.0));
+        values.pan = static_cast<int>(std::lround((SinePlace(r.pan) * 2.0 - 1.0) * kPanRange));
     }
 
     SetEnvelope(shape, values);
@@ -1106,20 +876,13 @@ sf2::Zone SoundFontZone(const Region& r, const SoundFontSamples::Sample& sample)
     return zone;
 }
 
-std::string SfzRegion(const Region& r, const SfzSamples::Wave& wave)
+// The SFZ region of `r` with the envelope `shape` (ShapeOf) and `wave`.
+std::string SfzRegion(const Region& r, const FadeShape& shape, const SfzSamples::Wave& wave)
 {
-    const FadeShape shape = ShapeOf(r);
     std::string s = "<region> sample=" + wave.name + " lokey=" + std::to_string(r.low) +
                     " hikey=" + std::to_string(r.high) + " pitch_keycenter=" + std::to_string(kRootKey);
     s += seqlib::sfz::TuneOpcodes(CentsOf(r));
-
-    const double volume =
-        std::max(20.0 * std::log10(std::max(shape.peak * LevelOf(r.volume), 1e-9)), kSfzLowestVolumeDb);
-    if (std::abs(volume) >= 0.005)
-    {
-        s += " volume=" + Number(volume, 2);
-    }
-
+    s += SfzVolume(20.0 * std::log10(std::max(shape.peak * LevelOf(r.volume), 1e-9)));
     if (r.pan >= 0)
     {
         s += " pan=" + Number((SinePlace(r.pan) * 2.0 - 1.0) * 100.0, 1) + " pan_oncc10=0";
@@ -1162,81 +925,41 @@ Conversion ConvertPiece(const std::string& name, const PieceFile& piece, Bank& b
         names.push_back("Bank " + std::to_string(bank.Number()) + " instrument " + std::to_string(instrument));
     }
 
-    sf2::SoundFont sf;
-    SoundFontSamples samples(sf);
-    std::vector<std::string> warnings;
-
-    for (std::size_t i = 0; i < played.instruments.size(); i++)
+    // The envelope of each region that the piece plays. SoundFont zones can't amplify their samples. A zone above full
+    // level makes every zone quieter. SFZ keeps the levels.
+    std::map<const Region*, FadeShape> shapes;
+    double loudest = 0.0;
+    for (const int instrument : played.instruments)
     {
-        sf2::Instrument inst;
-        inst.name = names[i];
-        sf2::Zone global;
-        global.modulators.assign(sf2::kGlobalZoneModulators.begin(), sf2::kGlobalZoneModulators.end());
-        inst.zones.push_back(std::move(global));
-        for (const Region& r : bank.Regions(static_cast<std::size_t>(played.instruments[i])))
+        for (const Region& r : bank.Regions(static_cast<std::size_t>(instrument)))
         {
-            const std::optional<SoundFontSamples::Sample> added =
-                samples.Get(SampleName(bank, r), kRootKey, [&bank, &r] { return bank.Wave(r); });
-            if (added)
-            {
-                inst.zones.push_back(SoundFontZone(r, *added));
-            }
+            const FadeShape& shape = shapes.try_emplace(&r, ShapeOf(r)).first->second;
+            loudest = std::max(loudest, shape.peak * LevelOf(r.volume));
         }
-        sf2::AddInstrumentPreset(sf, static_cast<uint32_t>(i), names[i], std::move(inst));
     }
+    const double quieter = ntdlib::sequence_export::CutAboveFullLevel(c, loudest);
 
-    for (const uint32_t preset : midi.channel_10_presets)
+    // The files: each region plays its wave as the bank places it.
+    std::vector<std::vector<InstrumentZone>> files;
+    for (const int instrument : played.instruments)
     {
-        sf2::AddChannel10Copy(sf, preset, warnings);
-    }
-
-    const std::string comment = "Converted by " + std::string(kProgram) + " from " + name + ".";
-    ntdlib::sequence_export::WriteSoundFont(c, sf, name, comment, kProgram);
-
-    // The SFZ files: each track's presets, with the samples that they share.
-    seqlib::sfz::TrackFileOptions sfz;
-    sfz.title = name;
-    sfz.program = kProgram;
-    sfz.preset_names = names;
-    sfz.presets = played.instruments.size();
-    sfz.level_cut_db = c.performance.level_cut_db;
-    sfz.track_names = true;
-    SfzSamples waves;
-    const auto text = [&](int)
-    {
-        seqlib::sfz::TrackText added;
-        added.preset = [&](uint32_t p)
+        std::vector<InstrumentZone>& zones = files.emplace_back();
+        for (const Region& r : bank.Regions(static_cast<std::size_t>(instrument)))
         {
-            std::string s = "<group>\n";
-            for (const Region& r : bank.Regions(static_cast<std::size_t>(played.instruments[p])))
-            {
-                const SfzSamples::Wave& wave = waves.Get(SampleName(bank, r), [&bank, &r] { return bank.Wave(r); });
-                if (!wave.name.empty())
-                {
-                    s += SfzRegion(r, wave);
-                }
-            }
-
-            return s;
-        };
-
-        return added;
-    };
-    c.sfz.files = seqlib::sfz::TrackFiles(c.performance, midi, sfz, text);
-    c.sfz.samples = waves.Take();
-
-    ntdlib::sequence_export::CollectWarnings(c, midi, warnings, {});
+            const FadeShape& shape = shapes.at(&r);
+            zones.push_back({.sample = SampleName(bank, r),
+                             .root_key = kRootKey,
+                             .pcm = [&bank, &r] { return bank.Wave(r); },
+                             .soundfont = [&r, &shape, quieter](const SoundFontSamples::Sample& added)
+                             { return SoundFontZone(r, shape, added, quieter); },
+                             .sfz = [&r, &shape](const SfzSamples::Wave& wave) { return SfzRegion(r, shape, wave); }});
+        }
+    }
+    sf2::Zone global;
+    global.modulators.assign(sf2::kGlobalZoneModulators.begin(), sf2::kGlobalZoneModulators.end());
+    WriteInstrumentFiles(c, midi, name, name, names, global, files);
 
     return c;
-}
-
-std::string Lower(std::string_view s)
-{
-    std::string out(s);
-    std::transform(out.begin(), out.end(), out.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-
-    return out;
 }
 
 } // namespace
@@ -1247,12 +970,14 @@ GameInput::GameInput(std::shared_ptr<ntdlib::disc::GameFiles> disc, std::vector<
 {
 }
 
+GameInput::~GameInput() = default;
+
 std::unique_ptr<GameInput> GameInput::Open(const std::shared_ptr<ntdlib::disc::GameFiles>& disc)
 {
     std::map<std::string, std::string> found;
     for (const ntdlib::disc::GameFile& file : disc->files)
     {
-        const std::string lower = Lower(file.path);
+        const std::string lower = xsflib::AsciiLower(file.path);
         if (lower.starts_with(kMusicFolder) && lower.ends_with(".bgm"))
         {
             found.emplace(lower.substr(kMusicFolder.size(), lower.size() - kMusicFolder.size() - 4), file.path);
@@ -1276,38 +1001,35 @@ std::unique_ptr<GameInput> GameInput::Open(const std::shared_ptr<ntdlib::disc::G
 
 Conversion GameInput::Convert(std::size_t index, const PerformOptions& perform)
 {
-    const auto read = [this](const std::string& path)
+    if (index >= paths_.size())
     {
-        std::vector<uint8_t> data;
-        try
-        {
-            if (!disc_->read_file(path, data))
-            {
-                throw FormatError("can't read " + path);
-            }
-        }
-        catch (const ntdlib::disc::Error& e)
-        {
-            throw FormatError(e.what());
-        }
+        throw FormatError("the game has no piece " + std::to_string(index));
+    }
 
-        return data;
-    };
-
-    const std::vector<uint8_t> file = read(paths_[index]);
+    // The piece's tracks point into its file.
+    const std::vector<uint8_t> file = ntdlib::disc::ReadGameFile(*disc_, paths_[index]);
     const PieceFile piece = ReadPiece(file);
 
-    // The piece's bank, in the wave folder. The number in the file's name has four digits.
-    std::string digits = std::to_string(piece.bank);
+    return ConvertPiece(names_[index], piece, BankOf(piece.bank), perform);
+}
+
+Bank& GameInput::BankOf(int number)
+{
+    if (bank_ != nullptr && bank_->Number() == number)
+    {
+        return *bank_;
+    }
+
+    // The bank is in the wave folder. The number in the file's name has four digits.
+    std::string digits = std::to_string(number);
     digits.insert(0, 4 - std::min<std::size_t>(digits.size(), 4), '0');
     const std::string wanted = std::string(kWaveFolder) + "wave" + digits + ".wd";
     for (const ntdlib::disc::GameFile& f : disc_->files)
     {
-        if (Lower(f.path) == wanted)
+        if (xsflib::AsciiLower(f.path) == wanted)
         {
-            Bank bank(piece.bank, read(f.path));
-
-            return ConvertPiece(names_[index], piece, bank, perform);
+            bank_ = std::make_unique<Bank>(number, ntdlib::disc::ReadGameFile(*disc_, f.path));
+            return *bank_;
         }
     }
 

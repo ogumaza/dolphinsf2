@@ -32,7 +32,7 @@ namespace
 // Print usage and options.
 void Usage()
 {
-    std::puts(
+    std::string text =
         "dolphinsf2: convert the music of GameCube games that use JAudio, MusyX, the\n"
         "Nintendo 64's sound library or Square's Red driver to MIDI, SoundFont 2 and\n"
         "SFZ. It converts the files of Wii and Wii U games that use JAudio too.\n"
@@ -51,9 +51,9 @@ void Usage()
         "\n"
         "options:\n"
         "  --output DIR   write to DIR (one input only)\n"
-        "  --only REGEX   convert matching sequence names (for example --only BGM)\n"
-        "  --loops N      repeat the main loop N times (default 1)\n"
-        "                 MIDI loop markers are included for players that support them\n"
+        "  --only REGEX   convert matching sequence names (for example --only BGM)\n";
+    text += frame::kLoopsHelp;
+    text +=
         "  --seed N       initial game random state (default 0; JAudio2 games,\n"
         "                 Luigi's Mansion and the Animal Crossing games)\n"
         "  --port N=V     set port N (0-15) of each sequence to V before it starts;\n"
@@ -61,10 +61,10 @@ void Usage()
         "  --voices N     drop the notes that the game drops for lack of a voice,\n"
         "                 with N voices (the game has 64). The result only\n"
         "                 approximates the game. (JAudio only)\n"
-        "  --voices off   keep every note (default)\n"
-        "  --list         list sequences without converting\n"
-        "  --quiet        print errors only\n"
-        "  --version      show the version\n");
+        "  --voices off   keep every note (default)\n";
+    text += frame::kListQuietVersionHelp;
+
+    std::puts(text.c_str());
 }
 
 // Take --port N=V into `perform`: port N (0-15) of each sequence. Returns false for any other option.

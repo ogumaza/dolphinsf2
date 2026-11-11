@@ -9,11 +9,11 @@ Zstandard, liblzma and bzip2.
 |---|---|---|
 | seqlib, Copyright (c) 2026 the seqlib authors | MIT (`externals/seqlib/LICENSE`) | In `externals/seqlib`, a submodule, compiled into dolphinsf2: the MIDI, SoundFont 2 and SFZ files and their WAV samples. |
 | xsflib, Copyright (c) 2026 the xsflib authors | MIT (`externals/xsflib/LICENSE`) | In `externals/xsflib`, a submodule, compiled into dolphinsf2: bounds-checked reads in either byte order, file input and output with UTF-8 paths, the printable form of names, the console's UTF-8 arguments and output, the Windows version resource and the macOS app's droplet script. |
-| ntdlib, Copyright (c) 2026 the ntdlib authors | MIT (`externals/ntdlib/LICENSE`) | In `externals/ntdlib`, a submodule, compiled into dolphinsf2: the disc reader and the readers of compressed images, the readers of JAudio's sound data in both generations, JAudio's sequence player, the wave decoders, the main loop's rules, the steps of a conversion and the command line's frame. |
+| ntdlib, Copyright (c) 2026 the ntdlib authors | MIT (`externals/ntdlib/LICENSE`) | In `externals/ntdlib`, a submodule, compiled into dolphinsf2: the disc reader and the readers of compressed images, the readers of JAudio's sound data in both generations, JAudio's sequence player, the readers of MusyX's files and of the catalogues of the MusyX games, the wave decoders, the main loop's rules, the steps of a conversion and the command line's frame. |
 | The code page 932 table in ntdlib's `src/disc/cp932.h`, made from Unicode's CP932.TXT, Copyright © 1991-2026 Unicode, Inc. | Unicode License v3 (`Unicode-3.0`) | Compiled into dolphinsf2 with ntdlib's disc reader. The reader decodes the Shift-JIS text of GameCube discs with it. |
-| [zlib](https://zlib.net), Copyright (C) 1995-2024 Jean-loup Gailly and Mark Adler | zlib | GCZ disc images, through ntdlib's `disc_containers`. The installed copy is used if there is one. Otherwise v1.3.1 is downloaded when configuring and compiled into dolphinsf2. |
+| [zlib](https://zlib.net), Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler | zlib | GCZ disc images, through ntdlib's `disc_containers`. The installed copy is used if there is one. Otherwise v1.4 is downloaded when configuring and compiled into dolphinsf2. |
 | [Zstandard](https://github.com/facebook/zstd), Copyright (c) Meta Platforms, Inc. and affiliates | BSD-3-Clause | RVZ disc images, through ntdlib's `disc_containers`. The installed copy is used if there is one. Otherwise v1.5.7 is downloaded when configuring and compiled into dolphinsf2. |
-| [liblzma](https://tukaani.org/xz/) from XZ Utils | 0BSD | LZMA and LZMA2 in WIA and RVZ disc images, through ntdlib's `disc_containers`. The installed copy is used if there is one. Otherwise XZ Utils v5.8.1 is downloaded when configuring. Its liblzma is compiled into dolphinsf2. |
+| [liblzma](https://tukaani.org/xz/) from XZ Utils | 0BSD | LZMA and LZMA2 in WIA and RVZ disc images, through ntdlib's `disc_containers`. The installed copy is used if there is one. Otherwise XZ Utils v5.8.4 is downloaded when configuring. Its liblzma is compiled into dolphinsf2. |
 | [bzip2](https://sourceware.org/bzip2/), Copyright (C) 1996-2019 Julian R Seward | bzip2 (BSD-style) | bzip2 in WIA and RVZ disc images, through ntdlib's `disc_containers`. The installed copy is used if there is one. Otherwise 1.0.8 is downloaded when configuring and compiled into dolphinsf2. |
 
 Binary distributions must include the MIT notices of dolphinsf2, seqlib, xsflib and ntdlib, the Unicode License v3's
@@ -157,7 +157,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 Copyright notice:
 
- (C) 1995-2022 Jean-loup Gailly and Mark Adler
+ (C) 1995-2026 Jean-loup Gailly and Mark Adler
 
   This software is provided 'as-is', without any express or implied
   warranty.  In no event will the authors be held liable for any damages

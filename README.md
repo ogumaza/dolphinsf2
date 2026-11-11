@@ -23,8 +23,9 @@ Games known to work:
 - The Legend of Zelda: Collector's Edition (JAudio2): the menu's sounds
 - Mario Kart: Double Dash!! (USA, JAudio2): the music in sequences and the sound effects, with
   the voices
-- Donkey Kong Jungle Beat (USA, JAudio2): the music and sound effects. Most of the effects that
-  the game plays in the chords of its music come out silent (see [Game rules](#game-rules)).
+- Donkey Kong Jungle Beat (USA, JAudio2), on the GameCube and the Wii: the music and sound
+  effects. Most of the effects that the game plays in the chords of its music come out silent
+  (see [Game rules](#game-rules)).
 - Super Mario Sunshine (USA, the first JAudio): the music and sound effects
 - Pikmin (USA, the first JAudio): the music and sound effects
 - Pikmin 2 (USA, the first JAudio), on the GameCube and the Wii: the music and sound effects. Many
@@ -73,8 +74,9 @@ and one for each game. dolphinsf2 converts the songs that the modules hold. Each
 starts with its module's name. Dr. Mario's and Panel de Pon's songs take the names that the
 games' debug modules give them. The menu's songs take their numbers. Yoshi's Cookie's songs take
 the names of their files. The NDDEMO disc's code lists the paths of its songs' files. dolphinsf2
-names each song after its file. It recognizes each of these games by its `main.dol`. Other MusyX
-games don't convert.
+names each song after its file. It recognizes each of these games by its `main.dol`. It also
+converts the songs of ten catalogue games (see [MusyX](#musyx)). Other MusyX games don't
+convert.
 
 Animal Crossing and its Japanese releases list their music in a table in their code. dolphinsf2
 reads that table and recognizes each release by its `main.dol`. Final Fantasy Crystal Chronicles
@@ -396,14 +398,35 @@ dolphinsf2 then follows these rules of the game:
   notes. `JA_BGM_SELECT` holds the first set and `JA_BGM_SELECT_map` the second. Each file
   starts from the piece's start.
 
-dolphinsf2 recognizes Donkey Kong Jungle Beat's start-up archive, from the USA release. The
-game's code mutes some tracks of its music:
+dolphinsf2 recognizes Donkey Kong Jungle Beat's start-up archive, from the USA release on the
+GameCube and from New Play Control! Donkey Kong Jungle Beat on the Wii. The game's code mutes
+some tracks of its music:
 
 - **Muted tracks.** The game starts 44 pieces with some of their tracks turned off. It turns
   some of them on later, as play goes on. dolphinsf2 leaves out the notes of the tracks that are
   off when the piece starts. One piece, JA_BGM_OP_CEMEMONY, starts with every such track off. The
   game turns them on as the piece goes on. dolphinsf2 plays that piece with the tracks of its
   next state.
+- **The music's states.** The game turns tracks on or off during play: as a combo grows, while a
+  Helibird carries DK, in each part of a boss fight, while DK swims deep in TropicalCoast, and in
+  a few scenes. dolphinsf2 converts 43 pieces once more in each such state, 101 files in all. The
+  Wii release adds one more, for its menus. Each file plays its state from the start of the
+  piece. The game fades from one state to the next, and the files leave out those fades. The
+  name of each file is the name of the piece with a suffix for the state:
+  - `_combo1` and `_combo2`: the layers of a combo, as in `JA_BGM_MAIN_01_combo1`
+  - `_helibird`, `_helibird_combo1` and `_helibird_combo2`: a flight with a Helibird, alone or
+    in a combo
+  - `_below_75`, `_change`, `_round2` and `_round2_below_30`: the fights against the Kongs, with
+    the boss below 75% of its health, between the rounds, in the second round, and below 30%
+    there
+  - `_hit`, `_change`, `_round2` and `_round2_hit`: the fights against GoroPig, ElephantCannon and
+    SlumpBird, while DK hits or holds the boss, between the rounds, in the second round, and
+    while DK hits or holds the boss there
+  - `_below_60`, `_below_30`, `_hold`, `_below_60_hold` and `_below_30_hold`: the final fight, by
+    the boss's health, and while DK holds on to the boss
+  - `_fall`: the lead-in to the final fight, while DK falls from the Helibird
+  - `_underwater`: TropicalCoast's music while DK swims below
+  - `_state1` and `_state2`: the other scenes, such as the ending ceremony
 - **The beat.** In 62 pieces, one track gives the game the music's beat. The game mutes that
   track. dolphinsf2 leaves its notes out.
 - **The chord effects.** The game plays 74 effects of its instruments in the chords of the
@@ -684,7 +707,8 @@ MusyX:
   their music. dolphinsf2 converts the songs that MusyX plays.
 - The master volume. Mario Power Tennis sets MusyX's master volume for music to 101 of 127.
   WarioWare sets it to 100. MusyX multiplies each voice's volume by it, inside the volume
-  curve. dolphinsf2 puts it in each CC7 the same way.
+  curve. dolphinsf2 puts it in each CC7 the same way. Resident Evil sets the master volume for
+  music to 110. Pokémon Channel sets the master volumes for music and effects to 100.
 - Fade-ins. Star Fox Adventures fades each song in over 0.5 s as it starts the song.
   Resident Evil Zero's cutscenes fade their music in over 133 ms. The effects that they play
   as songs fade in the same way. MusyX's fader raises the song's volume from 0 in a line, a
@@ -1161,11 +1185,10 @@ C++ formatting uses clang-format with the repository's `.clang-format`.
 
 `ctest` runs unit tests without game data. The tests build MusyX songs in memory. They cover
 song lists and file paths, DLS envelope times, the song's volume and a game's master volume,
-MusyX's volume table, tempo tables, the early build's clock, and a song that loops. They also
-unpack Yay0 data and read a module of code. They build a piece of the Nintendo 64's sound library
-and pieces of Square's Red driver too, with their banks, and cover the fit of a fade. The JAudio
-conversion is part of ntdlib, and ntdlib's tests cover it. Those tests build archives, banks, wave systems and
-sequences in memory. Coverage includes:
+MusyX's volume table, tempo tables, the early build's clock, and a song that loops. They build a
+piece of the Nintendo 64's sound library and pieces of Square's Red driver too, with their banks,
+and cover the fit of a fade. The JAudio conversion is part of ntdlib, and ntdlib's tests cover
+it. Those tests build archives, banks, wave systems and sequences in memory. Coverage includes:
 
 - Wave decoding, and what banks of both versions play for a note: instruments, drum sets,
   velocity regions and effects.

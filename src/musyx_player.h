@@ -48,12 +48,14 @@ struct EffectNote
     double start_ms = 0.0;
     uint8_t key = 60;
     std::vector<KeyVoice> voices;
+
     // The note's zones add this to their voices' pans, and its CC10 takes it away. CC10 moves a pan by at most 64
     // either way. The shift keeps CC10 within 0 to 127 while the voices' pans move (PanCurve).
     double pan_shift = 0.0;
 };
 
-// The pan of the channels of `effect`: the effect's pan, moved by the game's pan controller.
+// The pan of the channels of `effect`: the effect's pan, moved by the game's pan controller. MusyX uses the pan of the
+// row for a pan of 0xFF.
 int EffectPan(const GameEffect& effect);
 
 // The notes that play `effect` with the voices of `instruments` (EffectVoicesOf), in order: one for each set of voices
@@ -63,11 +65,18 @@ int EffectPan(const GameEffect& effect);
 std::vector<EffectNote> EffectNotes(const GameEffect& effect, Instruments& instruments,
                                     std::set<std::string>& approximations);
 
+// A performance of an effect, and the notes that play it (EffectNotes). Note i plays preset i of the performance.
+struct EffectPerformance
+{
+    Performance performance;
+    std::vector<EffectNote> notes;
+};
+
 // Play `effect` as MusyX does when the game starts it, with the voices of `instruments`: each note of EffectNotes on a
-// MIDI channel of its own, with a preset of its own. A note's velocity is the effect's volume. Each channel's CC7,
-// CC10, CC91, CC93 and pitch wheel take the game's controllers. A voice's macro can set the sends instead
-// (MacroVoice::reverb_controller and chorus_controller). A note lasts until its voices stop by themselves, or until
-// kHeldEffectSeconds after the effect's last change if one of them sounds on.
-Performance PlayEffect(const GameEffect& effect, Instruments& instruments);
+// MIDI channel of its own, with a preset of its own. A note's velocity is the effect's volume, or the volume of the row
+// for 0xFF. Each channel's CC7, CC10, CC91, CC93 and pitch wheel take the game's controllers. A voice's macro can set
+// the sends instead (MacroVoice::reverb_controller and chorus_controller). A note lasts until its voices stop by
+// themselves, or until kHeldEffectSeconds after the effect's last change if one of them sounds on.
+EffectPerformance PlayEffect(const GameEffect& effect, Instruments& instruments);
 
 } // namespace dolphinsf2::musyx

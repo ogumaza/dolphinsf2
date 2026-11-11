@@ -14,7 +14,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
-#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -25,7 +24,9 @@
 #include "seqlib/sf2/units.h"
 #include "seqlib/sfz/opcodes.h"
 #include "seqlib/sfz/text.h"
-#include "seqlib/sfz/track_file.h"
+
+#include "instrument_files.h"
+#include "output_units.h"
 
 namespace dolphinsf2::n64
 {
@@ -42,19 +43,6 @@ constexpr double kUpdateMs = 1000.0 / kUpdatesPerSecond;
 // The lowest level that a release counts from.
 constexpr double kLeastReleaseLevel = 0.1;
 
-// SoundFont's widest tuning in cents.
-constexpr int kWidestCents = 12000;
-
-// The pan in tenths of a percent at either side, in SoundFont's pan generator and in the CC10 modulator of each global
-// zone.
-constexpr double kPanRange = 500.0;
-
-// The lowest volume that an SFZ region takes, in decibels.
-constexpr double kSfzLowestVolumeDb = -144.0;
-
-// The level of every zone at full velocity and volume, against the library's output at full scale.
-constexpr double kOutputGain = 1.0;
-
 // A zone of a preset: its keys, the key at which it plays its sample at its tuning, its pan (-1 left to 1 right, which
 // CC10's pan adds to), and its envelope and release.
 struct Zone
@@ -67,7 +55,7 @@ struct Zone
     double pan = 0.0;
     std::vector<EnvelopePoint> envelope;
     uint8_t release = 0;
-    double note_ms = kUsualNoteMs; // the length of the zone's notes in the piece (MedianNoteMs)
+    VolumeShape shape = {}; // the envelope and the release for the median length of the zone's notes (ShapeOf)
 };
 
 // The length of each note of a performance in milliseconds, by its preset and its key.
@@ -224,13 +212,7 @@ std::vector<Zone> ZonesOf(const PresetVoice& voice, SoundData& data)
 // The cents of a zone's tuning, held to SoundFont's range.
 int Cents(double tuning)
 {
-    return static_cast<int>(
-        std::lround(std::clamp(1200.0 * std::log2(tuning), -1.0 * kWidestCents, 1.0 * kWidestCents)));
-}
-
-int16_t Amount(double value)
-{
-    return static_cast<int16_t>(std::clamp(std::lround(value), -32768L, 32767L));
+    return ClampedCents(1200.0 * std::log2(tuning));
 }
 
 // A zone's name in the SoundFont's samples: the bank and the sample's offset in it.
@@ -265,15 +247,26 @@ std::vector<std::string> PresetNamesOf(const std::vector<PresetVoice>& voices)
     return names;
 }
 
-// The SoundFont zone of `z`, in bank `bank`, with `sample`, at `quieter` centibels below its level. A voice with a
+// The rate of `voice`'s vibrato in hertz, and its delay in milliseconds.
+double VibratoHz(const PresetVoice& voice)
+{
+    return voice.vibrato_rate * kUpdatesPerSecond / 65536.0;
+}
+
+double VibratoDelayMs(const PresetVoice& voice)
+{
+    return voice.vibrato_delay * kUpdateMs;
+}
+
+// The SoundFont zone of `z` for `voice`, with `sample`, at `quieter` centibels below its level. A voice with a
 // vibrato takes its rate and delay. CC1 gives its depth.
 sf2::Zone SoundFontZone(const PresetVoice& voice, const Zone& z, const SoundFontSamples::Sample& sample, double quieter)
 {
-    const VolumeShape shape = ShapeOf(z.envelope, z.release, z.note_ms);
+    const VolumeShape& shape = z.shape;
     const int cents = Cents(z.tuning);
     sf2::ZoneValues values;
     values.keys = {z.low, z.high};
-    values.attenuation = -200.0 * std::log10(std::max(shape.peak * kOutputGain, 1e-9)) + quieter;
+    values.attenuation = -200.0 * std::log10(std::max(shape.peak, 1e-9)) + quieter;
     values.pan = static_cast<int>(std::lround(z.pan * kPanRange));
     SetEnvelope(shape, values);
     values.root_key = z.root;
@@ -284,18 +277,15 @@ sf2::Zone SoundFontZone(const PresetVoice& voice, const Zone& z, const SoundFont
     sf2::Zone zone = sf2::RegionZone(values);
 
     // The vibrato, at the voice's rate and after its delay. The library's swing starts down.
-    const auto add = [&zone](uint16_t oper, int value)
-    {
-        zone.generators.insert(zone.generators.end() - 1, sf2::Generator::Value(oper, value));
-    };
     if (voice.vibrato_rate != 0)
     {
-        add(sf2::kFreqVibLfo, sf2::LfoFrequency(voice.vibrato_rate * kUpdatesPerSecond / 65536.0));
+        sf2::AddGenerator(zone, sf2::kFreqVibLfo, sf2::LfoFrequency(VibratoHz(voice)));
         if (voice.vibrato_delay != 0)
         {
-            add(sf2::kDelayVibLfo, sf2::ToTimecents(voice.vibrato_delay * kUpdateMs, -12000, 5000));
+            sf2::AddGenerator(zone, sf2::kDelayVibLfo,
+                              sf2::ToTimecents(VibratoDelayMs(voice), kShortestTimecents, kLongestHoldTimecents));
         }
-        zone.modulators.push_back({sf2::kSrcModWheel, sf2::kVibLfoToPitch, Amount(-kVibratoRangeCents), 0});
+        zone.modulators.push_back({sf2::kSrcModWheel, sf2::kVibLfoToPitch, sf2::ToAmount(-kVibratoRangeCents), 0});
     }
 
     return zone;
@@ -314,16 +304,11 @@ sf2::Zone GlobalZone()
 // The SFZ region of `z` with `wave`, `gain_db` above its level.
 std::string SfzRegion(const PresetVoice& voice, const Zone& z, const SfzSamples::Wave& wave, double gain_db)
 {
-    const VolumeShape shape = ShapeOf(z.envelope, z.release, z.note_ms);
+    const VolumeShape& shape = z.shape;
     std::string s = "<region> sample=" + wave.name + " lokey=" + std::to_string(z.low) +
                     " hikey=" + std::to_string(z.high) + " pitch_keycenter=" + std::to_string(z.root);
     s += seqlib::sfz::TuneOpcodes(Cents(z.tuning));
-    const double volume =
-        std::max(20.0 * std::log10(std::max(shape.peak * kOutputGain, 1e-9)) + gain_db, kSfzLowestVolumeDb);
-    if (std::abs(volume) >= 0.005)
-    {
-        s += " volume=" + Number(volume, 2);
-    }
+    s += SfzVolume(20.0 * std::log10(std::max(shape.peak, 1e-9)) + gain_db);
     if (std::abs(z.pan) >= 0.0005)
     {
         s += " pan=" + Number(z.pan * 100.0, 1);
@@ -333,10 +318,10 @@ std::string SfzRegion(const PresetVoice& voice, const Zone& z, const SfzSamples:
     s += seqlib::sfz::LoopOpcodes(wave.loop, wave.loop_start, wave.loop_end);
     if (voice.vibrato_rate != 0)
     {
-        s += " lfo1_wave=1 lfo1_freq=" + Number(voice.vibrato_rate * kUpdatesPerSecond / 65536.0, 6);
+        s += " lfo1_wave=1 lfo1_freq=" + Number(VibratoHz(voice), 6);
         if (voice.vibrato_delay != 0)
         {
-            s += " lfo1_delay=" + Number(voice.vibrato_delay * kUpdateMs / 1000.0, 6);
+            s += " lfo1_delay=" + Number(VibratoDelayMs(voice) / 1000.0, 6);
         }
         s += " lfo1_pitch_oncc1=" + Number(-kVibratoRangeCents, 3);
     }
@@ -406,76 +391,31 @@ Conversion ConvertPiece(const Piece& piece, SoundData& data, const PerformOption
         const auto preset = static_cast<uint32_t>(zones.size() - 1);
         for (Zone& z : zones.back())
         {
-            z.note_ms = MedianNoteMs(lengths, preset, z.low, z.high);
-            loudest = std::max(loudest, ShapeOf(z.envelope, z.release, z.note_ms).peak * kOutputGain);
+            z.shape = ShapeOf(z.envelope, z.release, MedianNoteMs(lengths, preset, z.low, z.high));
+            loudest = std::max(loudest, z.shape.peak);
         }
     }
     const double quieter = ntdlib::sequence_export::CutAboveFullLevel(c, loudest);
 
-    sf2::SoundFont sf;
-    SoundFontSamples samples(sf);
-    std::vector<std::string> warnings;
+    // The files: each zone plays its sample as its bank names it.
+    const double level_cut_db = c.performance.level_cut_db;
+    std::vector<std::vector<InstrumentZone>> files(zones.size());
     for (std::size_t i = 0; i < zones.size(); i++)
     {
-        sf2::Instrument inst;
-        inst.name = names[i];
-        inst.zones.push_back(GlobalZone());
+        const PresetVoice& voice = played.voices[i];
         for (const Zone& z : zones[i])
         {
             const Sample* sample = z.sample;
-            const std::optional<SoundFontSamples::Sample> added =
-                samples.Get(SampleName(played.voices[i].bank, *sample), static_cast<uint8_t>(z.root),
-                            [sample] { return &sample->pcm; });
-            if (added)
-            {
-                inst.zones.push_back(SoundFontZone(played.voices[i], z, *added, quieter));
-            }
+            files[i].push_back({.sample = SampleName(voice.bank, *sample),
+                                .root_key = static_cast<uint8_t>(z.root),
+                                .pcm = [sample] { return &sample->pcm; },
+                                .soundfont = [&voice, &z, quieter](const SoundFontSamples::Sample& added)
+                                { return SoundFontZone(voice, z, added, quieter); },
+                                .sfz = [&voice, &z, level_cut_db](const SfzSamples::Wave& wave)
+                                { return SfzRegion(voice, z, wave, level_cut_db); }});
         }
-        sf2::AddInstrumentPreset(sf, static_cast<uint32_t>(i), names[i], std::move(inst));
     }
-
-    for (uint32_t preset : midi.channel_10_presets)
-    {
-        sf2::AddChannel10Copy(sf, preset, warnings);
-    }
-
-    const std::string comment = "Converted by " + std::string(kProgram) + " from " + piece.name + ".";
-    ntdlib::sequence_export::WriteSoundFont(c, sf, piece.name, comment, kProgram);
-
-    // The SFZ files: each track's presets, with the samples that they share.
-    seqlib::sfz::TrackFileOptions sfz;
-    sfz.title = piece.name;
-    sfz.program = kProgram;
-    sfz.preset_names = names;
-    sfz.presets = played.voices.size();
-    sfz.level_cut_db = c.performance.level_cut_db;
-    sfz.track_names = true;
-    SfzSamples waves;
-    const auto text = [&](int)
-    {
-        seqlib::sfz::TrackText added;
-        added.preset = [&](uint32_t p)
-        {
-            std::string s = "<group>\n";
-            for (const Zone& z : zones[p])
-            {
-                const Sample* sample = z.sample;
-                const SfzSamples::Wave& wave =
-                    waves.Get(SampleName(played.voices[p].bank, *sample), [sample] { return &sample->pcm; });
-                if (!wave.name.empty())
-                {
-                    s += SfzRegion(played.voices[p], z, wave, c.performance.level_cut_db);
-                }
-            }
-
-            return s;
-        };
-        return added;
-    };
-    c.sfz.files = seqlib::sfz::TrackFiles(c.performance, midi, sfz, text);
-    c.sfz.samples = waves.Take();
-
-    ntdlib::sequence_export::CollectWarnings(c, midi, warnings, {});
+    WriteInstrumentFiles(c, midi, piece.name, piece.name, names, GlobalZone(), files);
 
     return c;
 }

@@ -12,7 +12,6 @@
 
 #include <cstddef>
 #include <memory>
-#include <string>
 #include <vector>
 
 #include "ntdlib/disc/game.h"
@@ -44,7 +43,7 @@ public:
     }
 
     // Convert piece `index`, with the banks' errors since the last conversion as warnings. Throw FormatError if the
-    // piece can't be played.
+    // piece can't be played. When the conversion fails, those errors follow its message, after "; ".
     Conversion Convert(std::size_t index, const PerformOptions& perform);
 
 private:

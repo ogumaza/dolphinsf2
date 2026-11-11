@@ -9,15 +9,14 @@
 
 #include "seqlib/sf2/units.h"
 
+#include "output_units.h"
+
 namespace dolphinsf2
 {
 namespace
 {
 
 namespace sf2 = seqlib::sf2;
-
-// A fade is fitted down to the point where it lies 20 dB down, or down to the level that it holds if that's higher.
-constexpr double kFitDb = 20.0;
 
 // A release is fitted to reach the level that it reaches this far down. It follows the line in amplitude closely until
 // then.
@@ -33,15 +32,8 @@ constexpr double kShortestSpanMs = 1.0;
 // The lowest amplitude that the fit reads, against the peak.
 constexpr double kLowestAmplitude = 1e-6;
 
-// The decibels that a SoundFont envelope's decay and release fall in their time, and those that an SFZ envelope's fall:
-// a factor of e^-8 (sfzformat.com, ampeg_attack).
-constexpr double kSoundFontFallDb = 100.0;
-constexpr double kSfzFallDb = 8.0 * 20.0 / 2.302585092994046;
-
-// SoundFont's limits: silence in centibels, the longest envelope time and the longest hold that holdVolEnv allows.
-constexpr int kSilentCentibels = 1440;
-constexpr int kLongestTimecents = 8000;
-constexpr int kLongestHoldTimecents = 5000;
+// The longest time of an SFZ envelope in seconds, the end of the range that sfzformat.com gives ampeg_release.
+constexpr double kLongestSfzSeconds = 100.0;
 
 // The holds and the points of the curve that the choice of a hold before SoundFont's slowest decay tries.
 constexpr int kSoundFontHolds = 64;
@@ -62,13 +54,14 @@ int FallTimecents(double db_per_ms)
         return kLongestTimecents;
     }
 
-    return sf2::ToTimecents(kSoundFontFallDb / db_per_ms, -12000, kLongestTimecents);
+    return sf2::ToTimecents(kSoundFontFallDb / db_per_ms, kShortestTimecents, kLongestTimecents);
 }
 
-// The seconds of a fall at `db_per_ms` that falls kSfzFallDb in its time.
+// The seconds of a fall at `db_per_ms` that falls kSfzFallDb in its time. A rate of 0 never falls: it takes
+// kLongestSfzSeconds.
 double FallSeconds(double db_per_ms)
 {
-    return db_per_ms <= 0.0 ? 100.0 : kSfzFallDb / db_per_ms / 1000.0;
+    return db_per_ms <= 0.0 ? kLongestSfzSeconds : kSfzFallDb / db_per_ms / 1000.0;
 }
 
 // The hold, up to the longest, that brings a SoundFont zone closest to `curve` by least squares in decibels. The
@@ -77,22 +70,22 @@ double FallSeconds(double db_per_ms)
 // quickly first and then falls slowly takes a short hold.
 double SoundFontHold(const FadeCurve& curve, const FadeShape& shape)
 {
-    const double slowest = kSoundFontFallDb / TimecentsMs(kLongestTimecents);
-    const double longest = TimecentsMs(kLongestHoldTimecents);
+    const double kSlowest = kSoundFontFallDb / TimecentsMs(kLongestTimecents);
+    const double kLongest = TimecentsMs(kLongestHoldTimecents);
     const double drop = -shape.sustain_db;
-    const double span = longest + drop / slowest;
+    const double span = kLongest + drop / kSlowest;
     double best = std::numeric_limits<double>::max();
     double best_hold = 0.0;
     for (int h = 0; h <= kSoundFontHolds; h++)
     {
-        const double hold = longest * h / kSoundFontHolds;
+        const double hold = kLongest * h / kSoundFontHolds;
         double error = 0.0;
         for (int i = 0; i < kSoundFontPoints; i++)
         {
             const double t = span * (i + 0.5) / kSoundFontPoints;
             const double curve_db =
                 20.0 * std::log10(std::max(FadeAmplitude(curve, shape.attack_ms + t) / shape.peak, kLowestAmplitude));
-            const double zone_db = -std::min(std::max(t - hold, 0.0) * slowest, drop);
+            const double zone_db = -std::min(std::max(t - hold, 0.0) * kSlowest, drop);
             error += (curve_db - zone_db) * (curve_db - zone_db);
         }
 
@@ -157,7 +150,8 @@ FadeShape FitFades(const FadeCurve& curve)
         return shape;
     }
 
-    // The time at which the curve after the peak falls to the fitted level: 20 dB down, or the held level.
+    // The time at which the curve after the peak falls to the fitted level: kFitDb down, or the held level if that's
+    // higher.
     const double fit = std::max(hold, std::pow(10.0, -kFitDb / 20.0)) * shape.peak;
     double reached = curve.back().first;
     for (std::size_t i = peak + 1; i < curve.size(); i++)
@@ -228,10 +222,11 @@ double FitRelease(double ms)
 
 void SetEnvelope(const FadeShape& shape, sf2::ZoneValues& values)
 {
-    values.attack = sf2::ToTimecents(shape.attack_ms, -12000, kLongestTimecents);
-    values.hold = sf2::ToTimecents(shape.soundfont_hold_ms.value_or(shape.hold_ms), -12000, kLongestHoldTimecents);
-    values.decay = shape.decay_db_per_ms > 0.0 ? FallTimecents(shape.decay_db_per_ms) : -12000;
-    values.sustain = std::clamp(static_cast<int>(std::lround(-10.0 * shape.sustain_db)), 0, kSilentCentibels);
+    values.attack = sf2::ToTimecents(shape.attack_ms, kShortestTimecents, kLongestTimecents);
+    values.hold =
+        sf2::ToTimecents(shape.soundfont_hold_ms.value_or(shape.hold_ms), kShortestTimecents, kLongestHoldTimecents);
+    values.decay = shape.decay_db_per_ms > 0.0 ? FallTimecents(shape.decay_db_per_ms) : kShortestTimecents;
+    values.sustain = SustainCentibels(shape.sustain_db);
     values.release = FallTimecents(shape.release_db_per_ms);
 }
 

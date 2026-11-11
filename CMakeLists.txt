@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.20)
 # the macOS app. A release changes it here and adds its notes in docs/release-notes/.
 # C is for the compression libraries below. A build that doesn't find them installed compiles them from their C
 # sources.
-project(dolphinsf2 VERSION 1.7.0 LANGUAGES C CXX)
+project(dolphinsf2 VERSION 1.8.0 LANGUAGES C CXX)
 
 # The libraries that dolphinsf2 shares with the other converters and the PSF players: seqlib for MIDI, SoundFont 2
 # and SFZ, xsflib for the common code and the build's templates, and ntdlib for Nintendo's formats. All three are
@@ -26,34 +26,48 @@ set(XSFLIB_DISC_LIBRARIES ON)
 set(NTDLIB_DISC ON)
 xsflib_add_libraries(seqlib xsflib ntdlib)
 
+# dolphinsf2's designated initializers name only the fields that differ from their defaults. Naming the others would
+# copy their default member initializers into each initializer, where the copies could drift. clang-cl's /W4 warns about
+# the fields left out. The libraries above keep the warning.
+if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  add_compile_options(-Wno-missing-designated-field-initializers)
+endif()
+
 add_library(dolphinsf2_core STATIC
   src/disc.cpp
   src/input.cpp
   src/musyx_catalogue.cpp
   src/musyx_game.cpp
-  src/musyx_msm.cpp
-  src/musyx_puzzle.cpp
   src/musyx_voices.cpp
+  src/musyx_macros.cpp
+  src/musyx_macro_steps.cpp
   src/musyx_player.cpp
+  src/musyx_player_output.cpp
   src/musyx_convert.cpp
+  src/musyx_shapes.cpp
   src/fade_fit.cpp
+  src/instrument_files.cpp
   src/n64_sound.cpp
   src/n64_player.cpp
+  src/n64_player_layers.cpp
   src/n64_convert.cpp
   src/n64_game.cpp
   src/red_music.cpp
-  src/rel_module.cpp
-  src/yay0.cpp)
+  src/red_bank.cpp)
 target_include_directories(dolphinsf2_core PUBLIC src)
 target_link_libraries(dolphinsf2_core PUBLIC seqlib::seqlib xsflib::common ntdlib::common ntdlib::disc
-                      ntdlib::disc_containers ntdlib::jaudio ntdlib::musyx ntdlib::wave ntdlib::sequence_export
-                      ntdlib::sequence_export_jaudio)
+                      ntdlib::disc_containers ntdlib::jaudio ntdlib::musyx ntdlib::musyx_catalogue ntdlib::wave
+                      ntdlib::sequence_export ntdlib::sequence_export_jaudio)
 
 add_executable(dolphinsf2 src/main.cpp)
 target_link_libraries(dolphinsf2 PRIVATE dolphinsf2_core)
 xsflib_add_version(dolphinsf2 VERSION ${PROJECT_VERSION} DEFINE DOLPHINSF2_VERSION
                    DESCRIPTION "Nintendo GameCube music converter" PRODUCT dolphinsf2
                    COPYRIGHT "Copyright (c) 2026 the dolphinsf2 authors. MIT licence.")
+
+# Windows: UTF-8 as the process code page. dolphinsf2 opens paths with narrow strings, and a name outside the ANSI code
+# page would break.
+xsflib_add_utf8_manifest(dolphinsf2)
 
 # Finder cannot drop files onto a command-line executable. Package it in a macOS droplet app, with the version in its
 # Info.plist.
@@ -71,16 +85,15 @@ if(BUILD_TESTING)
   add_test(NAME dolphinsf2_units COMMAND dolphinsf2_test)
 
   # The program reports the version it was built as.
-  string(REPLACE "." "\\." version_pattern "${PROJECT_VERSION}")
-  add_test(NAME dolphinsf2_version COMMAND dolphinsf2 --version)
-  set_tests_properties(dolphinsf2_version PROPERTIES PASS_REGULAR_EXPRESSION "^dolphinsf2 ${version_pattern}[\r\n]*$")
+  xsflib_add_version_test(dolphinsf2 VERSION ${PROJECT_VERSION})
 
   # It rejects a port that the game doesn't have.
   add_test(NAME dolphinsf2_port_range COMMAND dolphinsf2 --port 16=1 missing.baa)
   set_tests_properties(dolphinsf2_port_range PROPERTIES PASS_REGULAR_EXPRESSION "--port 16=1 is out of range")
   # Optionally convert and validate a game's sequences:
   # -DDOLPHINSF2_TEST_ARCHIVE=path/to/archive.baa
-  set(DOLPHINSF2_TEST_ARCHIVE "" CACHE FILEPATH "Start-up archive (.baa) for the conversion test")
+  set(DOLPHINSF2_TEST_ARCHIVE "" CACHE FILEPATH
+    "Start-up archive (.baa, .aaf), disc image or main.dol of an extracted disc for the conversion test")
   if(DOLPHINSF2_TEST_ARCHIVE AND EXISTS "${DOLPHINSF2_TEST_ARCHIVE}")
     add_test(NAME dolphinsf2_archive COMMAND dolphinsf2_test "${DOLPHINSF2_TEST_ARCHIVE}")
   endif()

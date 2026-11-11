@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <cstdint>
+#include <vector>
+
 #include "fade_fit.h"
 #include "jaudio.h"
 #include "n64_player.h"

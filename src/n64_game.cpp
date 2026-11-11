@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <set>
 #include <span>
@@ -18,6 +19,8 @@
 
 #include "ntdlib/disc/game.h"
 #include "ntdlib/dol.h"
+#include "ntdlib/sequence_export/conversion.h"
+#include "xsflib/bytes.h"
 #include "xsflib/sha1.h"
 
 #include "jaudio.h"
@@ -236,21 +239,9 @@ const GameRules* RulesOf(std::string_view sha1)
     return it != kGames.end() ? &*it : nullptr;
 }
 
-// The bytes of `size` at `address` in `dol`. Throw FormatError if `dol` holds fewer there.
-std::span<const uint8_t> BytesAt(const ntdlib::Dol& dol, uint32_t address, std::size_t size, const char* what)
-{
-    const std::span<const uint8_t> bytes = dol.At(address);
-    if (bytes.size() < size)
-    {
-        throw FormatError(std::string("main.dol's ") + what + " ends early");
-    }
-
-    return bytes.first(size);
-}
-
 uint16_t MaskAt(std::span<const uint8_t> table, std::size_t index)
 {
-    return static_cast<uint16_t>(table[2 * index] << 8 | table[2 * index + 1]);
+    return xsflib::LoadBe16(table.data() + 2 * index);
 }
 
 std::string PieceName(uint32_t number)
@@ -263,19 +254,21 @@ std::string PieceName(uint32_t number)
 std::vector<Piece> PiecesOf(const ntdlib::Dol& dol, const GameRules& rules, const SoundData& data)
 {
     const std::size_t entry_size = rules.wide_numbers ? 2 : 1;
-    const std::span<const uint8_t> music = BytesAt(dol, rules.music_table, rules.pieces * entry_size, "table of music");
+    const std::span<const uint8_t> music =
+        dol.Bytes(rules.music_table, rules.pieces * entry_size, "the table of music");
     const auto sequence_of = [&music, entry_size](uint32_t number)
     {
-        return entry_size == 2 ? static_cast<uint32_t>(music[2 * number] << 8 | music[2 * number + 1]) : music[number];
+        return entry_size == 2 ? uint32_t{xsflib::LoadBe16(music.data() + 2 * number)} : uint32_t{music[number]};
     };
+
     std::array<std::span<const uint8_t>, 3> weather_masks;
     for (std::size_t w = 0; w < kWeathers.size(); w++)
     {
-        weather_masks[w] = BytesAt(dol, rules.weather_masks[w], 2 * (kLastHour - kFirstHour + 1), "table of masks");
+        weather_masks[w] = dol.Bytes(rules.weather_masks[w], 2 * (kLastHour - kFirstHour + 1), "the table of masks");
     }
 
     const std::span<const uint8_t> museum_masks =
-        BytesAt(dol, rules.museum_masks, 2 * (kMuseumRooms.size() + 1), "table of the museum's masks");
+        dol.Bytes(rules.museum_masks, 2 * (kMuseumRooms.size() + 1), "the table of the museum's masks");
 
     // A port holds a byte. The empty piece's sequence has a number below 256.
     const uint32_t empty_sequence = sequence_of(rules.empty_piece);
@@ -357,20 +350,7 @@ std::unique_ptr<GameInput> GameInput::Open(const std::shared_ptr<ntdlib::disc::G
     }
 
     const ntdlib::Dol dol = ntdlib::Dol::ParseMain(disc->dol);
-    std::vector<uint8_t> rom;
-    try
-    {
-        if (!disc->read_file("audiorom.img", rom))
-        {
-            throw FormatError("can't read audiorom.img");
-        }
-    }
-    catch (const ntdlib::disc::Error& e)
-    {
-        throw FormatError(e.what());
-    }
-
-    SoundData data(dol, rules->tables, std::move(rom));
+    SoundData data(dol, rules->tables, ntdlib::disc::ReadGameFile(*disc, "audiorom.img"));
     std::vector<Piece> pieces = PiecesOf(dol, *rules, data);
     return std::unique_ptr<GameInput>(new GameInput(std::move(data), std::move(pieces)));
 }
@@ -382,14 +362,9 @@ Conversion GameInput::Convert(std::size_t index, const PerformOptions& perform)
         throw FormatError("the game has no piece " + std::to_string(index));
     }
 
-    Conversion c = ConvertPiece(pieces_[index], data_, perform);
-    const std::vector<std::string>& errors = data_.Errors();
-    for (; errors_reported_ < errors.size(); errors_reported_++)
-    {
-        c.warnings.push_back(errors[errors_reported_]);
-    }
-
-    return c;
+    // This conversion reports the errors in the banks and samples read since the last conversion.
+    return ntdlib::sequence_export::ConvertReportingErrors(
+        data_.Errors(), errors_reported_, [&] { return ConvertPiece(pieces_[index], data_, perform); });
 }
 
 } // namespace dolphinsf2::n64

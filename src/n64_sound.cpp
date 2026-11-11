@@ -73,23 +73,11 @@ constexpr int kCoefficientShift = 11;
 // 0xfb - index frames, 0x10 to 0x7f in 60 + 4 × (0x80 - index), and 1 to 0xf in 480 + 60 × (0xf - index).
 constexpr std::array<double, 5> kFastReleases = {0.75, 0.66, 0.5, 0.33, 0.25};
 
-// The bytes from `address` in `dol`, at least `size` of them. Throw FormatError if they lie outside main.dol.
-std::span<const uint8_t> DolBytes(const ntdlib::Dol& dol, uint32_t address, std::size_t size, const char* what)
-{
-    const std::span<const uint8_t> bytes = dol.At(address);
-    if (bytes.size() < size)
-    {
-        throw FormatError(std::string("main.dol has no ") + what + " where the game's sound library reads it");
-    }
-
-    return bytes.first(size);
-}
-
 // Read `N` big-endian floats at `address` in `dol`.
 template <std::size_t N>
 std::array<float, N> ReadFloats(const ntdlib::Dol& dol, uint32_t address, const char* what)
 {
-    const std::span<const uint8_t> bytes = DolBytes(dol, address, 4 * N, what);
+    const std::span<const uint8_t> bytes = dol.Bytes(address, 4 * N, what);
     std::array<float, N> values{};
     for (std::size_t i = 0; i < N; i++)
     {
@@ -102,7 +90,7 @@ std::array<float, N> ReadFloats(const ntdlib::Dol& dol, uint32_t address, const 
 // Read 16 bytes at `address` in `dol`.
 std::array<uint8_t, 16> ReadBytes16(const ntdlib::Dol& dol, uint32_t address, const char* what)
 {
-    const std::span<const uint8_t> bytes = DolBytes(dol, address, 16, what);
+    const std::span<const uint8_t> bytes = dol.Bytes(address, 16, what);
     std::array<uint8_t, 16> values{};
     std::copy(bytes.begin(), bytes.end(), values.begin());
 
@@ -277,20 +265,20 @@ SoundData::SoundData(const ntdlib::Dol& dol, const LibraryTables& tables, std::v
     }
     bank_map_.assign(map.begin(), map.begin() + static_cast<std::ptrdiff_t>(map_end));
 
-    cents_ = ReadFloats<256>(dol, tables.cents, "table of bends");
-    small_cents_ = ReadFloats<256>(dol, tables.small_cents, "table of small bends");
-    pitches_ = ReadFloats<128>(dol, tables.pitches, "table of pitches");
-    short_velocities_ = ReadBytes16(dol, tables.short_velocities, "table of short notes' velocities");
-    short_gate_times_ = ReadBytes16(dol, tables.short_gate_times, "table of short notes' gate times");
+    cents_ = ReadFloats<256>(dol, tables.cents, "the table of bends");
+    small_cents_ = ReadFloats<256>(dol, tables.small_cents, "the table of small bends");
+    pitches_ = ReadFloats<128>(dol, tables.pitches, "the table of pitches");
+    short_velocities_ = ReadBytes16(dol, tables.short_velocities, "the table of short notes' velocities");
+    short_gate_times_ = ReadBytes16(dol, tables.short_gate_times, "the table of short notes' gate times");
     const std::span<const uint8_t> envelope_data = dol.At(tables.default_envelope);
     default_envelope_ = ReadEnvelope(envelope_data, 0);
 }
 
 std::vector<SoundData::Entry> SoundData::ReadTable(const ntdlib::Dol& dol, uint32_t address)
 {
-    const std::span<const uint8_t> header = DolBytes(dol, address, kTableHeader, "table of sounds");
+    const std::span<const uint8_t> header = dol.Bytes(address, kTableHeader, "the table of sounds");
     const uint32_t count = xsflib::LoadBe16(header.data());
-    const std::span<const uint8_t> table = DolBytes(dol, address, kTableHeader + count * kEntrySize, "table of sounds");
+    const std::span<const uint8_t> table = dol.Bytes(address, kTableHeader + count * kEntrySize, "the table of sounds");
     std::vector<Entry> entries(count);
     for (uint32_t i = 0; i < count; i++)
     {
@@ -579,8 +567,8 @@ const Sample* SoundData::ReadSample(Bank& bank, std::span<const uint8_t> bank_da
 
         // The state holds the samples of the frame that holds the loop's start. A repeat takes them from the state, and
         // decodes from the next frame with the state's last two samples as the decoder's history. If that gives other
-        // samples than the first pass, the loop plays once unrolled. Each later repeat then gives the same samples as
-        // the first.
+        // samples than the first pass, a loop without end plays once unrolled. Each later repeat then gives the same
+        // samples as the first. A loop with a count keeps the samples of the first pass.
         const std::size_t next_frame = loop_start / kFrameSamples + 1;
         std::vector<int16_t> state(kFrameSamples);
         for (std::size_t i = 0; i < kFrameSamples; i++)

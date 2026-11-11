@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: MIT
 
-// Unit tests for dolphinsf2, without game data. The tests build small MusyX song groups, pieces of the Nintendo 64's
-// sound library and of Square's Red driver, Yay0 data and modules of code in memory. ntdlib's tests cover the
-// conversion of JAudio's sound data.
+// Unit tests for dolphinsf2, without game data. The tests build small MusyX song groups, and pieces of the Nintendo
+// 64's sound library and of Square's Red driver, in memory. ntdlib's tests cover the conversion of JAudio's sound data,
+// the file of Hudson's sound manager, Yay0 data and modules of code.
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <filesystem>
+#include <initializer_list>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -45,15 +47,13 @@
 #include "jaudio.h"
 #include "musyx_convert.h"
 #include "musyx_game.h"
-#include "musyx_msm.h"
 #include "musyx_player.h"
 #include "musyx_voices.h"
 #include "n64_convert.h"
 #include "n64_player.h"
 #include "n64_sound.h"
+#include "output_units.h"
 #include "red_music.h"
-#include "rel_module.h"
-#include "yay0.h"
 
 namespace
 {
@@ -64,16 +64,69 @@ using xsflib::testing::Check;
 using xsflib::testing::ErrorOf;
 using xsflib::testing::failures;
 
-// Count `perf`'s events of `kind` on MIDI track `slot`.
-int Count(const Performance& perf, std::size_t slot, EventKind kind)
+// The events of `kind` on MIDI track `slot` of `perf`, in order. None if `perf` has no such track.
+std::vector<TrackEvent> EventsOf(const Performance& perf, std::size_t slot, EventKind kind)
 {
-    int n = 0;
-    for (const TrackEvent& e : perf.tracks[slot])
+    std::vector<TrackEvent> events;
+    if (slot >= perf.tracks.size())
     {
-        n += e.kind == kind ? 1 : 0;
+        return events;
     }
 
-    return n;
+    for (const TrackEvent& e : perf.tracks[slot])
+    {
+        if (e.kind == kind)
+        {
+            events.push_back(e);
+        }
+    }
+
+    return events;
+}
+
+// The number of events of `kind` on MIDI track `slot` of `perf`.
+int Count(const Performance& perf, std::size_t slot, EventKind kind)
+{
+    return static_cast<int>(EventsOf(perf, slot, kind).size());
+}
+
+// The values of the events of `kind` on MIDI track `slot` of `perf`, in order: CC values, or a note's velocity.
+std::vector<int> ValuesOf(const Performance& perf, std::size_t slot, EventKind kind)
+{
+    std::vector<int> values;
+    for (const TrackEvent& e : EventsOf(perf, slot, kind))
+    {
+        values.push_back(e.value);
+    }
+
+    return values;
+}
+
+// The tick and the key of each event of `kind` on MIDI track `slot` of `perf`, in order.
+std::vector<std::pair<uint32_t, int>> KeysOf(const Performance& perf, std::size_t slot, EventKind kind)
+{
+    std::vector<std::pair<uint32_t, int>> keys;
+    for (const TrackEvent& e : EventsOf(perf, slot, kind))
+    {
+        keys.emplace_back(e.tick, e.key);
+    }
+
+    return keys;
+}
+
+// The bends of channel 0 of `perf` other than 0, in semitones, in order.
+std::vector<float> BendsOf(const Performance& perf)
+{
+    std::vector<float> bends;
+    for (const TrackEvent& e : EventsOf(perf, 0, EventKind::kPitch))
+    {
+        if (e.semitones != 0.0f)
+        {
+            bends.push_back(e.semitones);
+        }
+    }
+
+    return bends;
 }
 
 // A DOL whose first data section holds `data` at load address `address`.
@@ -142,198 +195,8 @@ void TestMusyxSongLists()
         Check(fanfare.name == "fanfare" && fanfare.path == "G/A/Z" && fanfare.id == 5 && fanfare.volume == 0x40,
               "the entry's name, and the low half of the ID's word and the top byte of the volume's");
     }
-    Check(past_the_data == "main.dol has no data at the song list's address",
+    Check(past_the_data == "main.dol has no data at the song list",
           "a list past the DOL's data fails: " + past_the_data);
-}
-
-// A sound manager's file with one group, two songs and two effects. The header gives the offsets and sizes of the
-// tables of groups and songs. It also gives the offsets of the groups' data, the groups' samples, the songs that no
-// group holds and the table of effects. The table of groups' first entry holds no group. Group 7's data starts with the
-// offsets of its pool, its project, its sample directory and its songs. Song 0's SNG file lies at offset 2 of the
-// group's songs and holds the bytes 1 to 4. Song 1's file lies at offset 1 of the songs that no group holds and holds
-// the bytes 5 to 7. The group's samples lie at offset 1 of the groups' samples. They're the bytes 0xaa and 0xbb. The
-// settings list one base group: the table's group 1. They give the table of effects three entries. The second holds no
-// effect.
-void TestSoundManagerFile()
-{
-    BigEndianBytes b;
-    b.PadTo(0x60);
-    b.Put32(0x20, 0x60);
-    b.Put32(0x24, 0x40);
-    b.PadTo(0x80);
-    b.U16(7).U16(0).U32(0).U32(0x20).U32(1).U32(2).PadTo(0xa0);
-    b.Put32(0x28, 0xa0);
-    b.Put32(0x2c, 0x20);
-    b.U16(7).U16(3).U32(2).U32(4).U8(0).U8(90).U16(0);
-    b.U16(7).U16(4).U32(1).U32(3).U8(0xff).U8(127).U16(0);
-    b.Put32(0x38, 0xc0);
-    b.U32(0x10).U32(0x14).U32(0x18).U32(0x1a);
-    b.U32(0x11111111).U32(0x22222222).U16(0x3333).U16(0).U32(0x01020304);
-    b.Put32(0x40, 0xe0);
-    b.U8(0).U8(0xaa).U8(0xbb);
-    b.Put32(0x48, 0xe3);
-    b.U8(0).U8(5).U8(6).U8(7);
-    b.Put32(0x10, 0xe7);
-    b.PadTo(0xe7 + 0x28).U8(1).U8(1);
-    b.Put16(0xe7 + 6, 3);
-    b.PadTo(0x120);
-    b.Put32(0x30, 0x120);
-    b.U16(7).U16(12).U8(100).U8(32).U16(0xfff0).U8(64).U8(20).U8(30).U8(0).U32(0);
-    b.U16(7).U16(0xffff).PadTo(0x140);
-    b.U16(7).U16(13).U8(127).U8(64).U16(0x10).U8(0).U8(0).U8(0).U8(0).U32(0);
-    const std::vector<uint8_t>& file = b.Data();
-    const musyx::MsmFile msm(file, "sound/test.msm");
-
-    const musyx::MsmSong in_group = msm.Song(0);
-    Check(in_group.group_id == 7 && in_group.song_id == 3 && in_group.volume == 90 &&
-              std::vector<uint8_t>(in_group.data.begin(), in_group.data.end()) == std::vector<uint8_t>{1, 2, 3, 4},
-          "a song in a group: its group, its ID, its volume and its file in the group's songs");
-    const musyx::MsmSong outside = msm.Song(1);
-    Check(outside.song_id == 4 && outside.volume == 127 &&
-              std::vector<uint8_t>(outside.data.begin(), outside.data.end()) == std::vector<uint8_t>{5, 6, 7},
-          "a song that no group holds: its file among those songs");
-    Check(ErrorOf([&] { msm.Song(2); }) == "sound/test.msm has no song 2", "a song past the table fails");
-
-    const musyx::MsmGroup group = msm.Group(7);
-    Check(group.pool.size() == 0x10 && group.pool[0] == 0x11 && group.project.size() == 0xc &&
-              group.project[0] == 0x22 && group.directory.size() == 8 && group.directory[0] == 0x33,
-          "a group's parts run from their offsets to the end of the group's data");
-    Check(std::vector<uint8_t>(group.samples.begin(), group.samples.end()) == std::vector<uint8_t>{0xaa, 0xbb},
-          "a group's samples");
-    Check(ErrorOf([&] { msm.Group(8); }) == "sound/test.msm has no group 8", "a group that the table lacks fails");
-    const std::vector<musyx::MsmGroup> base = msm.BaseGroups();
-    Check(base.size() == 1 && base[0].pool.data() == group.pool.data(), "the settings' base group");
-    const std::vector<musyx::MsmEffect> effects = msm.Effects();
-    if (Check(effects.size() == 2, "the table lists two effects"))
-    {
-        const musyx::MsmEffect& first = effects[0];
-        Check(first.number == 0 && first.group_id == 7 && first.id == 12 && first.volume == 100 && first.pan == 32 &&
-                  first.pitch == -16 && first.reverb == 20 && first.chorus == 30,
-              "the first effect: its number, group, ID, volume, pan, pitch and sends");
-        Check(effects[1].number == 2 && effects[1].id == 13 && effects[1].pitch == 16,
-              "the entry without an effect keeps its number");
-    }
-    std::vector<uint8_t> wrong_base = file;
-    wrong_base[0xe7 + 0x29] = 5;
-    Check(ErrorOf([&] { musyx::MsmFile(wrong_base, "sound/test.msm").BaseGroups(); }) ==
-              "sound/test.msm has no group at 5 in its table",
-          "a base group that the table lacks fails");
-
-    const std::vector<uint8_t> cut(file.begin(), file.begin() + 0x40);
-    Check(
-        ErrorOf([&] { musyx::MsmFile short_file(cut, "sound/test.msm"); }) == "sound/test.msm is cut short or damaged",
-        "a file shorter than the header fails");
-}
-
-// A sound test of four entries: a song, an unused entry, a stream and a sound effect. Only the song is listed. Its name
-// is message 1 of bank 47. The message file's table gives bank 47 slot 1. The word at 8 then gives that bank's offset.
-// The message's control codes set a colour, make spaces and move to the next tab stop. Bytes 0x5c and 0xc2 draw an
-// apostrophe and '!'.
-void TestSoundTest()
-{
-    BigEndianBytes messages;
-    messages.U32(1).U32(0x10).U32(0x20).U32(0).U16(47).U16(1).PadTo(0x20);
-    messages.U32(2).U32(0xc).U32(0xd).U8(0);
-    messages.U8(0x1e).U8(5).Append(TextBytes("Boo")).U8(0x5c).Append(TextBytes("s")).U8(0x10);
-    messages.Append(TextBytes("Haunted")).U8(0x0a).Append(TextBytes("Bash")).U8(0xc2).U8(0x0c).U8(0);
-
-    BigEndianBytes module;
-    module.U32(0);
-    module.U32(1).U32(47u << 16 | 1).U16(3).U16(80).U32(45);
-    module.U32(0).U32(47u << 16 | 1).U16(3).U16(80).U32(46);
-    module.U32(1).U32(47u << 16).U16(1).U16(0).U32(12);
-    module.U32(1).U32(47u << 16).U16(28).U16(0).U32(100);
-    BigEndianBytes missing;
-    missing.U32(1).U32(47u << 16 | 2).U16(3).U16(80).U32(45);
-
-    const std::vector<musyx::SoundTestSong> songs =
-        musyx::ReadSoundTest(module.Data(), "dll/test.rel", 4, 4, messages.Data(), "mess/test.dat", false);
-    Check(songs.size() == 1 && songs[0].number == 45 && songs[0].name == "Boo's Haunted Bash!",
-          "the sound test lists its song by number, with its name from the messages");
-    const auto read_past_end = [&]
-    {
-        musyx::ReadSoundTest(module.Data(), "dll/test.rel", 4, 5, messages.Data(), "mess/test.dat", false);
-    };
-    Check(ErrorOf(read_past_end) == "dll/test.rel's sound test runs past the file's end",
-          "an entry past the module's end fails");
-
-    // A list of voices in the same form names effects by their numbers. Of two entries for one effect, the later
-    // counts. An unused entry names nothing.
-    BigEndianBytes voices;
-    voices.U32(1).U32(47u << 16).U16(28).U16(0).U32(100);
-    voices.U32(1).U32(47u << 16 | 1).U16(28).U16(0).U32(100);
-    voices.U32(0).U32(47u << 16 | 1).U16(28).U16(0).U32(101);
-    voices.U32(1).U32(47u << 16 | 1).U16(3).U16(80).U32(102);
-    const std::map<uint32_t, std::string> named =
-        musyx::ReadSoundTestEffects(voices.Data(), "dll/test.rel", 0, 4, messages.Data(), "mess/test.dat", false);
-    Check(named.size() == 1 && named.contains(100) && named.at(100) == "Boo's Haunted Bash!",
-          "the list names effect 100 by its later entry");
-    const auto read_missing = [&]
-    {
-        musyx::ReadSoundTest(missing.Data(), "dll/test.rel", 0, 1, messages.Data(), "mess/test.dat", false);
-    };
-    Check(ErrorOf(read_missing) == "mess/test.dat's message 47-2 is missing", "a name that the bank lacks fails");
-}
-
-// The European messages draw accented letters from 0x91 and 0xD1. The Japanese font draws kana at those codes. Its
-// voiced and semi-voiced marks (0x80 and 0x81) join the kana before them. Message 0 of bank 47 is "Seaside Soirée" in
-// the English font, and message 1 is "がんばれ マリオパーティ4" in the Japanese font.
-void TestSoundTestGlyphs()
-{
-    BigEndianBytes messages;
-    messages.U32(1).U32(0x10).U32(0x20).U32(0).U16(47).U16(1).PadTo(0x20);
-    messages.U32(2).U32(0xc).U32(0x1b);
-    messages.Append(TextBytes("Seaside")).U8(0x10).Append(TextBytes("Soir")).U8(0xd6).Append(TextBytes("e")).U8(0);
-    messages.Append({0x96, 0x80, 0xbd, 0xaa, 0x80, 0xba, 0x10, 0xef, 0xf8, 0xd5, 0xea, 0x81, 0x84, 0xe3, 0xc8});
-    messages.Append(TextBytes("4")).U8(0);
-
-    BigEndianBytes module;
-    module.U32(1).U32(47u << 16).U16(3).U16(80).U32(45);
-    module.U32(1).U32(47u << 16 | 1).U16(3).U16(80).U32(46);
-    const std::vector<musyx::SoundTestSong> english =
-        musyx::ReadSoundTest(module.Data(), "dll/test.rel", 0, 1, messages.Data(), "mess/test.dat", false);
-    Check(english.size() == 1 && english[0].name == "Seaside Soirée", "the English font draws an accented letter");
-    const std::vector<musyx::SoundTestSong> japanese =
-        musyx::ReadSoundTest(module.Data(), "dll/test.rel", 16, 1, messages.Data(), "mess/test.dat", true);
-    Check(japanese.size() == 1 && japanese[0].name == "がんばれ マリオパーティ4",
-          "the Japanese font draws kana and joins the marks to them");
-}
-
-// A module's table of sounds lists songs and sound effects in entries of 12 bytes. A song's entry gives its song group,
-// its reverb, its file's number in the table of files and its song ID. The table of files gives each file's FSYS ID.
-void TestMusyxSoundTable()
-{
-    constexpr uint32_t kSounds = 0x10;
-    constexpr uint32_t kFiles = 0x50;
-    BigEndianBytes b;
-    b.PadTo(kSounds);
-    b.U8(0x00).U8(0).U8(3).U8(1).U16(0x0102).U16(0).U32(0); // a song
-    b.U8(0x80).U8(2).U8(0).U8(9).U16(0x0007).U16(0).U32(0); // a sound effect, with a file past the table
-    b.U8(0x00).U8(0).U8(1).U8(0).U16(0x0003).U16(0).U32(0); // a song whose file has the ID 0
-    b.U8(0x00).U8(1).U8(5).U8(2).U16(0x004d).U16(0).U32(0); // a song of the second group
-    b.PadTo(kFiles).U32(0).U32(0x6d4).U32(0x01a40800).U32(0x6bc).U32(0x00100800).U32(0x6a4);
-    const std::vector<uint8_t> module = b.Data();
-
-    const std::vector<musyx::TableSong> songs = musyx::ReadSoundTable(module, "test_rel", kSounds, 4, kFiles, 3);
-    if (Check(songs.size() == 2, "the table lists two songs: no effect, and no song without a file"))
-    {
-        Check(songs[0].sound == 0 && songs[0].group == 0 && songs[0].id == 0x0102 && songs[0].file == 0x01a40800,
-              "the first song: its entry, its group, its song ID and its file's FSYS ID");
-        Check(songs[1].sound == 3 && songs[1].group == 1 && songs[1].id == 0x004d && songs[1].file == 0x00100800,
-              "the song of the second group");
-    }
-
-    std::vector<uint8_t> past_the_files = module;
-    past_the_files[kSounds + 3] = 3;
-    const std::string no_file =
-        ErrorOf([&] { musyx::ReadSoundTable(past_the_files, "test_rel", kSounds, 4, kFiles, 3); });
-    Check(no_file == "test_rel's sound 0 names no file", "a song's file past the table of files fails: " + no_file);
-    const std::string long_sounds = ErrorOf([&] { musyx::ReadSoundTable(module, "test_rel", kSounds, 8, kFiles, 3); });
-    Check(long_sounds == "test_rel's table of sounds runs past the file's end",
-          "a table of sounds past the module's end fails: " + long_sounds);
-    const std::string long_files = ErrorOf([&] { musyx::ReadSoundTable(module, "test_rel", kSounds, 4, kFiles, 4); });
-    Check(long_files == "test_rel's table of files runs past the file's end",
-          "a table of files past the module's end fails: " + long_files);
 }
 
 // A sound room of two entries. An entry's first word holds the song group's ID in its top byte and the song's number in
@@ -368,31 +231,8 @@ void TestSoundRoom()
                   songs[1].volume == 90,
               "the second song, with two spaces in its name");
     }
-    Check(past_the_data == "main.dol has no data at the song list's address",
+    Check(past_the_data == "main.dol has no data at the sound room",
           "a sound room past the DOL's data fails: " + past_the_data);
-}
-
-// A table of two words, each the address of a song's path. The paths follow the table.
-void TestSongPaths()
-{
-    constexpr uint32_t kBase = 0x80220000;
-    BigEndianBytes b;
-    b.U32(kBase + 0x10).U32(kBase + 0x20).PadTo(0x10);
-    b.Append(TextBytes("audio/title.sng")).PadTo(0x20);
-    b.Append(TextBytes("audio/staff.sng")).PadTo(0x30);
-    const std::vector<uint8_t> file = DolWithData(kBase, b.Data());
-    const std::optional<ntdlib::Dol> dol = ntdlib::Dol::Parse(file);
-    if (!Check(dol.has_value(), "the test's DOL reads"))
-    {
-        return;
-    }
-
-    const std::vector<std::string> paths = musyx::ReadSongPaths(*dol, kBase, 2);
-    const std::string past_the_data = ErrorOf([&] { musyx::ReadSongPaths(*dol, kBase + 0x30, 1); });
-
-    Check(paths == std::vector<std::string>{"audio/title.sng", "audio/staff.sng"}, "the table gives both paths");
-    Check(past_the_data == "main.dol has no data at the song list's address",
-          "a table past the DOL's data fails: " + past_the_data);
 }
 
 // Three songs back to back in a file of songs: 0x20, 0x40 and 0x20 bytes, as the table of sizes in the DOL gives them.
@@ -425,62 +265,6 @@ void TestSongsInOneFile()
     Check(ErrorOf([&] { musyx::SongIn(*dol, kSizes, 3, short_file, 2); }) ==
               "song 2 starts past the end of the file of songs",
           "a song past the file's end fails");
-}
-
-// Yay0 data that unpacks to 30 bytes: three bytes, a reference 3 back for 6, a byte, then a reference 1 back for 20
-// with the long form of its length. The flags give the six steps from the first word's top bit down.
-void TestYay0()
-{
-    BigEndianBytes b;
-    b.Tag("Yay0").U32(30).U32(20).U32(24);
-    b.U32(0xe8000000);
-    b.U16(0x4002).U16(0x0000);
-    b.U8('A').U8('B').U8('C').U8('X').U8(20 - 18);
-    std::vector<uint8_t> before_start = b.Data();
-    before_start[20] = 0x40; // a reference 6 back after 3 bytes
-    before_start[21] = 0x05;
-    const std::vector<uint8_t> cut_short(b.Data().begin(), b.Data().end() - 1);
-
-    const std::vector<uint8_t> unpacked = UnpackYay0(b.Data());
-
-    Check(std::string(unpacked.begin(), unpacked.end()) == "ABCABCABCX" + std::string(20, 'X'),
-          "the bytes and both forms of reference unpack");
-    Check(IsYay0(b.Data()) && !IsYay0(TextBytes("Yaz0")), "Yay0 data starts with Yay0");
-    Check(ErrorOf([&] { UnpackYay0(before_start); }) == "the Yay0 data refers to bytes before its start",
-          "a reference before the start fails");
-    Check(ErrorOf([&] { UnpackYay0(cut_short); }) == "the Yay0 data is damaged", "a table cut short fails");
-    Check(ErrorOf([] { UnpackYay0(TextBytes("Yaz0 and more bytes")); }) == "not Yay0 data", "other data fails");
-}
-
-// A module with 3 sections: none, code, and data of 0x20 bytes. Its relocations against itself set the data's first two
-// words to the data's offsets 0x10 and 0x18. The table of the two words then runs up to 0x10, the first target.
-void TestRelModule()
-{
-    BigEndianBytes b;
-    b.U32(5).U32(0).U32(0).U32(3).U32(0x40).PadTo(0x28).U32(0x88).U32(8).PadTo(0x40);
-    b.U32(0).U32(0).U32(0x60 | 1).U32(8).U32(0x68).U32(0x20).PadTo(0x68);
-    b.U32(0).U32(0).U32(0x12345678).U32(0).U32(1).U32(2).U32(3).U32(4);
-    b.U32(5).U32(0x90);
-    b.U16(0).U8(202).U8(2).U32(0);
-    b.U16(0).U8(1).U8(2).U32(0x10);
-    b.U16(4).U8(1).U8(2).U32(0x18);
-    b.U16(0).U8(203).U8(0).U32(0);
-    const std::vector<uint8_t> file = b.Data();
-
-    const RelModule module(file, "test.rel");
-
-    const std::size_t table = module.At(2, 0);
-    const std::vector<std::pair<uint16_t, std::size_t>> pointers = module.TablePointers(table);
-    Check(table == 0x68, "section 2 starts at 0x68");
-    Check(pointers == std::vector<std::pair<uint16_t, std::size_t>>{{0, 0x78}, {1, 0x80}},
-          "the table's two words point at the two objects");
-    Check(module.Object(0x78).size() == 8 && module.Object(0x80).size() == 8,
-          "an object runs up to the next target or to the section's end");
-    Check(!module.Pointer(table + 8).has_value(), "a word that no relocation sets points nowhere");
-    Check(ErrorOf([&] { module.At(2, 0x20); }) == "test.rel's section 2 has no data at offset 32",
-          "a place past a section fails");
-    Check(ErrorOf([&] { module.At(0, 0); }) == "test.rel's section 0 has no data at offset 0",
-          "a section without data fails");
 }
 
 // MusyX turns a DLS envelope's timecents into whole milliseconds, and keeps their low 16 bits. The table's lowest
@@ -519,9 +303,13 @@ void TestPianoPan()
     pool.macros[4] = {Step(MacroOp::kEnd)};
 
     const musyx::MacroVoice shifted = musyx::FollowMacro(pool, 1, 127);
-    Check(shifted.piano_pan && shifted.piano_pan->scale == 100 && shifted.piano_pan->centre_key == 60 &&
-              shifted.piano_pan->centre_pan == 54,
-          "PianoPan takes its scale, centre key and centre pan from bytes 1 to 3");
+    if (!Check(shifted.piano_pan && shifted.piano_pan->scale == 100 && shifted.piano_pan->centre_key == 60 &&
+                   shifted.piano_pan->centre_pan == 54,
+               "PianoPan takes its scale, centre key and centre pan from bytes 1 to 3"))
+    {
+        return;
+    }
+
     Check(musyx::PianoPanAt(*shifted.piano_pan, 60) == 63.375 && musyx::PianoPanAt(*shifted.piano_pan, 0) == 16.5,
           "an AddKey before the step moves the key that the pan follows");
 
@@ -617,8 +405,8 @@ void TestMacroLoop()
                       LoopStep(1, 1, 0xffff), Step(MacroOp::kStopSample), Step(MacroOp::kEnd)};
     pool.macros[5] = {Step(MacroOp::kTrapEvent, {0, 5, 0, 4, 0}), Step(MacroOp::kStartSample, {1}),
                       LoopStep(0, 2, 0xffff), Step(MacroOp::kEnd)};
-    const std::vector<ntdlib::musyx::MacroStep> fade = FadeSteps();
-    pool.macros[5].insert(pool.macros[5].end(), fade.begin() + 1, fade.end());
+    const std::vector<ntdlib::musyx::MacroStep> kFade = FadeSteps();
+    pool.macros[5].insert(pool.macros[5].end(), kFade.begin() + 1, kFade.end());
 
     const musyx::MacroVoice counted = musyx::FollowMacro(pool, 1, 127);
     Check(counted.stop_ms == 300.0 && counted.approximations.empty(),
@@ -688,14 +476,17 @@ void TestMacroVariables()
 {
     using ntdlib::musyx::MacroOp;
     ntdlib::musyx::Pool pool;
+
     const auto ending = [](std::vector<ntdlib::musyx::MacroStep> steps)
     {
         steps.push_back(Step(MacroOp::kScaleVolume, {100, 0, 0xff, 0xff, 1}));
         steps.push_back(Step(MacroOp::kEnd));
         steps.push_back(Step(MacroOp::kScaleVolume, {64, 0, 0xff, 0xff, 1}));
         steps.push_back(Step(MacroOp::kEnd));
+
         return steps;
     };
+
     // The first play of Mario Party 4's se-0768: global 16 counts the plays, and global 17 holds 1.
     pool.macros[1] =
         ending({Step(MacroOp::kSetVariable, {0, 0x11, 0, 1, 0}), Step(MacroOp::kAddImmediate, {0, 0x10, 0, 0x10, 1, 0}),
@@ -735,10 +526,10 @@ void TestReleaseFade()
     using ntdlib::musyx::MacroOp;
     ntdlib::musyx::Pool pool;
     pool.macros[1] = {Step(MacroOp::kStartSample, {1})};
-    const std::vector<ntdlib::musyx::MacroStep> fade = FadeSteps();
-    pool.macros[1].insert(pool.macros[1].end(), fade.begin(), fade.end());
+    const std::vector<ntdlib::musyx::MacroStep> kFade = FadeSteps();
+    pool.macros[1].insert(pool.macros[1].end(), kFade.begin(), kFade.end());
     pool.macros[2] = {Step(MacroOp::kStartSample, {1}), Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 100, 0})};
-    pool.macros[2].insert(pool.macros[2].end(), fade.begin() + 1, fade.end());
+    pool.macros[2].insert(pool.macros[2].end(), kFade.begin() + 1, kFade.end());
 
     const musyx::MacroVoice faded = musyx::FollowMacro(pool, 1, 127);
     const musyx::MacroVoice own = musyx::FollowMacro(pool, 2, 127);
@@ -768,6 +559,7 @@ void TestHeldFade()
 {
     using ntdlib::musyx::MacroOp;
     ntdlib::musyx::Pool pool;
+
     const auto fade_to = [](uint32_t scale)
     {
         return std::vector<ntdlib::musyx::MacroStep>{
@@ -777,6 +569,7 @@ void TestHeldFade()
             Step(MacroOp::kEnd),
         };
     };
+
     pool.macros[1] = fade_to(0);
     pool.macros[2] = fade_to(64);
     pool.macros[3] = {Step(MacroOp::kStartSample, {1}), Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0xf4, 0x01}),
@@ -809,6 +602,7 @@ void TestDecayToSilence()
 {
     using ntdlib::musyx::MacroOp;
     ntdlib::musyx::Pool pool;
+
     const auto releasing = [](uint32_t table)
     {
         return std::vector<ntdlib::musyx::MacroStep>{
@@ -819,6 +613,7 @@ void TestDecayToSilence()
             Step(MacroOp::kEnd),
         };
     };
+
     pool.macros[1] = releasing(3);
     pool.macros[2] = releasing(4);
     pool.tables[3] = {20, 0, 0x2c, 0x01, 0, 0, 100, 0};
@@ -831,8 +626,8 @@ void TestDecayToSilence()
           "both voices release their envelopes");
     Check(musyx::DecayedMs(fast) == 320.0 && musyx::HeldSilenceMs(fast) == 320.0,
           "a release faster than the decay: the note ends with the decay, after the attack");
-    const double silent = 20.0 + 300.0 * musyx::kSoundFontFallDb / musyx::kEnergyFitDb;
-    Check(musyx::DecayedMs(slow) == silent && musyx::HeldSilenceMs(slow) == silent,
+    const double kSilent = 20.0 + 300.0 * kSoundFontFallDb / musyx::kEnergyFitDb;
+    Check(musyx::DecayedMs(slow) == kSilent && musyx::HeldSilenceMs(slow) == kSilent,
           "a release slower than the decay: the note ends where the files' decay has fallen silent, at " +
               std::to_string(musyx::DecayedMs(slow).value_or(0.0)) + " ms");
 }
@@ -841,7 +636,7 @@ void TestDecayToSilence()
 // envelope 2, starts sample 1, waits for the note's release and releases the envelope. Envelope 2 starts at full level
 // at once, holds it and releases over 100 ms. Sample 1 is a PCM16 sine of 3200 samples at 32000 Hz, at key 60, that
 // loops from sample 800 to its end. Song 5's MIDI setup gives channel 0 a volume of 100.
-musyx::SongGroup TestSongGroup()
+musyx::SongGroup MakeSongGroup()
 {
     using ntdlib::musyx::MacroOp;
     musyx::SongGroup group;
@@ -884,7 +679,7 @@ musyx::SongGroup TestSongGroup()
 
 // A volume table for the tests. Its entries rise from 0 to 1. The table isn't a power of the volume: the level of a
 // product isn't the product of the levels.
-musyx::VolumeTable TestVolumes()
+musyx::VolumeTable SampleVolumes()
 {
     musyx::VolumeTable table{};
     for (std::size_t i = 0; i < 128; i++)
@@ -900,7 +695,7 @@ musyx::VolumeTable TestVolumes()
 // A song of one track on channel 0. The track plays pattern 0 at tick 0 with a volume of 100, then loops back to it or
 // ends at tick 768. The pattern plays key 60 for half a beat. With `volume_change`, it then sets the channel's volume
 // to 64.
-ntdlib::musyx::Song TestSong(bool loops, bool volume_change)
+ntdlib::musyx::Song OneTrackSong(bool loops, bool volume_change)
 {
     ntdlib::musyx::Song song;
     song.tempo = 120;
@@ -924,54 +719,28 @@ ntdlib::musyx::Song TestSong(bool loops, bool volume_change)
     return song;
 }
 
-// The values of the CC7 events of channel 0.
-std::vector<int> VolumesOf(const Performance& perf)
-{
-    std::vector<int> volumes;
-    for (const TrackEvent& e : perf.tracks[0])
-    {
-        if (e.kind == EventKind::kVolume)
-        {
-            volumes.push_back(e.value);
-        }
-    }
-
-    return volumes;
-}
-
 // The game's song table gives each song a volume. MusyX multiplies the channels' volumes by it inside the volume curve.
 // On the DLS curve, each CC7 then takes the song's volume in 127ths: the MIDI setup's 100, the track entry's 100 and
 // the pattern's 64. A game's master volume multiplies them too.
 void TestMusyxSongVolume()
 {
-    const musyx::SongGroup group = TestSongGroup();
-    musyx::Instruments instruments(group, TestVolumes());
-    const ntdlib::musyx::Song song = TestSong(false, true);
+    const musyx::SongGroup group = MakeSongGroup();
+    musyx::Instruments instruments(group, SampleVolumes());
+    const ntdlib::musyx::Song song = OneTrackSong(false, true);
 
     const Performance full = musyx::PlaySong(song, {"full", "G/A/A", 5, 127}, instruments, {});
     const Performance quieter = musyx::PlaySong(song, {"quieter", "G/A/A", 5, 90}, instruments, {});
     const Performance lower = musyx::PlaySong(song, {"lower", "G/A/A", 5, 127, 101}, instruments, {});
     const Performance both = musyx::PlaySong(song, {"both", "G/A/A", 5, 90, 101}, instruments, {});
 
-    Check(VolumesOf(full) == std::vector<int>{100, 64}, "a song at 127 keeps its channels' volumes");
-    Check(VolumesOf(quieter) == std::vector<int>{71, 45}, "a song at 90 scales them by 90/127, rounded");
-    Check(VolumesOf(lower) == std::vector<int>{80, 51}, "a master volume of 101 scales them by 101/127");
-    Check(VolumesOf(both) == std::vector<int>{56, 36}, "the song's volume and the master volume multiply");
-}
-
-// The velocities of the note-ons of channel 0.
-std::vector<int> VelocitiesOf(const Performance& perf)
-{
-    std::vector<int> velocities;
-    for (const TrackEvent& e : perf.tracks[0])
-    {
-        if (e.kind == EventKind::kNoteOn)
-        {
-            velocities.push_back(e.value);
-        }
-    }
-
-    return velocities;
+    Check(ValuesOf(full, 0, EventKind::kVolume) == std::vector<int>{100, 64},
+          "a song at 127 keeps its channels' volumes");
+    Check(ValuesOf(quieter, 0, EventKind::kVolume) == std::vector<int>{71, 45},
+          "a song at 90 scales them by 90/127, rounded");
+    Check(ValuesOf(lower, 0, EventKind::kVolume) == std::vector<int>{80, 51},
+          "a master volume of 101 scales them by 101/127");
+    Check(ValuesOf(both, 0, EventKind::kVolume) == std::vector<int>{56, 36},
+          "the song's volume and the master volume multiply");
 }
 
 // A game can start a song with a fade-in, through the volume of sndSeqPlayEx or sndSeqVolume. MusyX's fader starts at
@@ -979,16 +748,16 @@ std::vector<int> VelocitiesOf(const Performance& perf)
 // channel's volume, then all of it. The notes keep their velocities.
 void TestMusyxSongFadeIn()
 {
-    const musyx::SongGroup group = TestSongGroup();
-    musyx::Instruments instruments(group, TestVolumes());
-    const ntdlib::musyx::Song song = TestSong(false, true);
+    const musyx::SongGroup group = MakeSongGroup();
+    musyx::Instruments instruments(group, SampleVolumes());
+    const ntdlib::musyx::Song song = OneTrackSong(false, true);
     musyx::GameSong faded{"faded", "G/A/A", 5, 127};
     faded.fade_in_ms = 20.0;
 
     const Performance plain = musyx::PlaySong(song, {"plain", "G/A/A", 5, 127}, instruments, {});
     const Performance fading = musyx::PlaySong(song, faded, instruments, {});
 
-    const std::vector<int> volumes = VolumesOf(fading);
+    const std::vector<int> volumes = ValuesOf(fading, 0, EventKind::kVolume);
     std::string listed;
     for (const int v : volumes)
     {
@@ -996,48 +765,43 @@ void TestMusyxSongFadeIn()
     }
     Check(volumes == std::vector<int>{0, 25, 50, 75, 100, 64},
           "the song's CC7 rises from 0 to 100 in steps of 5 ms, then the pattern sets 64:" + listed);
-    Check(VelocitiesOf(fading) == VelocitiesOf(plain), "the fade-in leaves the notes' velocities alone");
+    Check(ValuesOf(fading, 0, EventKind::kNoteOn) == ValuesOf(plain, 0, EventKind::kNoteOn),
+          "the fade-in leaves the notes' velocities alone");
 }
 
-// The events of channel 0 of `perf` of `kind`.
-std::vector<TrackEvent> EventsOf(const Performance& perf, EventKind kind)
+// The song group of the tests of tail cuts: MakeSongGroup with a macro that sets linear envelope 3 instead. The
+// envelope has no attack or decay, a full sustain and a release of 200 ms.
+musyx::SongGroup TailCutGroup()
 {
-    std::vector<TrackEvent> events;
-    for (const TrackEvent& e : perf.tracks[0])
-    {
-        if (e.kind == kind)
-        {
-            events.push_back(e);
-        }
-    }
+    musyx::SongGroup group = MakeSongGroup();
+    group.pool.macros[1][1] = Step(ntdlib::musyx::MacroOp::kSetAdsr, {3, 0, 0});
+    group.pool.tables[3] = {0, 0, 0, 0, 0x00, 0x10, 200, 0};
 
-    return events;
+    return group;
 }
 
-// A SoundFont plays a release to its end. The files fit MusyX's linear release by its energy, so their release sounds
-// on after the game's has ended. Once the game's voices of a channel have fallen silent, CC11 takes the files' tail
-// down along the game's line, and CC120 stops it. CC11 then goes back to 127. TestSongGroup's macro here sets linear
-// envelope 3: no attack or decay, a full sustain and a release of 200 ms. The note of TestSong ends after 192 of the
-// song's 768 ticks a second, so the game's voice falls silent about 154 ticks after the note-off.
+// A SoundFont plays a release to its end. The files fit MusyX's linear release by its energy. Their release therefore
+// sounds on after the release of the game has ended. Once the game's voices of a channel have fallen silent, CC11 takes
+// the tail of the files down along the game's line, and CC120 stops it. CC11 then goes back to 127. The note of
+// OneTrackSong ends after 192 of the song's 768 ticks a second. The game's voice falls silent 200 ms later, about 154
+// ticks after the note-off.
 void TestMusyxTailCut()
 {
-    using ntdlib::musyx::MacroOp;
-    musyx::SongGroup group = TestSongGroup();
-    group.pool.macros[1][1] = Step(MacroOp::kSetAdsr, {3, 0, 0});
-    group.pool.tables[3] = {0, 0, 0, 0, 0x00, 0x10, 200, 0};
-    musyx::Instruments instruments(group, TestVolumes());
-    const ntdlib::musyx::Song song = TestSong(false, false);
-    const Performance perf = musyx::PlaySong(song, {"tail", "G/A/A", 5, 127}, instruments, {});
+    constexpr double kReleaseTicks = 200.0 * 768.0 / 1000.0;
+    const musyx::SongGroup group = TailCutGroup();
+    musyx::Instruments instruments(group, SampleVolumes());
 
-    const std::vector<TrackEvent> offs = EventsOf(perf, EventKind::kNoteOff);
-    const std::vector<TrackEvent> cuts = EventsOf(perf, EventKind::kSoundOff);
-    Check(offs.size() == 1 && cuts.size() == 1, "one note and one cut");
-    if (offs.size() != 1 || cuts.size() != 1)
+    const Performance perf = musyx::PlaySong(OneTrackSong(false, false), {"tail", "G/A/A", 5, 127}, instruments, {});
+
+    const std::vector<TrackEvent> offs = EventsOf(perf, 0, EventKind::kNoteOff);
+    const std::vector<TrackEvent> cuts = EventsOf(perf, 0, EventKind::kSoundOff);
+    if (!Check(offs.size() == 1 && cuts.size() == 1, "one note and one cut"))
     {
         return;
     }
+
     const double after = static_cast<double>(cuts[0].tick) - offs[0].tick;
-    Check(std::abs(after - 153.6) <= 2.0,
+    Check(std::abs(after - kReleaseTicks) <= 2.0,
           "the cut comes where the game's release ends, " + std::to_string(after) + " ticks after the note-off");
 
     // After the note-off, CC11 falls from about 58% of the release on, a step every 5 ms, to 0 at the cut. It is 127
@@ -1045,7 +809,7 @@ void TestMusyxTailCut()
     std::vector<int> before;
     bool restored = false;
     uint32_t first = 0;
-    for (const TrackEvent& e : EventsOf(perf, EventKind::kExpression))
+    for (const TrackEvent& e : EventsOf(perf, 0, EventKind::kExpression))
     {
         if (e.tick <= offs[0].tick)
         {
@@ -1053,7 +817,10 @@ void TestMusyxTailCut()
         }
         if (e.tick < cuts[0].tick || (e.tick == cuts[0].tick && e.value == 0))
         {
-            first = before.empty() ? e.tick : first;
+            if (before.empty())
+            {
+                first = e.tick;
+            }
             before.push_back(e.value);
         }
         else
@@ -1064,30 +831,50 @@ void TestMusyxTailCut()
     Check(before.size() >= 10 && std::is_sorted(before.rbegin(), before.rend()) && before.back() == 0 &&
               before.front() < 127,
           "CC11 falls step by step to 0 at the cut, in " + std::to_string(before.size()) + " steps");
-    const double share = (static_cast<double>(first) - offs[0].tick) / 153.6;
+    const double share = (static_cast<double>(first) - offs[0].tick) / kReleaseTicks;
     Check(share > 0.55 && share < 0.65, "the fall starts at " + std::to_string(share) + " of the release");
     Check(restored, "CC11 goes back to 127 after the cut");
+}
 
-    // A note that starts before the game's release ends leaves the tail alone. The second note's tail is cut.
-    ntdlib::musyx::Song two = song;
+// A note that starts before the game's release ends leaves the tail alone. The second note's tail is cut.
+void TestMusyxTailUnderNextNote()
+{
+    const musyx::SongGroup group = TailCutGroup();
+    musyx::Instruments instruments(group, SampleVolumes());
+    ntdlib::musyx::Song two = OneTrackSong(false, false);
     two.patterns[0].events.push_back(
         {.tick = 230, .kind = ntdlib::musyx::PatternEventKind::kNote, .key = 62, .velocity = 100, .length = 192});
+
     const Performance overlapped = musyx::PlaySong(two, {"two", "G/A/A", 5, 127}, instruments, {});
-    const std::vector<TrackEvent> cut_once = EventsOf(overlapped, EventKind::kSoundOff);
-    const std::vector<TrackEvent> two_offs = EventsOf(overlapped, EventKind::kNoteOff);
+
+    const std::vector<TrackEvent> cut_once = EventsOf(overlapped, 0, EventKind::kSoundOff);
+    const std::vector<TrackEvent> two_offs = EventsOf(overlapped, 0, EventKind::kNoteOff);
     Check(cut_once.size() == 1 && two_offs.size() == 2 && cut_once[0].tick > two_offs[1].tick,
           "a tail under the next note sounds on, and the last note's tail is cut");
+}
 
-    // A song that loops cuts the tail in each pass. A DLS release isn't cut: the files' release ends with the game's.
-    const Performance looped = musyx::PlaySong(TestSong(true, false), {"loop", "G/A/A", 5, 127}, instruments, {});
-    Check(looped.loop && EventsOf(looped, EventKind::kSoundOff).size() == 1, "the loop's tail is cut");
-    musyx::Instruments dls_instruments(TestSongGroup(), TestVolumes());
-    const Performance dls = musyx::PlaySong(song, {"dls", "G/A/A", 5, 127}, dls_instruments, {});
-    Check(EventsOf(dls, EventKind::kSoundOff).empty(), "a DLS release isn't cut");
+// A song that loops cuts the tail in each pass. A DLS release isn't cut: the files' release ends with the game's.
+void TestMusyxLoopTailCut()
+{
+    const musyx::SongGroup group = TailCutGroup();
+    musyx::Instruments instruments(group, SampleVolumes());
+    const musyx::SongGroup dls_group = MakeSongGroup();
+    musyx::Instruments dls_instruments(dls_group, SampleVolumes());
 
-    // A voice that fades after its note's release and plays its linear release at a later KeyOff falls silent at the
-    // end of that release, 250 + 200 ms after the note-off. The files' release sounds on, and the cut ends it there.
-    musyx::SongGroup fading = group;
+    const Performance looped = musyx::PlaySong(OneTrackSong(true, false), {"loop", "G/A/A", 5, 127}, instruments, {});
+    const Performance dls = musyx::PlaySong(OneTrackSong(false, false), {"dls", "G/A/A", 5, 127}, dls_instruments, {});
+
+    Check(looped.loop && EventsOf(looped, 0, EventKind::kSoundOff).size() == 1, "the loop's tail is cut");
+    Check(EventsOf(dls, 0, EventKind::kSoundOff).empty(), "a DLS release isn't cut");
+}
+
+// A voice that fades after its note's release and plays its linear release at a later KeyOff falls silent at the
+// end of that release, 250 + 200 ms after the note-off. The files' release sounds on, and the cut ends it there.
+void TestMusyxFadeTailCut()
+{
+    using ntdlib::musyx::MacroOp;
+    constexpr double kFadeTicks = (250.0 + 200.0) * 768.0 / 1000.0;
+    musyx::SongGroup fading = TailCutGroup();
     fading.pool.macros[1] = {Step(MacroOp::kModeSelect, {1, 1}),
                              Step(MacroOp::kSetAdsr, {3, 0, 0}),
                              Step(MacroOp::kStartSample, {1}),
@@ -1097,22 +884,26 @@ void TestMusyxTailCut()
                              Step(MacroOp::kKeyOff),
                              Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0xe8, 0x03}),
                              Step(MacroOp::kEnd)};
-    musyx::Instruments fading_instruments(fading, TestVolumes());
-    const Performance faded = musyx::PlaySong(song, {"fade", "G/A/A", 5, 127}, fading_instruments, {});
-    const std::vector<TrackEvent> fade_offs = EventsOf(faded, EventKind::kNoteOff);
-    const std::vector<TrackEvent> fade_cuts = EventsOf(faded, EventKind::kSoundOff);
+    musyx::Instruments fading_instruments(fading, SampleVolumes());
+
+    const Performance faded =
+        musyx::PlaySong(OneTrackSong(false, false), {"fade", "G/A/A", 5, 127}, fading_instruments, {});
+
+    const std::vector<TrackEvent> fade_offs = EventsOf(faded, 0, EventKind::kNoteOff);
+    const std::vector<TrackEvent> fade_cuts = EventsOf(faded, 0, EventKind::kSoundOff);
     const double fade_after = fade_offs.size() == 1 && fade_cuts.size() == 1
                                   ? static_cast<double>(fade_cuts[0].tick) - fade_offs[0].tick
                                   : 0.0;
-    Check(std::abs(fade_after - 345.6) <= 3.0, "a fade that ends in a linear release is cut where the release ends, " +
-                                                   std::to_string(fade_after) + " ticks after the note-off");
+    Check(std::abs(fade_after - kFadeTicks) <= 3.0,
+          "a fade that ends in a linear release is cut where the release ends, " + std::to_string(fade_after) +
+              " ticks after the note-off");
 }
 
 // The velocity whose square times the squares of CC7 `volume` and CC11 127 gives the table's level of `velocity` times
 // the volume that CC7 stands for, on the table or on the DLS curve.
 double TableVelocity(int velocity, int volume, bool on_table)
 {
-    const musyx::VolumeTable table = TestVolumes();
+    const musyx::VolumeTable table = SampleVolumes();
     const double written = volume / 127.0;
     const double channel = on_table ? musyx::TableVolume(table, written * written) : written;
     return 127.0 * std::sqrt(musyx::TableLevel(table, velocity / 127.0 * channel)) / written;
@@ -1122,14 +913,14 @@ double TableVelocity(int velocity, int volume, bool on_table)
 double TableMiss(int velocity, int volume, double product)
 {
     const double level = velocity / 127.0 * volume / 127.0;
-    return 20.0 * std::log10(level * level / musyx::TableLevel(TestVolumes(), product));
+    return 20.0 * std::log10(level * level / musyx::TableLevel(SampleVolumes(), product));
 }
 
 // MusyX's volume table gives a voice's level at a volume in 127ths. MusyX interpolates between the entries.
 void TestMusyxVolumeTable()
 {
-    const musyx::VolumeTable table = TestVolumes();
-    musyx::SongGroup group = TestSongGroup();
+    const musyx::VolumeTable table = SampleVolumes();
+    musyx::SongGroup group = MakeSongGroup();
     group.pool.macros[2] = group.pool.macros[1];
     group.pool.macros[2][0] = Step(ntdlib::musyx::MacroOp::kModeSelect, {0, 1});
     musyx::Instruments instruments(group, table);
@@ -1153,16 +944,16 @@ void TestMusyxVolumeTable()
 void TestMusyxTableLevels()
 {
     using ntdlib::musyx::PatternEventKind;
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
     group.pool.macros[2] = group.pool.macros[1];
     group.pool.macros[2][0] = Step(ntdlib::musyx::MacroOp::kModeSelect, {0, 1});
     group.group.pages.push_back({.object = 2, .priority = 0, .max_voices = 8, .program = 1});
     musyx::SongGroup table_group = group;
     table_group.group.pages[0].object = 2;
-    musyx::Instruments table_instruments(table_group, TestVolumes());
-    musyx::Instruments mixed_instruments(group, TestVolumes());
-    const ntdlib::musyx::Song song = TestSong(false, true);
-    ntdlib::musyx::Song mixed_song = TestSong(false, false);
+    musyx::Instruments table_instruments(table_group, SampleVolumes());
+    musyx::Instruments mixed_instruments(group, SampleVolumes());
+    const ntdlib::musyx::Song song = OneTrackSong(false, true);
+    ntdlib::musyx::Song mixed_song = OneTrackSong(false, false);
     std::vector<ntdlib::musyx::PatternEvent>& events = mixed_song.patterns[0].events;
     events.push_back({.tick = 240, .kind = PatternEventKind::kProgram, .value = 1});
     events.push_back({.tick = 288, .kind = PatternEventKind::kNote, .key = 62, .velocity = 100, .length = 96});
@@ -1171,14 +962,16 @@ void TestMusyxTableLevels()
     const Performance mixed = musyx::PlaySong(mixed_song, {"mixed", "G/A/A", 5, 127, 100}, mixed_instruments, {});
 
     constexpr double kChannel = 100.0 / 127.0 * 100.0 / 127.0;
+
     const auto written = [](double volume)
     {
-        return static_cast<int>(std::lround(127.0 * std::sqrt(musyx::TableLevel(TestVolumes(), volume))));
+        return static_cast<int>(std::lround(127.0 * std::sqrt(musyx::TableLevel(SampleVolumes(), volume))));
     };
-    const std::vector<int> volumes = VolumesOf(table);
+
+    const std::vector<int> volumes = ValuesOf(table, 0, EventKind::kVolume);
     Check(volumes == std::vector<int>{written(kChannel), written(64.0 / 127.0 * 100.0 / 127.0)},
           "CC7 takes the square root of the table's level of the channel's volume times the master volume");
-    const std::vector<int> velocities = VelocitiesOf(table);
+    const std::vector<int> velocities = ValuesOf(table, 0, EventKind::kNoteOn);
     Check(velocities.size() == 1 && !volumes.empty() &&
               std::abs(velocities[0] - TableVelocity(100, volumes[0], true)) <= 0.5,
           "the velocity gives the note the table's level of the velocity times the volume that CC7 stands for");
@@ -1187,8 +980,8 @@ void TestMusyxTableLevels()
           "the note plays within 0.15 dB of the table's level of the whole product");
     Check(table.approximations.empty(), "a channel on the table reports no approximation");
 
-    const std::vector<int> mixed_volumes = VolumesOf(mixed);
-    const std::vector<int> mixed_velocities = VelocitiesOf(mixed);
+    const std::vector<int> mixed_volumes = ValuesOf(mixed, 0, EventKind::kVolume);
+    const std::vector<int> mixed_velocities = ValuesOf(mixed, 0, EventKind::kNoteOn);
     Check(mixed_volumes == std::vector<int>{static_cast<int>(std::lround(127.0 * kChannel))},
           "a channel with both curves keeps the DLS curve's CC7");
     Check(mixed_velocities.size() == 2 && mixed_velocities[0] == 100, "the note on the DLS curve keeps its velocity");
@@ -1203,10 +996,10 @@ void TestMusyxTableLevels()
 // A song that loops plays at the output's rate, marks its loop and converts to files that independent readers accept.
 void TestMusyxSong()
 {
-    const musyx::SongGroup group = TestSongGroup();
-    musyx::Instruments instruments(group, TestVolumes());
+    const musyx::SongGroup group = MakeSongGroup();
+    musyx::Instruments instruments(group, SampleVolumes());
 
-    const Conversion c = musyx::ConvertSong(TestSong(true, false), {"loop", "G/A/A", 5, 127}, instruments, {});
+    const Conversion c = musyx::ConvertSong(OneTrackSong(true, false), {"loop", "G/A/A", 5, 127}, instruments, {});
 
     const Performance& perf = c.performance;
     constexpr double kBpm = 120.0 * musyx::kOutputRate / musyx::kNominalRate;
@@ -1228,18 +1021,19 @@ void TestMusyxSong()
 void TestMusyxPushedGroups()
 {
     using ntdlib::musyx::MacroOp;
-    musyx::SongGroup startup = TestSongGroup();
+    musyx::SongGroup startup = MakeSongGroup();
     startup.pool.macros[2] = {Step(MacroOp::kStartSample, {9}), Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0xff, 0xff})};
     startup.samples[0].id = 9;
-    musyx::SongGroup bank = TestSongGroup();
+    musyx::SongGroup bank = MakeSongGroup();
     bank.pool.macros[1] = {Step(MacroOp::kStartSample, {1}), Step(MacroOp::kEnd)};
     const auto pushed = std::make_shared<const musyx::SongGroup>(startup);
 
     musyx::AddPushedGroups(bank, {pushed});
-    musyx::Instruments instruments(bank, TestVolumes(), {{9, "s0_9"}});
+    musyx::Instruments instruments(bank, SampleVolumes(), {{9, "s0_9"}});
     musyx::GameEffect effect;
     effect.name = "pushed";
     effect.row = {.id = 1, .object = 2, .max_voices = 1, .key = 60};
+
     const Conversion c = musyx::ConvertEffect(effect, instruments);
 
     Check(bank.pool.macros.at(1).size() == 2 && bank.pool.macros.count(2) == 1,
@@ -1258,8 +1052,8 @@ void TestMusyxPushedGroups()
 // index in its name. Its song's SFZ files play that file. Its SoundFont keeps the name "s1".
 void TestMusyxSfzSampleNames()
 {
-    const musyx::SongGroup first = TestSongGroup();
-    musyx::SongGroup other = TestSongGroup();
+    const musyx::SongGroup first = MakeSongGroup();
+    musyx::SongGroup other = MakeSongGroup();
     for (uint8_t& byte : other.sample_data)
     {
         byte ^= 0x5a;
@@ -1272,17 +1066,24 @@ void TestMusyxSfzSampleNames()
         std::make_shared<const musyx::SongGroup>(moved), std::make_shared<const musyx::SongGroup>(first)};
 
     const std::vector<std::map<uint16_t, std::string>> names = musyx::SfzSampleNames(groups);
-    musyx::Instruments named(*groups[1], TestVolumes(), names[1]);
-    musyx::Instruments plain(*groups[1], TestVolumes());
-    const Conversion c = musyx::ConvertSong(TestSong(true, false), {"loop", "G/A/A", 5, 127}, named, {});
-    const Conversion unnamed = musyx::ConvertSong(TestSong(true, false), {"loop", "G/A/A", 5, 127}, plain, {});
+    if (!Check(names.size() == 4, "each group has its names"))
+    {
+        return;
+    }
+
+    musyx::Instruments named(*groups[1], SampleVolumes(), names[1]);
+    musyx::Instruments plain(*groups[1], SampleVolumes());
+
+    const Conversion c = musyx::ConvertSong(OneTrackSong(true, false), {"loop", "G/A/A", 5, 127}, named, {});
+    const Conversion unnamed = musyx::ConvertSong(OneTrackSong(true, false), {"loop", "G/A/A", 5, 127}, plain, {});
 
     const auto name_of = [&names](std::size_t group)
     {
         const auto found = names[group].find(1);
         return found != names[group].end() ? found->second : std::string("none");
     };
-    Check(names.size() == 4 && name_of(0) == "s1" && name_of(1) == "s1_1" && name_of(2) == "s1_1" && name_of(3) == "s1",
+
+    Check(name_of(0) == "s1" && name_of(1) == "s1_1" && name_of(2) == "s1_1" && name_of(3) == "s1",
           "groups 0 and 3 name sample 1 s1, and groups 1 and 2 s1_1: " + name_of(0) + " " + name_of(1) + " " +
               name_of(2) + " " + name_of(3));
     Check(c.sfz.samples.size() == 1 && c.sfz.samples[0].name == "s1_1.wav", "group 1's song writes s1_1.wav");
@@ -1297,12 +1098,12 @@ void TestMusyxSfzSampleNames()
 // minute, and 0.089% faster at the output's rate.
 void TestMusyxIntegerTickStep()
 {
-    const musyx::SongGroup group = TestSongGroup();
-    musyx::Instruments instruments(group, TestVolumes());
+    const musyx::SongGroup group = MakeSongGroup();
+    musyx::Instruments instruments(group, SampleVolumes());
     musyx::GameSong listed{"early", "G/A/A", 5, 127};
     listed.tick_step = musyx::TickStep::kInteger;
 
-    const Performance perf = musyx::PlaySong(TestSong(true, false), listed, instruments, {});
+    const Performance perf = musyx::PlaySong(OneTrackSong(true, false), listed, instruments, {});
 
     constexpr double kBpm = 49920.0 / 65536.0 * 1000.0 * 60.0 / 384.0 * musyx::kOutputRate / musyx::kNominalRate;
     Check(!perf.tempo.empty() && std::abs(perf.tempo[0].bpm - kBpm) < 0.01,
@@ -1333,13 +1134,13 @@ Conversion ConvertScaledCopy(uint32_t scale, const std::string& name)
 {
     using ntdlib::musyx::MacroOp;
     using ntdlib::musyx::PatternEventKind;
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
     group.pool.macros[2] = group.pool.macros[1];
     std::vector<ntdlib::musyx::MacroStep>& macro = group.pool.macros[2];
     macro.insert(macro.begin() + 1, Step(MacroOp::kScaleVolume, {scale, 0, 0, 0, 1}));
     group.group.pages.push_back({.object = 2, .priority = 0, .max_voices = 8, .program = 1});
-    musyx::Instruments instruments(group, TestVolumes());
-    ntdlib::musyx::Song song = TestSong(false, false);
+    musyx::Instruments instruments(group, SampleVolumes());
+    ntdlib::musyx::Song song = OneTrackSong(false, false);
     std::vector<ntdlib::musyx::PatternEvent>& events = song.patterns[0].events;
     events.push_back({.tick = 240, .kind = PatternEventKind::kProgram, .value = 1});
     events.push_back({.tick = 288, .kind = PatternEventKind::kNote, .key = 62, .velocity = 100, .length = 96});
@@ -1410,7 +1211,8 @@ void TestMusyxZoneAttenuation()
 }
 
 // The values of `opcode`, such as "volume", in the SFZ files of `c`, in the order of the files and their regions. The
-// regions from key 84 up play the test sample at the DSP's highest pitch. They're left out (PlaysKey60).
+// regions from key 84 up play the test sample at the DSP's highest pitch. Every region whose lowest key is above 60 is
+// left out.
 std::vector<std::string> OpcodeValues(const Conversion& c, const std::string& opcode)
 {
     const std::string key = " " + opcode + "=";
@@ -1426,6 +1228,7 @@ std::vector<std::string> OpcodeValues(const Conversion& c, const std::string& op
             {
                 continue;
             }
+
             const std::size_t start = at + key.size();
             values.push_back(f.text.substr(start, f.text.find_first_of(" \n", start) - start));
         }
@@ -1458,9 +1261,10 @@ void TestMusyxSilentZone()
 // The player writes a note on the table at the velocity whose square is the table's level of the note's velocity.
 double AddedResponse(int velocity)
 {
-    const musyx::VolumeTable table = TestVolumes();
+    const musyx::VolumeTable table = SampleVolumes();
     const double written = velocity / 127.0;
     const double note = musyx::TableVolume(table, written * written);
+
     const auto level = [&table](double volume)
     {
         return musyx::TableLevel(table, 80.0 / 127.0 * volume + 20.0 / 127.0);
@@ -1480,7 +1284,7 @@ void TestMusyxVolumeAddition()
     namespace sf2 = seqlib::sf2;
     using ntdlib::musyx::MacroOp;
     using ntdlib::musyx::PatternEventKind;
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
     group.pool.macros[2] = group.pool.macros[1];
     std::vector<ntdlib::musyx::MacroStep>& macro = group.pool.macros[2];
     macro[0] = Step(MacroOp::kModeSelect, {0, 1});
@@ -1488,8 +1292,8 @@ void TestMusyxVolumeAddition()
     group.pool.layers[0x8000] = {{.object = 2, .volume = 0}};
     group.group.pages.push_back({.object = 0x8000, .priority = 0, .max_voices = 8, .program = 1});
     group.group.pages.push_back({.object = 2, .priority = 0, .max_voices = 8, .program = 2});
-    musyx::Instruments instruments(group, TestVolumes());
-    ntdlib::musyx::Song song = TestSong(false, false);
+    musyx::Instruments instruments(group, SampleVolumes());
+    ntdlib::musyx::Song song = OneTrackSong(false, false);
     std::vector<ntdlib::musyx::PatternEvent>& events = song.patterns[0].events;
     events.push_back({.tick = 200, .kind = PatternEventKind::kProgram, .value = 1});
     events.push_back({.tick = 240, .kind = PatternEventKind::kNote, .key = 62, .velocity = 100, .length = 96});
@@ -1499,10 +1303,12 @@ void TestMusyxVolumeAddition()
     const Conversion c = musyx::ConvertSong(song, {"added", "G/A/A", 5, 127}, instruments, {});
 
     const SampleZoneAttenuation a = AttenuationOf(c.sf2);
+
     const auto generator = [](double volume)
     {
-        return static_cast<int>(std::lround(-500.0 * std::log10(musyx::TableLevel(TestVolumes(), volume))));
+        return static_cast<int>(std::lround(-500.0 * std::log10(musyx::TableLevel(SampleVolumes(), volume))));
     };
+
     std::vector<int> amounts;
     for (const std::array<int, 5>& m : a.modulators)
     {
@@ -1540,10 +1346,10 @@ void TestMusyxVolumeAddition()
 void TestMusyxSfzRelease()
 {
     const double kSeconds = 0.1 * (8.0 * 20.0 / std::numbers::ln10) / 96.5 * musyx::kNominalRate / musyx::kOutputRate;
-    const musyx::SongGroup group = TestSongGroup();
-    musyx::Instruments instruments(group, TestVolumes());
+    const musyx::SongGroup group = MakeSongGroup();
+    musyx::Instruments instruments(group, SampleVolumes());
 
-    const Conversion c = musyx::ConvertSong(TestSong(false, false), {"release", "G/A/A", 5, 127}, instruments, {});
+    const Conversion c = musyx::ConvertSong(OneTrackSong(false, false), {"release", "G/A/A", 5, 127}, instruments, {});
 
     const std::vector<std::string> releases = OpcodeValues(c, "ampeg_release");
     Check(releases.size() == 1 && std::abs(std::stod(releases[0]) - kSeconds) < 1e-6,
@@ -1556,11 +1362,12 @@ std::vector<uint32_t> NoteEnds(const musyx::SongGroup& group, uint16_t macro, ui
 {
     musyx::SongGroup played = group;
     played.pool.macros[1] = played.pool.macros[macro];
-    musyx::Instruments instruments(played, TestVolumes());
-    ntdlib::musyx::Song song = TestSong(false, false);
+    musyx::Instruments instruments(played, SampleVolumes());
+    ntdlib::musyx::Song song = OneTrackSong(false, false);
     song.patterns[0].events[0].length = length;
 
     const Performance perf = musyx::PlaySong(song, {"attack", "G/A/A", 5, 127}, instruments, {});
+
     std::vector<uint32_t> ends;
     for (const TrackEvent& e : perf.tracks[0])
     {
@@ -1586,7 +1393,7 @@ std::vector<uint32_t> NoteEnds(const musyx::SongGroup& group, uint16_t macro, ui
 void TestMusyxAttackAfterRelease()
 {
     using ntdlib::musyx::MacroOp;
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
     const ntdlib::musyx::MacroStep select = Step(MacroOp::kModeSelect, {1, 1});
     const ntdlib::musyx::MacroStep adsr = Step(MacroOp::kSetAdsr, {7, 0, 0});
     const ntdlib::musyx::MacroStep start = Step(MacroOp::kStartSample, {1});
@@ -1601,8 +1408,8 @@ void TestMusyxAttackAfterRelease()
                             Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0xe8, 0x03}),
                             Step(MacroOp::kEnd)};
     group.pool.macros[4] = {select, adsr, start, Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 100, 0})};
-    const std::vector<ntdlib::musyx::MacroStep> fade = FadeSteps();
-    group.pool.macros[4].insert(group.pool.macros[4].end(), fade.begin() + 1, fade.end());
+    const std::vector<ntdlib::musyx::MacroStep> kFade = FadeSteps();
+    group.pool.macros[4].insert(group.pool.macros[4].end(), kFade.begin() + 1, kFade.end());
     group.pool.macros[5] = {select,
                             adsr,
                             start,
@@ -1630,8 +1437,8 @@ void TestMusyxAttackAfterRelease()
     Check(NoteEnds(group, 5, 14) == std::vector<uint32_t>{14}, "a voice that releases at the release ends there");
 }
 
-// A voice can play on after its note's release until a later KeyOff. The macros here play on the DLS curve, with
-// TestSongGroup's envelope: full level at once, and a release of 100 ms. A note of 192 ticks lasts 250 ms.
+// A voice can play on after its note's release until a later KeyOff. The macros here play on the DLS curve. They use
+// the envelope of MakeSongGroup: full level at once, and a release of 100 ms. A note of 192 ticks lasts 250 ms.
 // Macro 3 waits for the release, ramps the volume to 96/128 over 250 ms and then releases its envelope. The voice
 // fades until the KeyOff (KeyOff::kFade) and releases there. The file's note ends at the release.
 // Macro 4 waits 500 ms, then releases its envelope, whatever the note does. Its note lasts until the KeyOff, 384 ticks.
@@ -1640,7 +1447,7 @@ void TestMusyxAttackAfterRelease()
 void TestMusyxLaterKeyOff()
 {
     using ntdlib::musyx::MacroOp;
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
     const ntdlib::musyx::MacroStep select = Step(MacroOp::kModeSelect, {1, 1});
     const ntdlib::musyx::MacroStep adsr = Step(MacroOp::kSetAdsr, {2, 0, 1});
     const ntdlib::musyx::MacroStep start = Step(MacroOp::kStartSample, {1});
@@ -1691,44 +1498,8 @@ void TestMusyxLaterKeyOff()
               (stopped.empty() ? std::string("none") : std::to_string(stopped[0])));
 }
 
-// A zone whose voice fades after its release gets a release that reaches 20 dB down when the fade does. The test's
-// macro plays on the DLS curve, where the level is the square of the volume. With FadeSteps, the volume reaches
-// sqrt(0.1) at 120 + 800 × (1 - sqrt(0.1) / 0.625) ms of MusyX's clock, about 515.2 ms. A SoundFont release falls
-// 100 dB in its time, and an SFZ release 8 × 20 / ln 10 dB.
-void TestMusyxReleaseFade()
-{
-    namespace sf2 = seqlib::sf2;
-    musyx::SongGroup group = TestSongGroup();
-    std::vector<ntdlib::musyx::MacroStep>& macro = group.pool.macros[1];
-    macro.resize(3);
-    const std::vector<ntdlib::musyx::MacroStep> fade = FadeSteps();
-    macro.insert(macro.end(), fade.begin(), fade.end());
-    musyx::Instruments instruments(group, TestVolumes());
-
-    const Conversion c = musyx::ConvertSong(TestSong(false, false), {"fade", "G/A/A", 5, 127}, instruments, {});
-
-    const double fit_ms = (120.0 + 800.0 * (1.0 - std::sqrt(0.1) / 0.625)) * musyx::kNominalRate / musyx::kOutputRate;
-    const sf2::Records records = sf2::Read(c.sf2);
-    std::vector<int> releases;
-    for (std::size_t zone = 0; zone + 1 < records.Count("ibag", 4); zone++)
-    {
-        const std::map<uint16_t, uint16_t> gens = records.ZoneGens(zone);
-        if (gens.contains(sf2::kSampleId) && gens.contains(sf2::kReleaseVolEnv) && PlaysKey60(gens))
-        {
-            releases.push_back(static_cast<int16_t>(gens.at(sf2::kReleaseVolEnv)));
-        }
-    }
-    const int expected = static_cast<int>(std::lround(1200.0 * std::log2(5.0 * fit_ms / 1000.0)));
-    Check(releases.size() == 1 && std::abs(releases[0] - expected) <= 1,
-          "the SoundFont release lasts 5 times the fade's time 20 dB down: " + std::to_string(expected) + " timecents");
-    const std::vector<std::string> sfz = OpcodeValues(c, "ampeg_release");
-    const double seconds = 8.0 / std::numbers::ln10 * fit_ms / 1000.0;
-    Check(sfz.size() == 1 && std::abs(std::stod(sfz[0]) - seconds) < 1e-3,
-          "the SFZ release lasts " + std::to_string(seconds) + " s: " + (sfz.empty() ? "none" : sfz[0]));
-    Check(c.performance.approximations.empty(), "the conversion reports no approximation");
-}
-
-// The values of generator `oper` in the zones of `sf2` that play a sample, in the order of the zones.
+// The values of generator `oper` in the zones of `sf2` that play a sample at key 60 (PlaysKey60), in the order of the
+// zones.
 std::vector<int> SampleZoneValues(const std::vector<uint8_t>& sf2, uint16_t oper)
 {
     const seqlib::sf2::Records records = seqlib::sf2::Read(sf2);
@@ -1745,6 +1516,35 @@ std::vector<int> SampleZoneValues(const std::vector<uint8_t>& sf2, uint16_t oper
     return values;
 }
 
+// A zone whose voice fades after its release gets a release that reaches 20 dB down when the fade does. The test's
+// macro plays on the DLS curve, where the level is the square of the volume. With FadeSteps, the volume reaches
+// sqrt(0.1) at 120 + 800 × (1 - sqrt(0.1) / 0.625) ms of MusyX's clock, about 515.2 ms. A SoundFont release falls
+// 100 dB in its time, and an SFZ release 8 × 20 / ln 10 dB.
+void TestMusyxReleaseFade()
+{
+    namespace sf2 = seqlib::sf2;
+    musyx::SongGroup group = MakeSongGroup();
+    std::vector<ntdlib::musyx::MacroStep>& macro = group.pool.macros[1];
+    macro.resize(3);
+    const std::vector<ntdlib::musyx::MacroStep> kFade = FadeSteps();
+    macro.insert(macro.end(), kFade.begin(), kFade.end());
+    musyx::Instruments instruments(group, SampleVolumes());
+
+    const Conversion c = musyx::ConvertSong(OneTrackSong(false, false), {"fade", "G/A/A", 5, 127}, instruments, {});
+
+    const double kFitMs = (120.0 + 800.0 * (1.0 - std::sqrt(0.1) / 0.625)) * musyx::kNominalRate / musyx::kOutputRate;
+    const std::vector<int> releases = SampleZoneValues(c.sf2, sf2::kReleaseVolEnv);
+    const int kExpected = sf2::ToTimecents(5.0 * kFitMs);
+    Check(
+        releases.size() == 1 && std::abs(releases[0] - kExpected) <= 1,
+        "the SoundFont release lasts 5 times the fade's time 20 dB down: " + std::to_string(kExpected) + " timecents");
+    const std::vector<std::string> sfz = OpcodeValues(c, "ampeg_release");
+    const double kSeconds = 8.0 / std::numbers::ln10 * kFitMs / 1000.0;
+    Check(sfz.size() == 1 && std::abs(std::stod(sfz[0]) - kSeconds) < 1e-3,
+          "the SFZ release lasts " + std::to_string(kSeconds) + " s: " + (sfz.empty() ? "none" : sfz[0]));
+    Check(c.performance.approximations.empty(), "the conversion reports no approximation");
+}
+
 // A zone whose voice fades while its note is held gets a hold up to the fade's start and a decay that reaches the
 // fade's level 20 dB down when the fade does. The voice of program 0 waits 100 ms, then follows FadeSteps' fade and
 // stops by itself. On the DLS curve, its fade reaches 20 dB down 515.2 ms after its start, as in TestMusyxReleaseFade.
@@ -1757,52 +1557,49 @@ void TestMusyxHeldFade()
     namespace sf2 = seqlib::sf2;
     using ntdlib::musyx::MacroOp;
     using ntdlib::musyx::PatternEventKind;
-    musyx::SongGroup group = TestSongGroup();
-    const std::vector<ntdlib::musyx::MacroStep> fade = FadeSteps();
+    musyx::SongGroup group = MakeSongGroup();
+    const std::vector<ntdlib::musyx::MacroStep> kFade = FadeSteps();
     group.pool.macros[1] = {Step(MacroOp::kModeSelect, {1, 1}), Step(MacroOp::kStartSample, {1}),
                             Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 100, 0})};
-    group.pool.macros[1].insert(group.pool.macros[1].end(), fade.begin() + 1, fade.end());
+    group.pool.macros[1].insert(group.pool.macros[1].end(), kFade.begin() + 1, kFade.end());
     group.pool.macros[2] = {Step(MacroOp::kModeSelect, {1, 1}), Step(MacroOp::kStartSample, {1}),
                             Step(MacroOp::kEnvelope, {64, 0, 0xff, 0xff, 1, 0x90, 0x01}),
                             Step(MacroOp::kWaitMs, {1, 0, 0, 0, 0, 0xff, 0xff}), Step(MacroOp::kEnd)};
     group.group.pages.push_back({.object = 2, .priority = 0, .max_voices = 8, .program = 1});
-    musyx::Instruments instruments(group, TestVolumes());
-    ntdlib::musyx::Song song = TestSong(false, false);
+    musyx::Instruments instruments(group, SampleVolumes());
+    ntdlib::musyx::Song song = OneTrackSong(false, false);
     std::vector<ntdlib::musyx::PatternEvent>& events = song.patterns[0].events;
     events.push_back({.tick = 360, .kind = PatternEventKind::kProgram, .value = 1});
     events.push_back({.tick = 400, .kind = PatternEventKind::kNote, .key = 62, .velocity = 100, .length = 96});
 
     const Conversion c = musyx::ConvertSong(song, {"held", "G/A/A", 5, 127}, instruments, {});
 
-    const double to_real = musyx::kNominalRate / musyx::kOutputRate;
-    const auto timecents = [](double ms)
-    {
-        return static_cast<int>(std::lround(1200.0 * std::log2(ms / 1000.0)));
-    };
-    const double silent_fit_ms = (120.0 + 800.0 * (1.0 - std::sqrt(0.1) / 0.625)) * to_real;
-    const double half_fit_ms = 400.0 * (1.0 - std::sqrt(0.5)) / 0.5 * to_real;
-    const double half_db = -20.0 * std::log10(0.25);
+    constexpr double kToReal = musyx::kNominalRate / musyx::kOutputRate;
+    const double kSilentFitMs = (120.0 + 800.0 * (1.0 - std::sqrt(0.1) / 0.625)) * kToReal;
+    const double kHalfFitMs = 400.0 * (1.0 - std::sqrt(0.5)) / 0.5 * kToReal;
+    const double kHalfDb = -20.0 * std::log10(0.25);
     const std::vector<int> holds = SampleZoneValues(c.sf2, sf2::kHoldVolEnv);
     const std::vector<int> decays = SampleZoneValues(c.sf2, sf2::kDecayVolEnv);
     const std::vector<int> sustains = SampleZoneValues(c.sf2, sf2::kSustainVolEnv);
     const std::vector<int> releases = SampleZoneValues(c.sf2, sf2::kReleaseVolEnv);
-    Check(holds.size() == 2 && holds[0] == timecents(100.0 * to_real) && holds[1] == -12000,
+    Check(holds.size() == 2 && holds[0] == sf2::ToTimecents(100.0 * kToReal) && holds[1] == -12000,
           "the first zone holds until its fade starts, 100 ms in, and the second has no hold");
-    Check(decays.size() == 2 && std::abs(decays[0] - timecents(5.0 * silent_fit_ms)) <= 1 &&
-              std::abs(decays[1] - timecents(100.0 / half_db * 2.0 * half_fit_ms)) <= 1,
+    Check(decays.size() == 2 && std::abs(decays[0] - sf2::ToTimecents(5.0 * kSilentFitMs)) <= 1 &&
+              std::abs(decays[1] - sf2::ToTimecents(100.0 / kHalfDb * 2.0 * kHalfFitMs)) <= 1,
           "each decay reaches its fit's level when the fade does");
-    Check(sustains == std::vector<int>{1440, static_cast<int>(std::lround(10.0 * half_db))},
+    Check(sustains == std::vector<int>{1440, static_cast<int>(std::lround(10.0 * kHalfDb))},
           "the first sustain is silent, and the second 12.04 dB down");
-    Check(releases.size() == 2 && releases[0] == decays[0] && releases[1] == timecents(4.5 * 10.0 * to_real),
+    Check(releases.size() == 2 && decays.size() == 2 && releases[0] == decays[0] &&
+              releases[1] == sf2::ToTimecents(4.5 * 10.0 * kToReal),
           "the first release goes on at the decay's rate, and the second is the cut of a stopped voice");
 
     const std::vector<std::string> sfz_holds = OpcodeValues(c, "ampeg_hold");
     const std::vector<std::string> sfz_decays = OpcodeValues(c, "ampeg_decay");
     const std::vector<std::string> sfz_releases = OpcodeValues(c, "ampeg_release");
-    Check(sfz_holds.size() == 1 && std::abs(std::stod(sfz_holds[0]) - 0.1 * to_real) < 1e-6,
+    Check(sfz_holds.size() == 1 && std::abs(std::stod(sfz_holds[0]) - 0.1 * kToReal) < 1e-6,
           "the first SFZ region holds for 100 ms");
     Check(sfz_decays.size() == 2 && sfz_releases.size() == 2 &&
-              std::abs(std::stod(sfz_decays[0]) - 8.0 / std::numbers::ln10 * silent_fit_ms / 1000.0) < 1e-3 &&
+              std::abs(std::stod(sfz_decays[0]) - 8.0 / std::numbers::ln10 * kSilentFitMs / 1000.0) < 1e-3 &&
               sfz_releases[0] == sfz_decays[0],
           "the first region's decay and release fall at the fit's rate");
     Check(std::abs(c.performance.seconds - 1.02) < 1e-9,
@@ -1823,35 +1620,30 @@ void TestFadeInHold()
 {
     namespace sf2 = seqlib::sf2;
     using ntdlib::musyx::MacroOp;
-    musyx::SongGroup group = TestSongGroup();
-    const std::vector<ntdlib::musyx::MacroStep> fade = FadeSteps();
+    musyx::SongGroup group = MakeSongGroup();
+    const std::vector<ntdlib::musyx::MacroStep> kFade = FadeSteps();
     group.pool.macros[1] = {Step(MacroOp::kModeSelect, {1, 1}), Step(MacroOp::kFadeIn, {127, 0, 0xff, 0xff, 1, 50, 0}),
                             Step(MacroOp::kStartSample, {1}), Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 100, 0})};
-    group.pool.macros[1].insert(group.pool.macros[1].end(), fade.begin() + 1, fade.end());
-    musyx::Instruments instruments(group, TestVolumes());
+    group.pool.macros[1].insert(group.pool.macros[1].end(), kFade.begin() + 1, kFade.end());
+    musyx::Instruments instruments(group, SampleVolumes());
 
-    const Conversion c = musyx::ConvertSong(TestSong(false, false), {"fade-in", "G/A/A", 5, 127}, instruments, {});
+    const Conversion c = musyx::ConvertSong(OneTrackSong(false, false), {"fade-in", "G/A/A", 5, 127}, instruments, {});
 
-    const double to_real = musyx::kNominalRate / musyx::kOutputRate;
-    const auto timecents = [to_real](double ms)
-    {
-        return static_cast<int>(std::lround(1200.0 * std::log2(ms * to_real / 1000.0)));
-    };
-    const int fifty = timecents(50.0);
-    const double delay_ms = (std::sqrt(0.1) - 0.1) / 0.9 * 50.0;
+    constexpr double kToReal = musyx::kNominalRate / musyx::kOutputRate;
+    const double kDelayMs = (std::sqrt(0.1) - 0.1) / 0.9 * 50.0;
     const std::vector<int> delays = SampleZoneValues(c.sf2, sf2::kDelayVolEnv);
     const std::vector<int> attacks = SampleZoneValues(c.sf2, sf2::kAttackVolEnv);
-    Check(delays.size() == 1 && std::abs(delays[0] - timecents(delay_ms)) <= 1,
+    Check(delays.size() == 1 && std::abs(delays[0] - sf2::ToTimecents(kDelayMs * kToReal)) <= 1,
           "the zone waits about 12.0 ms before its attack");
-    Check(attacks.size() == 1 && std::abs(attacks[0] - timecents(50.0 - delay_ms)) <= 1,
+    Check(attacks.size() == 1 && std::abs(attacks[0] - sf2::ToTimecents((50.0 - kDelayMs) * kToReal)) <= 1,
           "the zone attacks for the rest of the fade-in's 50 ms");
-    Check(SampleZoneValues(c.sf2, sf2::kHoldVolEnv) == std::vector<int>{fifty},
+    Check(SampleZoneValues(c.sf2, sf2::kHoldVolEnv) == std::vector<int>{sf2::ToTimecents(50.0 * kToReal)},
           "the zone holds for the 50 ms from the attack's end to the fade's start");
     const std::vector<std::string> sfz_holds = OpcodeValues(c, "ampeg_hold");
-    Check(sfz_holds.size() == 1 && std::abs(std::stod(sfz_holds[0]) - 0.05 * to_real) < 1e-6,
+    Check(sfz_holds.size() == 1 && std::abs(std::stod(sfz_holds[0]) - 0.05 * kToReal) < 1e-6,
           "the SFZ region holds for 50 ms");
     const std::vector<std::string> sfz_delays = OpcodeValues(c, "ampeg_delay");
-    Check(sfz_delays.size() == 1 && std::abs(std::stod(sfz_delays[0]) - delay_ms * to_real / 1000.0) < 1e-5,
+    Check(sfz_delays.size() == 1 && std::abs(std::stod(sfz_delays[0]) - kDelayMs * kToReal / 1000.0) < 1e-5,
           "the SFZ region waits about 12.0 ms before its attack");
 }
 
@@ -1861,10 +1653,11 @@ void TestFadeInHold()
 void TestMusyxGlobalZone()
 {
     namespace sf2 = seqlib::sf2;
-    const musyx::SongGroup group = TestSongGroup();
-    musyx::Instruments instruments(group, TestVolumes());
+    const musyx::SongGroup group = MakeSongGroup();
+    musyx::Instruments instruments(group, SampleVolumes());
 
-    const Conversion c = musyx::ConvertSong(TestSong(false, false), {"global", "G/A/A", 5, 127}, instruments, {});
+    const Conversion c = musyx::ConvertSong(OneTrackSong(false, false), {"global", "G/A/A", 5, 127}, instruments, {});
+
     const sf2::Records records = sf2::Read(c.sf2);
 
     std::vector<std::array<int, 5>> expected;
@@ -1895,9 +1688,9 @@ void TestMusyxGlobalZone()
 // no tempo change after the end. The table here slows the song to 60 beats a minute halfway through each pass.
 void TestMusyxTempoTable()
 {
-    const musyx::SongGroup group = TestSongGroup();
-    musyx::Instruments instruments(group, TestVolumes());
-    ntdlib::musyx::Song song = TestSong(true, false);
+    const musyx::SongGroup group = MakeSongGroup();
+    musyx::Instruments instruments(group, SampleVolumes());
+    ntdlib::musyx::Song song = OneTrackSong(true, false);
     song.tempo_changes = {{.tick = 0, .tempo = 120}, {.tick = 384, .tempo = 60}};
 
     const Performance perf = musyx::PlaySong(song, {"tempo", "G/A/A", 5, 127}, instruments, {});
@@ -1917,9 +1710,9 @@ void TestMusyxTempoTable()
 // starts at tick 1000.
 void TestMusyxLoopWaitsForPatterns()
 {
-    const musyx::SongGroup group = TestSongGroup();
-    musyx::Instruments instruments(group, TestVolumes());
-    ntdlib::musyx::Song song = TestSong(true, false);
+    const musyx::SongGroup group = MakeSongGroup();
+    musyx::Instruments instruments(group, SampleVolumes());
+    ntdlib::musyx::Song song = OneTrackSong(true, false);
     ntdlib::musyx::Track track;
     track.number = 1;
     track.channel = 1;
@@ -1945,24 +1738,17 @@ void TestMusyxLoopWaitsForPatterns()
 void TestMusyxPitchWheelRange()
 {
     using ntdlib::musyx::MacroOp;
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
     std::vector<ntdlib::musyx::MacroStep>& macro = group.pool.macros[1];
     macro.insert(macro.begin(), Step(MacroOp::kPitchWheelRange, {12, 6}));
-    musyx::Instruments instruments(group, TestVolumes());
-    ntdlib::musyx::Song song = TestSong(true, false);
+    musyx::Instruments instruments(group, SampleVolumes());
+    ntdlib::musyx::Song song = OneTrackSong(true, false);
     song.patterns[0].pitch_wheel = {{.tick = 96, .value = 0x3000}, {.tick = 144, .value = 0x1000}};
 
     const Performance perf = musyx::PlaySong(song, {"bend", "G/A/A", 5, 127}, instruments, {});
 
-    std::vector<float> bends;
-    for (const TrackEvent& e : perf.tracks[0])
-    {
-        if (e.kind == EventKind::kPitch && e.semitones != 0.0f)
-        {
-            bends.push_back(e.semitones);
-        }
-    }
-    Check(bends == std::vector<float>{6.0f, -3.0f}, "the wheel bends 6 semitones up and 3 down over the voice's range");
+    Check(BendsOf(perf) == std::vector<float>{6.0f, -3.0f},
+          "the wheel bends 6 semitones up and 3 down over the voice's range");
 }
 
 // A MIDI channel bends its notes over its latest note's range. The first note has a range of 12. At tick 144, a note
@@ -1972,13 +1758,13 @@ void TestMusyxMixedPitchWheelRanges()
 {
     using ntdlib::musyx::MacroOp;
     using ntdlib::musyx::PatternEventKind;
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
     group.pool.macros[2] = group.pool.macros[1];
     std::vector<ntdlib::musyx::MacroStep>& macro = group.pool.macros[1];
     macro.insert(macro.begin(), Step(MacroOp::kPitchWheelRange, {12, 6}));
     group.group.pages.push_back({.object = 2, .priority = 0, .max_voices = 8, .program = 1});
-    musyx::Instruments instruments(group, TestVolumes());
-    ntdlib::musyx::Song song = TestSong(false, false);
+    musyx::Instruments instruments(group, SampleVolumes());
+    ntdlib::musyx::Song song = OneTrackSong(false, false);
     std::vector<ntdlib::musyx::PatternEvent>& events = song.patterns[0].events;
     events.push_back({.tick = 120, .kind = PatternEventKind::kProgram, .value = 1});
     events.push_back({.tick = 144, .kind = PatternEventKind::kNote, .key = 62, .velocity = 100, .length = 192});
@@ -1986,15 +1772,8 @@ void TestMusyxMixedPitchWheelRanges()
 
     const Performance perf = musyx::PlaySong(song, {"bends", "G/A/A", 5, 127}, instruments, {});
 
-    std::vector<float> bends;
-    for (const TrackEvent& e : perf.tracks[0])
-    {
-        if (e.kind == EventKind::kPitch && e.semitones != 0.0f)
-        {
-            bends.push_back(e.semitones);
-        }
-    }
-    Check(bends == std::vector<float>{6.0f, 1.0f, 0.5f}, "the second note's range bends the channel from its note on");
+    Check(BendsOf(perf) == std::vector<float>{6.0f, 1.0f, 0.5f},
+          "the second note's range bends the channel from its note on");
     const auto mixed =
         perf.approximations.find("pitch wheel ranges that differ among a channel's notes take the latest note's");
     Check(mixed != perf.approximations.end() && mixed->second == 1, "the held note of another range counts once");
@@ -2005,9 +1784,9 @@ void TestMusyxMixedPitchWheelRanges()
 void TestMusyxNoteOfNoLength()
 {
     using ntdlib::musyx::PatternEventKind;
-    const musyx::SongGroup group = TestSongGroup();
-    musyx::Instruments instruments(group, TestVolumes());
-    ntdlib::musyx::Song song = TestSong(false, false);
+    const musyx::SongGroup group = MakeSongGroup();
+    musyx::Instruments instruments(group, SampleVolumes());
+    ntdlib::musyx::Song song = OneTrackSong(false, false);
     song.patterns[0].events[0].length = 0;
     song.patterns[0].events.push_back(
         {.tick = 384, .kind = PatternEventKind::kNote, .key = 60, .velocity = 100, .length = 192});
@@ -2022,9 +1801,9 @@ void TestMusyxNoteOfNoLength()
             notes.emplace_back(e.kind, e.tick);
         }
     }
-    const std::vector<std::pair<EventKind, uint32_t>> expected = {
+    const std::vector<std::pair<EventKind, uint32_t>> kExpected = {
         {EventKind::kNoteOn, 0}, {EventKind::kNoteOff, 0}, {EventKind::kNoteOn, 384}, {EventKind::kNoteOff, 576}};
-    Check(notes == expected, "the note of no length ends after its note-on, at its tick");
+    Check(notes == kExpected, "the note of no length ends after its note-on, at its tick");
     Check(c.channels == 1, "both notes play on one MIDI channel");
     Check(ntdlib::testing::CheckConversion(c, "empty") == 0, "independent readers accept the files");
 }
@@ -2056,20 +1835,20 @@ void TestVolumeSelect()
           "a share of 40% of the volume controller scales the voice's volume by 0.4");
     Check(musyx::VoiceVolume(musyx::FollowMacro(pool, 2, 127), 1.0, 1.0) == 1.0,
           "a share above 100% plays at full volume with the controller at full");
-    const std::vector<std::string> other = {"volume sources other than a share of the volume controller left out"};
-    Check(musyx::FollowMacro(pool, 3, 127).approximations == other, "another controller is reported");
+    const std::vector<std::string> kOther = {"volume sources other than a share of the volume controller left out"};
+    Check(musyx::FollowMacro(pool, 3, 127).approximations == kOther, "another controller is reported");
     const musyx::MacroVoice first = musyx::FollowMacro(pool, 4, 127);
     Check(first.source_volume == 0.6 && first.approximations.empty(),
           "the first VolumeSelect replaces the voice's source, even one that asks to join it");
     Check(musyx::FollowMacro(pool, 5, 127).source_volume == 1.0, "a voice follows the volume controller in full");
     const musyx::MacroVoice joined = musyx::FollowMacro(pool, 6, 127);
-    Check(joined.source_volume == 0.6 && joined.approximations == other,
+    Check(joined.source_volume == 0.6 && joined.approximations == kOther,
           "a later source that joins the others is reported");
     const musyx::MacroVoice variable = musyx::FollowMacro(pool, 7, 127);
     Check(variable.source_fixed && variable.source_volume == 0x2000 / 16383.0 &&
               musyx::VoiceVolume(variable, 1.0, 0.25) == variable.source_volume && variable.approximations.empty(),
           "a variable that no step sets gives half of full volume at any controller and share");
-    Check(musyx::FollowMacro(pool, 8, 127).approximations == other,
+    Check(musyx::FollowMacro(pool, 8, 127).approximations == kOther,
           "a variable source after a step that sets a variable is reported");
     Check(musyx::FollowMacro(pool, 9, 127).source_volume == 0.5025, "byte 6 adds 256ths of a percent to the share");
 }
@@ -2080,28 +1859,36 @@ void TestVolumeSelect()
 void TestReverbSelect()
 {
     using ntdlib::musyx::MacroOp;
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
+
     const auto played = [](uint8_t source, uint8_t percent, uint8_t variable)
     {
         return std::vector<ntdlib::musyx::MacroStep>{Step(MacroOp::kReverbSelect, {source, percent, 0, 0, variable}),
                                                      Step(MacroOp::kStartSample, {1}),
                                                      Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0xff, 0xff})};
     };
+
     group.pool.macros[3] = played(1, 20, 0);
     group.pool.macros[4] = played(1, 50, 1);
     group.pool.macros[5] = played(91, 50, 0);
     group.pool.macros[6] = {Step(MacroOp::kReverbSelect, {1, 20}), Step(MacroOp::kReverbSelect, {91, 50, 0, 1}),
                             Step(MacroOp::kEnd)};
-    musyx::Instruments instruments(group, TestVolumes());
+    musyx::Instruments instruments(group, SampleVolumes());
 
     const std::optional<musyx::InputSource>& wheel = instruments.Macro(3).reverb_source;
-    Check(wheel && wheel->controller == 1 && !wheel->variable && wheel->share == 0.2 &&
+    const std::optional<musyx::InputSource>& variable = instruments.Macro(4).reverb_source;
+    const std::optional<musyx::InputSource>& reverb = instruments.Macro(5).reverb_source;
+    if (!Check(wheel && variable && reverb, "each ReverbSelect gives a source"))
+    {
+        return;
+    }
+
+    Check(wheel->controller == 1 && !wheel->variable && wheel->share == 0.2 &&
               instruments.Macro(3).approximations.empty(),
           "ReverbSelect names the mod wheel at 20%");
     Check(musyx::SourceValue(*wheel, 0.0) == 0x2000 - 1639, "the mod wheel at 0 gives 80% of half of full");
-    Check(musyx::SourceValue(*instruments.Macro(4).reverb_source, 0.0) == 0x2000,
-          "a variable that no step sets gives half of full at any share");
-    Check(musyx::SourceValue(*instruments.Macro(5).reverb_source, 127 * 128.0) == 127 * 64,
+    Check(musyx::SourceValue(*variable, 0.0) == 0x2000, "a variable that no step sets gives half of full at any share");
+    Check(musyx::SourceValue(*reverb, 127 * 128.0) == 127 * 64,
           "the reverb controller gives its value times the share");
     Check(instruments.Macro(6).approximations == std::vector<std::string>{musyx::kReverbSourcesLeftOut},
           "a later source that joins the others is reported");
@@ -2120,8 +1907,10 @@ void TestReverbSelect()
                 value = e.kind == EventKind::kReverb ? e.value : value;
             }
         }
+
         return value;
     };
+
     Check(send(3, 0) == 51 && send(4, 0) == 64 && send(5, 100) == 50,
           "an effect's note sends what its voice's source gives");
 }
@@ -2148,10 +1937,12 @@ void TestPitchCurve()
     // 800 Hz is 102 units. A step of 15 ms adds 15/16 of it.
     const musyx::MacroVoice sweep = musyx::FollowMacro(pool, 1, 127);
     const std::vector<musyx::PitchPoint> curve = musyx::PitchCurve(sweep, sample, 60, 0.0, 80.0);
+
     const auto at = [](double units)
     {
         return 12.0 * std::log2(units / 4096.0);
     };
+
     Check(sweep.sweeps.size() == 1 && sweep.sweeps[0].steps == 4 && sweep.sweeps[0].step == 102 &&
               sweep.approximations.empty(),
           "PitchSweep1 sweeps 4 steps of 800 Hz");
@@ -2164,9 +1955,9 @@ void TestPitchCurve()
     const musyx::MacroVoice later = musyx::FollowMacro(pool, 2, 127);
     Check(musyx::PitchCurve(later, sample, 60, 0.0, 100.0) == std::vector<musyx::PitchPoint>{{0.0, -12.0}, {20.0, 0.0}},
           "a key that the macro adds while the sample plays moves the pitch at the end of the wait");
-    const double rate = musyx::kOutputRate / 1000.0;
+    const double kRate = musyx::kOutputRate / 1000.0;
     const std::optional<double> ms = musyx::CurveSampleMs(later, sample, 60);
-    Check(ms && std::abs(*ms - (20.0 + (32000.0 - 20.0 * rate) / (2.0 * rate))) < 1e-9,
+    Check(ms && std::abs(*ms - (20.0 + (32000.0 - 20.0 * kRate) / (2.0 * kRate))) < 1e-9,
           "the sample plays at its rate for 20 ms, then twice as fast");
 
     const std::vector<musyx::PitchPoint> high =
@@ -2176,10 +1967,10 @@ void TestPitchCurve()
     Check(musyx::FollowMacro(pool, 4, 127).sample_ms == 50.0, "the sweep waits as AddKey does");
 
     // An effect of a voice that starts a voice whose pitch sweeps.
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
     group.pool.macros[3] = {Step(MacroOp::kPlayMacro, {0, 4, 0}), Step(MacroOp::kStartSample, {1}), held};
     group.pool.macros[4] = {Step(MacroOp::kPitchSweep1, {100, 0x64}), Step(MacroOp::kStartSample, {1}), held};
-    musyx::Instruments instruments(group, TestVolumes());
+    musyx::Instruments instruments(group, SampleVolumes());
     musyx::GameEffect effect;
     effect.name = "sweep";
     effect.row = {.id = 1, .object = 3, .max_voices = 2, .key = 60};
@@ -2202,23 +1993,26 @@ void TestPitchCurve()
 void TestPanCurve()
 {
     using ntdlib::musyx::MacroOp;
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
     group.pool.macros[3] = {Step(MacroOp::kPanning, {48, 0xa0, 0, 0x20}), Step(MacroOp::kStartSample, {1}),
                             Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 160, 0}),
                             Step(MacroOp::kPanning, {80, 0xa0, 0, 0xe0}),
                             Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0xff, 0xff})};
+
     const musyx::MacroVoice voice = musyx::FollowMacro(group.pool, 3, 127);
     const std::vector<musyx::PanPoint> curve = musyx::PanCurve(voice, 400.0);
+
     const auto at = [&](double ms)
     {
         const auto p = std::find_if(curve.begin(), curve.end(), [ms](const musyx::PanPoint& q) { return q.ms == ms; });
         return p != curve.end() ? p->offset : 1000.0;
     };
+
     Check(voice.pan == 80 && std::abs(at(0.0) + 32.0) < 1e-9 && std::abs(at(15.0) + 29.0) < 1e-9 &&
               std::abs(at(150.0) + 2.0) < 1e-9 && std::abs(at(175.0) + 5.0) < 1e-9 && at(160.0) == 1000.0,
           "the pan glides from 48 to 80 and back, counted from the last pan");
 
-    musyx::Instruments instruments(group, TestVolumes());
+    musyx::Instruments instruments(group, SampleVolumes());
     std::set<std::string> left_out;
     musyx::GameEffect effect;
     effect.name = "pan";
@@ -2236,6 +2030,7 @@ void TestPanCurve()
             }
         }
     }
+
     const std::vector<musyx::EffectNote> notes = musyx::EffectNotes(effect, instruments, left_out);
     Check(notes.size() == 1 && notes[0].pan_shift == -32.0 && pans.size() == 21 &&
               pans[0] == std::pair<uint32_t, int>(0, 64) && pans[1] == std::pair<uint32_t, int>(16, 67) &&
@@ -2246,7 +2041,7 @@ void TestPanCurve()
     // the zone sits at 64 plus 127/16.
     group.pool.macros[3][0] = Step(MacroOp::kPanning, {127, 0xa0, 0, 0x81});
     group.pool.macros[3][3] = Step(MacroOp::kPanning, {0, 0xa0, 0, 0x7f});
-    musyx::Instruments wide(group, TestVolumes());
+    musyx::Instruments wide(group, SampleVolumes());
     const std::vector<musyx::EffectNote> wide_notes = musyx::EffectNotes(effect, wide, left_out);
     Check(wide_notes.size() == 1 && std::abs(wide_notes[0].pan_shift - (64.0 + 127.0 / 16.0)) < 1e-9,
           "a glide from 127 to 0 and back keeps CC10 within 0 to 127");
@@ -2258,9 +2053,11 @@ void TestPanCurve()
 void TestHighestPitch()
 {
     namespace sf2 = seqlib::sf2;
-    const musyx::SongGroup group = TestSongGroup();
-    musyx::Instruments instruments(group, TestVolumes());
-    const Conversion c = musyx::ConvertSong(TestSong(true, false), {"loop", "G/A/A", 5, 127}, instruments, {});
+    const musyx::SongGroup group = MakeSongGroup();
+    musyx::Instruments instruments(group, SampleVolumes());
+
+    const Conversion c = musyx::ConvertSong(OneTrackSong(true, false), {"loop", "G/A/A", 5, 127}, instruments, {});
+
     const sf2::Records records = sf2::Read(c.sf2);
     std::vector<std::array<int, 4>> zones; // the low key, the high key, the scale tuning and the tuning in cents
     for (std::size_t zone = 0; zone + 1 < records.Count("ibag", 4); zone++)
@@ -2270,17 +2067,19 @@ void TestHighestPitch()
         {
             continue;
         }
+
         const auto get = [&](uint16_t g, int fallback)
         {
             return gens.contains(g) ? static_cast<int>(static_cast<int16_t>(gens.at(g))) : fallback;
         };
+
         const int keys = gens.contains(sf2::kKeyRange) ? gens.at(sf2::kKeyRange) : 0x7f00;
         zones.push_back({keys & 0xff, keys >> 8, get(sf2::kScaleTuning, 100),
                          get(sf2::kCoarseTune, 0) * 100 + get(sf2::kFineTune, 0)});
     }
-    const double limit = 1200.0 * std::log2(musyx::HighestPitchHz() / 32000.0);
+    const double kLimit = 1200.0 * std::log2(musyx::HighestPitchHz() / 32000.0);
     Check(zones.size() == 2 && zones[0][0] == 0 && zones[0][1] == 83 && zones[0][2] == 100 && zones[1][0] == 84 &&
-              zones[1][1] == 127 && zones[1][2] == 0 && zones[1][3] == std::lround(limit) && zones[1][3] == 2401,
+              zones[1][1] == 127 && zones[1][2] == 0 && zones[1][3] == std::lround(kLimit) && zones[1][3] == 2401,
           "keys from 84 up play at the DSP's highest pitch");
 }
 
@@ -2289,11 +2088,13 @@ void TestHighestPitch()
 void TestSelfRelease()
 {
     using ntdlib::musyx::MacroOp;
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
     group.pool.macros[3] = {Step(MacroOp::kSetAdsr, {2, 0, 1}), Step(MacroOp::kStartSample, {1}),
                             Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 100, 0}), Step(MacroOp::kKeyOff),
                             Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0xff, 0xff})};
+
     const musyx::MacroVoice voice = musyx::FollowMacro(group.pool, 3, 127);
+
     Check(voice.stop_ms == 100.0 && voice.key_off == musyx::KeyOff::kRelease && voice.approximations.empty(),
           "a voice that releases itself ends its note at the KeyOff and plays its envelope's release");
 }
@@ -2325,17 +2126,18 @@ void TestPanning()
 void TestMusyxSongPanning()
 {
     using ntdlib::musyx::MacroOp;
-    const musyx::SongGroup plain = TestSongGroup();
-    musyx::SongGroup group = TestSongGroup();
+    const musyx::SongGroup plain = MakeSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
     std::vector<ntdlib::musyx::MacroStep>& macro = group.pool.macros[1];
     macro.insert(macro.begin() + 1, Step(MacroOp::kPanning, {0}));
     macro.insert(macro.begin() + 1, Step(MacroOp::kSetVariable, {1, 7, 0, 0x00, 0x20}));
-    musyx::Instruments plain_instruments(plain, TestVolumes());
-    musyx::Instruments instruments(group, TestVolumes());
-    const ntdlib::musyx::Song song = TestSong(false, false);
+    musyx::Instruments plain_instruments(plain, SampleVolumes());
+    musyx::Instruments instruments(group, SampleVolumes());
+    const ntdlib::musyx::Song song = OneTrackSong(false, false);
 
     const Conversion before = musyx::ConvertSong(song, {"pans", "G/A/A", 5, 127}, plain_instruments, {});
     const Conversion after = musyx::ConvertSong(song, {"pans", "G/A/A", 5, 127}, instruments, {});
+
     Check(OpcodeValues(before, "pan").empty() && OpcodeValues(after, "pan") == std::vector<std::string>{"-100"},
           "the song's region pans hard left");
     bool same = after.midi == before.midi && after.sfz.files.size() == before.sfz.files.size();
@@ -2350,14 +2152,16 @@ void TestMusyxSongPanning()
     }
     Check(same, "the rest of the song's files stays the same");
     const auto& reported = after.performance.approximations;
-    Check(reported.count("SoundMacro commands that dolphinsf2 doesn't follow left out") == 0 &&
+    Check(reported.count(musyx::kCommandsLeftOut) == 0 &&
               reported.count("volumes and sends that a macro sets left out") == 1,
           "the song reports the controller alone");
 
     musyx::GameEffect effect;
     effect.name = "left";
     effect.row = {.id = 1, .object = 1, .max_voices = 1, .key = 60};
+
     const Conversion c = musyx::ConvertEffect(effect, instruments);
+
     Check(OpcodeValues(c, "pan") == std::vector<std::string>{"-100"}, "the effect's region pans hard left");
     Check(ntdlib::testing::CheckConversion(c, "left") == 0, "independent readers accept the effect's files");
 }
@@ -2368,13 +2172,13 @@ void TestMusyxSongSweep()
 {
     using ntdlib::musyx::MacroOp;
     using ntdlib::musyx::PatternEventKind;
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
     group.pool.macros[2] = group.pool.macros[1];
     std::vector<ntdlib::musyx::MacroStep>& macro = group.pool.macros[1];
     macro.insert(macro.begin(), Step(MacroOp::kPitchSweep1, {4, 0x20, 0x03}));
     group.group.pages.push_back({.object = 2, .priority = 0, .max_voices = 8, .program = 1});
-    musyx::Instruments instruments(group, TestVolumes());
-    ntdlib::musyx::Song song = TestSong(false, false);
+    musyx::Instruments instruments(group, SampleVolumes());
+    ntdlib::musyx::Song song = OneTrackSong(false, false);
     std::vector<ntdlib::musyx::PatternEvent>& events = song.patterns[0].events;
     events.push_back({.tick = 96, .kind = PatternEventKind::kProgram, .value = 1});
     events.push_back({.tick = 96, .kind = PatternEventKind::kNote, .key = 62, .velocity = 100, .length = 192});
@@ -2435,45 +2239,40 @@ void TestEnvelopeFromControllers()
     Check(low.envelope && std::abs(low.envelope->sustain - std::pow(10.0, -0.6)) < 1e-12,
           "a sustain of 64 is 24 steps of 0.5 dB down");
 
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
     group.pool.macros[1][1] = Step(MacroOp::kSetAdsrFromControllers, {0x14, 0x16, 0x17, 0x18});
-    musyx::Instruments instruments(group, TestVolumes());
-    ntdlib::musyx::Song song = TestSong(false, false);
+    musyx::Instruments instruments(group, SampleVolumes());
+    ntdlib::musyx::Song song = OneTrackSong(false, false);
     std::vector<ntdlib::musyx::PatternEvent>& events = song.patterns[0].events;
+
     const auto controller = [](uint32_t tick, uint8_t number, uint8_t value)
     {
         return ntdlib::musyx::PatternEvent{
             .tick = tick, .kind = PatternEventKind::kController, .controller = number, .value = value};
     };
+
     events.insert(events.begin(), {controller(0, 0x14, 22), controller(0, 0x17, 127)});
     events.push_back(controller(96, 0x14, 33));
     events.push_back({.tick = 96, .kind = PatternEventKind::kNote, .key = 62, .velocity = 100, .length = 192});
     events.push_back({.tick = 384, .kind = PatternEventKind::kNote, .key = 64, .velocity = 100, .length = 192});
 
     const Conversion c = musyx::ConvertSong(song, {"controls", "G/A/A", 5, 127}, instruments, {});
+
     const auto& presets = c.performance.presets;
-    Check(presets.size() == 2 && presets[0].bank == musyx::Instruments::kVariantBank &&
-              presets[1].bank == musyx::Instruments::kVariantBank + 1,
-          "the channel plays a preset for each set of the controllers' values, and the page's preset goes unused");
+    if (!Check(presets.size() == 2 && presets[0].bank == musyx::Instruments::kVariantBank &&
+                   presets[1].bank == musyx::Instruments::kVariantBank + 1,
+               "the channel plays a preset for each set of controller values, and the preset of the page goes unused"))
+    {
+        return;
+    }
+
     const musyx::Instruments::Variant* first = instruments.VariantOf(presets[0].bank);
     Check(first && first->controls == musyx::ChannelControls{{0x14, 22}, {0x16, 0}, {0x17, 127}, {0x18, 0}},
           "the first preset holds the values at the first note's start");
-    int changes = 0;
-    for (const TrackEvent& e : c.performance.tracks[0])
-    {
-        changes += e.kind == EventKind::kPreset ? 1 : 0;
-    }
-    Check(changes == 2, "the third note keeps the second preset");
-    std::set<std::string> attacks;
-    for (const seqlib::sfz::File& f : c.sfz.files)
-    {
-        for (std::size_t at = f.text.find(" ampeg_attack="); at != std::string::npos;
-             at = f.text.find(" ampeg_attack=", at + 1))
-        {
-            attacks.insert(f.text.substr(at + 14, f.text.find_first_of(" \n", at + 14) - at - 14));
-        }
-    }
-    Check(attacks.size() == 2, "the two presets' regions attack at different times");
+    Check(Count(c.performance, 0, EventKind::kPreset) == 2, "the third note keeps the second preset");
+    const std::vector<std::string> attacks = OpcodeValues(c, "ampeg_attack");
+    Check(std::set<std::string>(attacks.begin(), attacks.end()).size() == 2,
+          "the two presets' regions attack at different times");
     Check(!c.performance.approximations.contains(musyx::kCommandsLeftOut), "the report leaves out the followed step");
     Check(ntdlib::testing::CheckConversion(c, "controls") == 0, "independent readers accept the files");
 }
@@ -2509,13 +2308,13 @@ void TestSplits()
                                                     musyx::ChannelControls{{1, 5}, {musyx::kVelocityControl, 50}},
           "a voice's controls hold its share of the velocity");
 
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
     std::vector<ntdlib::musyx::MacroStep>& macro = group.pool.macros[1];
     macro.insert(macro.begin(), Step(MacroOp::kSplitVelocity, {110, 1, 0, 7}));
     macro.push_back(Step(MacroOp::kAddKey, {12}));
     macro.push_back(Step(MacroOp::kGoto, {0, 1, 0, 1}));
-    musyx::Instruments instruments(group, TestVolumes());
-    ntdlib::musyx::Song song = TestSong(false, false);
+    musyx::Instruments instruments(group, SampleVolumes());
+    ntdlib::musyx::Song song = OneTrackSong(false, false);
     std::vector<ntdlib::musyx::PatternEvent>& events = song.patterns[0].events;
     events.push_back(
         {.tick = 192, .kind = ntdlib::musyx::PatternEventKind::kNote, .key = 60, .velocity = 120, .length = 96});
@@ -2523,6 +2322,7 @@ void TestSplits()
         {.tick = 384, .kind = ntdlib::musyx::PatternEventKind::kNote, .key = 60, .velocity = 127, .length = 96});
 
     const Conversion c = musyx::ConvertSong(song, {"splits", "G/A/A", 5, 127}, instruments, {});
+
     const auto& presets = c.performance.presets;
     Check(presets.size() == 2, "the channel plays a preset for each side of the split");
     const musyx::Instruments::Variant* soft = presets.empty() ? nullptr : instruments.VariantOf(presets[0].bank);
@@ -2530,12 +2330,7 @@ void TestSplits()
     Check(soft && soft->controls == musyx::ChannelControls{{musyx::kVelocityControl, 0}} && hard &&
               hard->controls == musyx::ChannelControls{{musyx::kVelocityControl, 110}},
           "velocities 120 and 127 share the preset of the split's side");
-    int changes = 0;
-    for (const TrackEvent& e : c.performance.tracks[0])
-    {
-        changes += e.kind == EventKind::kPreset ? 1 : 0;
-    }
-    Check(changes == 2, "the third note keeps the second preset");
+    Check(Count(c.performance, 0, EventKind::kPreset) == 2, "the third note keeps the second preset");
     Check(OpcodeValues(c, "transpose") == std::vector<std::string>{"12"}, "the loud side plays an octave up");
     Check(ntdlib::testing::CheckConversion(c, "splits") == 0, "independent readers accept the files");
 }
@@ -2546,13 +2341,13 @@ void TestSplitsInAChord()
 {
     using ntdlib::musyx::MacroOp;
     using ntdlib::musyx::PatternEventKind;
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
     std::vector<ntdlib::musyx::MacroStep>& macro = group.pool.macros[1];
     macro.insert(macro.begin(), Step(MacroOp::kSplitVelocity, {110, 1, 0, 7}));
     macro.push_back(Step(MacroOp::kAddKey, {12}));
     macro.push_back(Step(MacroOp::kGoto, {0, 1, 0, 1}));
-    musyx::Instruments instruments(group, TestVolumes());
-    ntdlib::musyx::Song song = TestSong(false, false);
+    musyx::Instruments instruments(group, SampleVolumes());
+    ntdlib::musyx::Song song = OneTrackSong(false, false);
     std::vector<ntdlib::musyx::PatternEvent>& events = song.patterns[0].events;
     events.push_back({.tick = 0, .kind = PatternEventKind::kNote, .key = 64, .velocity = 127, .length = 96});
     events.push_back({.tick = 0, .kind = PatternEventKind::kNote, .key = 67, .velocity = 100, .length = 96});
@@ -2614,13 +2409,14 @@ void TestPitchWheelSelect()
               std::vector<std::string>{"pitch wheels that a macro turns later turn at the note's start"},
           "a wheel that turns after 300 ms is reported");
 
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
     std::vector<ntdlib::musyx::MacroStep>& macro = group.pool.macros[1];
     macro.insert(macro.begin(),
                  {Step(MacroOp::kSetupLfo, {0, 0x10, 0x27}), Step(MacroOp::kPitchWheelSelect, {0x82, 10})});
-    musyx::Instruments instruments(group, TestVolumes());
+    musyx::Instruments instruments(group, SampleVolumes());
 
-    const Conversion c = musyx::ConvertSong(TestSong(false, false), {"wheel", "G/A/A", 5, 127}, instruments, {});
+    const Conversion c = musyx::ConvertSong(OneTrackSong(false, false), {"wheel", "G/A/A", 5, 127}, instruments, {});
+
     Check(OpcodeValues(c, "lfo3_pitch") == std::vector<std::string>{"20"} &&
               OpcodeValues(c, "bend_up") == std::vector<std::string>{"0"},
           "the region swings 20 cents either way on LFO 3 and ignores the channel's bends");
@@ -2637,18 +2433,21 @@ void TestSetPitch()
     pool.macros[1] = {Step(MacroOp::kSetPitch, {0x00, 0x7d, 0x00}), Step(MacroOp::kEnd)};
     pool.macros[2] = {Step(MacroOp::kSetPitch, {0x00, 0x7d, 0x00}), Step(MacroOp::kSetKey, {72}), Step(MacroOp::kEnd)};
     pool.macros[3] = {Step(MacroOp::kSetPitch, {0x00, 0x7d, 0x00, 1}), Step(MacroOp::kEnd)};
+
     const musyx::MacroVoice rate = musyx::FollowMacro(pool, 1, 127);
     Check(rate.rate_hz == 32000.0 && rate.approximations.empty(), "the step sets a rate of 32,000 Hz");
     const musyx::MacroVoice key = musyx::FollowMacro(pool, 2, 127);
     Check(!key.rate_hz && key.fixed_key == 72, "a later SetKey takes the rate's place");
-    const std::vector<std::string> left_out = {"SoundMacro commands that dolphinsf2 doesn't follow left out"};
-    Check(musyx::FollowMacro(pool, 3, 127).approximations == left_out, "a step with more bytes is reported");
+    Check(musyx::FollowMacro(pool, 3, 127).approximations == std::vector<std::string>{musyx::kCommandsLeftOut},
+          "a step with more bytes is reported");
 
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
     std::vector<ntdlib::musyx::MacroStep>& macro = group.pool.macros[1];
     macro.insert(macro.begin() + 1, Step(MacroOp::kSetPitch, {0x00, 0x3e, 0x80}));
-    musyx::Instruments instruments(group, TestVolumes());
-    const Conversion c = musyx::ConvertSong(TestSong(false, false), {"rate", "G/A/A", 5, 127}, instruments, {});
+    musyx::Instruments instruments(group, SampleVolumes());
+
+    const Conversion c = musyx::ConvertSong(OneTrackSong(false, false), {"rate", "G/A/A", 5, 127}, instruments, {});
+
     Check(OpcodeValues(c, "pitch_keytrack") == std::vector<std::string>{"0"} &&
               OpcodeValues(c, "transpose") == std::vector<std::string>{"-11"} &&
               OpcodeValues(c, "tune") == std::vector<std::string>{"-98"},
@@ -2702,7 +2501,7 @@ void TestVoiceFrom()
 void TestPlayMacro()
 {
     using ntdlib::musyx::MacroOp;
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
 
     // Macro 3 starts macro 4 at once, two keys up. It waits 200 ms, starts macro 5, and starts its sample. Macro 4
     // starts its sample at once. Macro 5 waits 100 ms first. Each waits for ever once its sample plays.
@@ -2717,7 +2516,7 @@ void TestPlayMacro()
         Step(MacroOp::kStartSample, {1}),
         Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0xff, 0xff}),
     };
-    musyx::Instruments instruments(group, TestVolumes());
+    musyx::Instruments instruments(group, SampleVolumes());
 
     const std::vector<musyx::StartedVoice>& started = instruments.Macro(3).started;
     Check(started.size() == 2 && started[0].macro == 4 && started[0].key_add == 2 && started[0].at_ms == 0.0 &&
@@ -2733,16 +2532,20 @@ void TestPlayMacro()
     musyx::GameEffect effect;
     effect.name = "three voices";
     effect.row = {.id = 1, .object = 3, .max_voices = 4, .key = 60};
+
     const std::vector<musyx::EffectNote> notes = musyx::EffectNotes(effect, instruments, left_out);
+
     const auto note_is = [&notes](std::size_t i, double start, uint8_t key, uint16_t macro)
     {
         return notes[i].start_ms == start && notes[i].key == key && notes[i].voices.size() == 1 &&
                notes[i].voices[0].macro == macro;
     };
+
     Check(notes.size() == 3 && note_is(0, 0.0, 62, 4) && note_is(1, 200.0, 60, 3) && note_is(2, 300.0, 60, 5),
           "a note for each start of a sample, at 0, 200 and 300 ms");
 
     const Conversion c = musyx::ConvertEffect(effect, instruments);
+
     std::vector<int64_t> starts;
     std::vector<int64_t> ends;
     for (std::size_t slot = 0; slot < c.performance.tracks.size(); slot++)
@@ -2780,7 +2583,7 @@ void TestPlayMacro()
 void TestSetController()
 {
     using ntdlib::musyx::MacroOp;
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
     group.pool.macros[3] = {
         Step(MacroOp::kSetVariable, {1, 7, 0, 0x00, 0x20}),
         Step(MacroOp::kPlayMacro, {0, 4, 0, 0, 0, 50, 0xff}),
@@ -2796,16 +2599,16 @@ void TestSetController()
     };
     group.pool.macros[6] = {Step(MacroOp::kSetVariable, {0, 7, 0, 0x10, 0x27}), Step(MacroOp::kEnd)};
     group.pool.macros[7] = {Step(MacroOp::kSetVariable, {1, 1, 0, 0x10, 0x27}), Step(MacroOp::kEnd)};
-    musyx::Instruments instruments(group, TestVolumes());
+    musyx::Instruments instruments(group, SampleVolumes());
 
-    const double share = 0x2000 / 16383.0;
+    constexpr double kShare = 0x2000 / 16383.0;
     const musyx::MacroVoice& voice = instruments.Macro(3);
-    Check(voice.volume_controller == share && musyx::VoiceVolume(voice, 1.0, share) == share &&
+    Check(voice.volume_controller == kShare && musyx::VoiceVolume(voice, 1.0, kShare) == kShare &&
               voice.approximations.empty(),
           "the macro sets its volume controller to 0x2000 of 0x3fff, and its volume follows");
     std::set<std::string> left_out;
     const std::vector<musyx::EffectVoice> voices = musyx::EffectVoicesOf(instruments, 3, 60, left_out);
-    Check(voices.size() == 2 && voices[1].voice.macro == 4 && voices[1].voice.volume == share,
+    Check(voices.size() == 2 && voices[1].voice.macro == 4 && voices[1].voice.volume == kShare,
           "the voice that the macro starts takes the controller");
     Check(instruments.Macro(5).reverb_controller == 0x2000 / 16383.0 &&
               instruments.Macro(5).chorus_controller == 0x1000 / 16383.0 && instruments.Macro(5).approximations.empty(),
@@ -2819,7 +2622,9 @@ void TestSetController()
     musyx::GameEffect effect;
     effect.name = "sends";
     effect.row = {.id = 1, .object = 5, .max_voices = 1, .key = 60};
+
     const Conversion c = musyx::ConvertEffect(effect, instruments);
+
     std::map<EventKind, int> sends;
     for (const std::vector<TrackEvent>& track : c.performance.tracks)
     {
@@ -2841,7 +2646,7 @@ void TestSetController()
 void TestVoiceParts()
 {
     using ntdlib::musyx::MacroOp;
-    musyx::SongGroup group = TestSongGroup();
+    musyx::SongGroup group = MakeSongGroup();
 
     // Sample 1 at -20 cents, then sample 2 at 0 cents at the same moment.
     group.pool.macros[4] = {
@@ -2866,7 +2671,7 @@ void TestVoiceParts()
         Step(MacroOp::kWaitMs, {0, 0, 0, 0, 0, 0xff, 0xff}),
         Step(MacroOp::kEnd),
     };
-    musyx::Instruments instruments(group, TestVolumes());
+    musyx::Instruments instruments(group, SampleVolumes());
 
     const musyx::MacroVoice& voice = instruments.Macro(3);
     Check(voice.sample == 1 && voice.sample_ms == 0.0 &&
@@ -2880,6 +2685,7 @@ void TestVoiceParts()
     {
         return;
     }
+
     const musyx::MacroVoice& first = voice.parts[0];
     Check(first.sample == 1 && first.sample_ms == 0.0 && first.stop_ms == 200.0 && first.source_volume == 0.8 &&
               first.key_shift == 0,
@@ -2893,15 +2699,21 @@ void TestVoiceParts()
     effect.name = "two parts";
     effect.row = {.id = 1, .object = 3, .max_voices = 1, .key = 60};
     std::set<std::string> left_out;
+
     const std::vector<musyx::EffectNote> notes = musyx::EffectNotes(effect, instruments, left_out);
-    Check(notes.size() == 2 && notes[0].start_ms == 0.0 && notes[0].voices.size() == 1 &&
-              notes[0].voices[0].part == 1 && notes[1].start_ms == 200.0 && notes[1].voices.size() == 1 &&
-              notes[1].voices[0].part == 2 && left_out.empty(),
-          "the effect plays a note for each part");
+    if (!Check(notes.size() == 2 && notes[0].start_ms == 0.0 && notes[0].voices.size() == 1 &&
+                   notes[0].voices[0].part == 1 && notes[1].start_ms == 200.0 && notes[1].voices.size() == 1 &&
+                   notes[1].voices[0].part == 2 && left_out.empty(),
+               "the effect plays a note for each part"))
+    {
+        return;
+    }
+
     Check(instruments.Voice(notes[1].voices[0]).sample_ms == 0.0 && !instruments.Voice(notes[1].voices[0]).stop_ms,
           "the second part's note starts with its sample");
 
     const Conversion c = musyx::ConvertEffect(effect, instruments);
+
     Check(c.performance.presets.size() == 2, "each part has a preset");
     Check(ntdlib::testing::CheckConversion(c, "two parts") == 0, "independent readers accept the files");
 }
@@ -2941,7 +2753,7 @@ void TestPlayedEffects()
             "the second effect");
     }
     const std::string past_the_data = ErrorOf([&] { musyx::ReadPlayedEffects(*dol, kBase + 24, 2); });
-    Check(past_the_data == "main.dol has no data at the song list's address",
+    Check(past_the_data == "main.dol has no data at the table of effects",
           "a table past the DOL's data fails: " + past_the_data);
 }
 
@@ -3005,10 +2817,12 @@ void TestFitFadesLine()
     const FadeShape line = FitFades({{0.0, 1.0}, {1000.0, 0.0}});
     Check(line.peak == 1.0 && line.attack_ms == 0.0, "the line falls from its peak");
     Check(line.hold_ms > 0.0, "the fit holds first");
+
     const auto fitted_db = [&line](double ms)
     {
         return (ms - line.hold_ms) * line.decay_db_per_ms;
     };
+
     Check(std::abs(fitted_db(500.0) - 6.02) < 1.0, "the fit follows the line's middle");
     Check(std::abs(fitted_db(900.0) - 20.0) < 5.0, "the fit follows the line down to 20 dB");
     Check(line.sustain_db < -100.0, "the line ends in silence");
@@ -3031,10 +2845,10 @@ void TestFitRelease()
 void TestSlowDecayHold()
 {
     using seqlib::sf2::ToTimecents;
-    const double one_db = std::pow(10.0, -1.0 / 20.0);
-    const double two_db = std::pow(10.0, -2.0 / 20.0);
-    const FadeShape slow = FitFades({{0.0, 1.0}, {143000.0, one_db}});
-    const FadeShape drop = FitFades({{0.0, 1.0}, {50.0, two_db}, {143000.0, two_db * one_db}});
+    const double kOneDb = std::pow(10.0, -1.0 / 20.0);
+    const double kTwoDb = std::pow(10.0, -2.0 / 20.0);
+    const FadeShape slow = FitFades({{0.0, 1.0}, {143000.0, kOneDb}});
+    const FadeShape drop = FitFades({{0.0, 1.0}, {50.0, kTwoDb}, {143000.0, kTwoDb * kOneDb}});
     const FadeShape fast = FitFades({{0.0, 1.0}, {1000.0, 0.0}});
     seqlib::sf2::ZoneValues slow_zone;
     seqlib::sf2::ZoneValues drop_zone;
@@ -3058,7 +2872,6 @@ void TestSlowDecayHold()
 void TestN64SampleRate()
 {
     Check(n64::kUpdatesPerSecond > 228.0 && n64::kUpdatesPerSecond < 229.0, "the port's updates a second");
-    Check(n64::kFramesPerSecond == n64::kUpdatesPerSecond / 4.0, "a frame is four updates");
     Check(std::abs(n64::kSampleRate - 31910.0) < 10.0, "the library's base rate");
 }
 
@@ -3066,13 +2879,14 @@ void TestN64SampleRate()
 // One that fades has less to fall, in the same time for a full level.
 void TestN64ShapeRelease()
 {
-    const uint8_t index = 0x90;
-    const double ms = n64::ReleaseFrames(index) * 1000.0 / n64::kFramesPerSecond;
-    const n64::VolumeShape held = n64::ShapeOf({{1, 32767}}, index);
+    constexpr uint8_t kRelease = 0x90;
+    const double kReleaseMs = n64::ReleaseFrames(kRelease) * 1000.0 / n64::kFramesPerSecond;
+    const n64::VolumeShape held = n64::ShapeOf({{1, 32767}}, kRelease);
     Check(held.peak == 1.0, "the envelope reaches full level");
-    Check(std::abs(held.release_db_per_ms - FitRelease(ms)) < 1e-9, "a held note's release takes the full time");
+    Check(std::abs(held.release_db_per_ms - FitRelease(kReleaseMs)) < 1e-9,
+          "a held note's release takes the full time");
 
-    const n64::VolumeShape fades = n64::ShapeOf({{1, 32767}, {100, 0}}, index);
+    const n64::VolumeShape fades = n64::ShapeOf({{1, 32767}, {100, 0}}, kRelease);
     Check(fades.release_db_per_ms > held.release_db_per_ms, "a faded note's release takes less time");
     Check(n64::ShapeOf({{1, 32767}}, 0).release_db_per_ms == 0.0, "index 0 has no release");
 }
@@ -3156,8 +2970,9 @@ N64Game MakeN64Game(uint8_t release, uint16_t fade_updates = 0, const N64Loop& l
     const uint32_t sample_start = static_cast<uint32_t>(game.rom.size());
     game.rom.insert(game.rom.end(), samples.begin(), samples.end());
 
-    // A table's header holds its count, and its entries follow.
     BigEndianBytes dol;
+
+    // A table's header holds its count, and its entries follow.
     const auto table = [&dol](std::initializer_list<std::array<uint32_t, 5>> entries)
     {
         const uint32_t address = kBase + static_cast<uint32_t>(dol.Size());
@@ -3169,10 +2984,12 @@ N64Game MakeN64Game(uint8_t release, uint16_t fade_updates = 0, const N64Loop& l
 
         return address;
     };
+
     const auto here = [&dol]
     {
         return kBase + static_cast<uint32_t>(dol.Size());
     };
+
     game.tables.sequences = table({{0, static_cast<uint32_t>(sequence.size()), 0, 0, 0}});
     game.tables.banks = table({{0, static_cast<uint32_t>(bank.Size()), 0x00ff, 0x0100, 0}});
     game.tables.sample_banks = table({{0, static_cast<uint32_t>(samples.size()), 0, 0, 0}});
@@ -3207,24 +3024,43 @@ N64Game MakeN64Game(uint8_t release, uint16_t fade_updates = 0, const N64Loop& l
     return game;
 }
 
-// The piece plays its note on key 60 from tick 0 to tick 48. Its sample plays at the library's base rate at that key,
-// and its zone takes the instrument's release.
-void TestN64Piece()
+// The conversion of the piece of `game`, and the errors of its sound data.
+struct N64Conversion
 {
-    constexpr uint8_t kRelease = 0x90;
-    const N64Game game = MakeN64Game(kRelease);
+    Conversion conversion;
+    std::vector<std::string> errors;
+};
+
+// Convert the piece of `game`. Nothing if the DOL of `game` doesn't read.
+std::optional<N64Conversion> ConvertN64(const N64Game& game)
+{
     const std::optional<ntdlib::Dol> dol = ntdlib::Dol::Parse(game.dol);
     if (!Check(dol.has_value(), "the test's DOL reads"))
     {
-        return;
+        return std::nullopt;
     }
 
     n64::SoundData data(*dol, game.tables, game.rom);
     n64::Piece piece;
     piece.name = "piece";
-    const Conversion c = n64::ConvertPiece(piece, data, {});
+    Conversion c = n64::ConvertPiece(piece, data, {});
 
-    Check(data.Errors().empty(), "the bank reads");
+    return N64Conversion{std::move(c), data.Errors()};
+}
+
+// The piece plays its note on key 60 from tick 0 to tick 48. Its sample plays at the library's base rate at that key,
+// and its zone takes the instrument's release.
+void TestN64Piece()
+{
+    constexpr uint8_t kRelease = 0x90;
+    const std::optional<N64Conversion> converted = ConvertN64(MakeN64Game(kRelease));
+    if (!converted)
+    {
+        return;
+    }
+
+    const Conversion& c = converted->conversion;
+    Check(converted->errors.empty(), "the bank reads");
 
     std::vector<std::pair<EventKind, uint32_t>> notes;
     for (const TrackEvent& e : c.performance.tracks[0])
@@ -3235,16 +3071,16 @@ void TestN64Piece()
             Check(e.key == 60, "semitone 39 is key 60");
         }
     }
-    const std::vector<std::pair<EventKind, uint32_t>> expected = {{EventKind::kNoteOn, 0}, {EventKind::kNoteOff, 48}};
-    Check(notes == expected, "the note's start and end");
+    const std::vector<std::pair<EventKind, uint32_t>> kExpected = {{EventKind::kNoteOn, 0}, {EventKind::kNoteOff, 48}};
+    Check(notes == kExpected, "the note's start and end");
 
     const seqlib::sf2::Records records = seqlib::sf2::Read(c.sf2);
     const uint32_t rate = xsflib::LoadLe32(records.Record("shdr", 46, 0) + 36);
     Check(rate == static_cast<uint32_t>(std::lround(n64::kSampleRate)), "the sample's rate is the library's");
 
-    const double ms = n64::ReleaseFrames(kRelease) * 1000.0 / n64::kFramesPerSecond;
+    const double kReleaseMs = n64::ReleaseFrames(kRelease) * 1000.0 / n64::kFramesPerSecond;
     const std::vector<int> releases = SampleZoneValues(c.sf2, seqlib::sf2::kReleaseVolEnv);
-    Check(releases == std::vector<int>{seqlib::sf2::ToTimecents(100.0 / FitRelease(ms), -12000, 8000)},
+    Check(releases == std::vector<int>{seqlib::sf2::ToTimecents(100.0 / FitRelease(kReleaseMs), -12000, 8000)},
           "the zone's release");
     Check(ntdlib::testing::CheckConversion(c, "piece") == 0, "independent readers accept the files");
 }
@@ -3255,17 +3091,13 @@ void TestN64NoteLength()
 {
     constexpr uint8_t kRelease = 0x90;
     constexpr uint16_t kFadeUpdates = 200;
-    const N64Game game = MakeN64Game(kRelease, kFadeUpdates);
-    const std::optional<ntdlib::Dol> dol = ntdlib::Dol::Parse(game.dol);
-    if (!Check(dol.has_value(), "the test's DOL reads"))
+    const std::optional<N64Conversion> converted = ConvertN64(MakeN64Game(kRelease, kFadeUpdates));
+    if (!converted)
     {
         return;
     }
 
-    n64::SoundData data(*dol, game.tables, game.rom);
-    n64::Piece piece;
-    piece.name = "piece";
-    const Conversion c = n64::ConvertPiece(piece, data, {});
+    const Conversion& c = converted->conversion;
 
     const n64::VolumeShape shape = n64::ShapeOf({{1, 32767}, {kFadeUpdates, 0}}, kRelease, 500.0);
     const std::vector<int> releases = SampleZoneValues(c.sf2, seqlib::sf2::kReleaseVolEnv);
@@ -3281,24 +3113,20 @@ void TestN64NoteLength()
 // there to semitone 41.
 void TestN64LegatoSweep()
 {
-    const std::vector<uint8_t> layer = {
+    const std::vector<uint8_t> kLayer = {
         0xc4,                   // legato
         0xc7, 0x85, 51,   51,   // the sweep: mode 5, special, from semitone 51, time 51
         0x27, 0x18, 0x7f, 0x00, // semitone 39 for 24 ticks
         0x29, 0x18, 0x7f, 0x00, // semitone 41 for 24 ticks
         0xff,
     };
-    const N64Game game = MakeN64Game(0x90, 0, {}, layer);
-    const std::optional<ntdlib::Dol> dol = ntdlib::Dol::Parse(game.dol);
-    if (!Check(dol.has_value(), "the test's DOL reads"))
+    const std::optional<N64Conversion> converted = ConvertN64(MakeN64Game(0x90, 0, {}, kLayer));
+    if (!converted)
     {
         return;
     }
 
-    n64::SoundData data(*dol, game.tables, game.rom);
-    n64::Piece piece;
-    piece.name = "piece";
-    const Conversion c = n64::ConvertPiece(piece, data, {});
+    const Conversion& c = converted->conversion;
 
     std::vector<std::tuple<EventKind, uint32_t, uint8_t>> notes;
     std::map<uint32_t, float> pitch;
@@ -3313,9 +3141,9 @@ void TestN64LegatoSweep()
             pitch[e.tick] = e.semitones;
         }
     }
-    const std::vector<std::tuple<EventKind, uint32_t, uint8_t>> expected = {{EventKind::kNoteOn, 0, 72},
-                                                                            {EventKind::kNoteOff, 48, 72}};
-    Check(notes == expected, "the legato notes play as one note from the sweep's start");
+    const std::vector<std::tuple<EventKind, uint32_t, uint8_t>> kExpected = {{EventKind::kNoteOn, 0, 72},
+                                                                             {EventKind::kNoteOff, 48, 72}};
+    Check(notes == kExpected, "the legato notes play as one note from the sweep's start");
 
     // The pitch at a tick: the last bend sent by then.
     const auto at = [&pitch](uint32_t tick)
@@ -3323,6 +3151,7 @@ void TestN64LegatoSweep()
         const auto found = pitch.upper_bound(tick);
         return found == pitch.begin() ? 0.0f : std::prev(found)->second;
     };
+
     Check(at(2) < -1.0f && at(2) > -11.0f, "the first note sweeps down");
     Check(std::abs(at(10) + 12.0f) < 0.01f, "the first sweep ends at semitone 39");
     Check(at(26) > -12.0f && at(26) < -10.0f, "the second note sweeps up from the first");
@@ -3334,17 +3163,13 @@ void TestN64LegatoSweep()
 // The start and the end of the loop of the first sample of a conversion of `game`.
 std::pair<uint32_t, uint32_t> N64LoopOf(const N64Game& game)
 {
-    const std::optional<ntdlib::Dol> dol = ntdlib::Dol::Parse(game.dol);
-    if (!Check(dol.has_value(), "the test's DOL reads"))
+    const std::optional<N64Conversion> converted = ConvertN64(game);
+    if (!converted)
     {
         return {};
     }
 
-    n64::SoundData data(*dol, game.tables, game.rom);
-    n64::Piece piece;
-    piece.name = "piece";
-    const Conversion c = n64::ConvertPiece(piece, data, {});
-    const seqlib::sf2::Records records = seqlib::sf2::Read(c.sf2);
+    const seqlib::sf2::Records records = seqlib::sf2::Read(converted->conversion.sf2);
     const uint8_t* const header = records.Record("shdr", 46, 0);
 
     return {xsflib::LoadLe32(header + 28) - xsflib::LoadLe32(header + 20),
@@ -3465,6 +3290,7 @@ std::shared_ptr<ntdlib::disc::GameFiles> DiscWith(std::map<std::string, std::vec
         {
             return false;
         }
+
         data = found->second;
 
         return true;
@@ -3479,6 +3305,10 @@ Conversion ConvertRed(const std::vector<uint8_t>& piece, const std::vector<uint8
 {
     const std::unique_ptr<red::GameInput> game =
         red::GameInput::Open(DiscWith({{"dvd/sound/Music/music100.bgm", piece}, {"dvd/sound/Wave/wave0001.wd", bank}}));
+    if (!Check(game != nullptr, "the disc holds a piece of Red"))
+    {
+        return {};
+    }
 
     return game->Convert(0, options);
 }
@@ -3487,12 +3317,9 @@ Conversion ConvertRed(const std::vector<uint8_t>& piece, const std::vector<uint8
 std::vector<std::pair<uint32_t, int>> RedEvents(const Conversion& c, std::size_t slot, EventKind kind)
 {
     std::vector<std::pair<uint32_t, int>> events;
-    for (const TrackEvent& e : c.performance.tracks[slot])
+    for (const TrackEvent& e : EventsOf(c.performance, slot, kind))
     {
-        if (e.kind == kind)
-        {
-            events.emplace_back(e.tick, e.value);
-        }
+        events.emplace_back(e.tick, e.value);
     }
 
     return events;
@@ -3507,16 +3334,17 @@ void TestRedOpen()
         {{"dvd/sound/Music/Music101.bgm", {}}, {"dvd/sound/music/music100.bgm", {1}}, {"dvd/sound/Music/a.txt", {}}}));
     if (Check(game != nullptr, "the folder of pieces names the driver"))
     {
-        const std::vector<std::string> expected = {"music100", "music101"};
-        Check(game->Pieces() == expected, "the pieces by their names");
+        const std::vector<std::string> kExpected = {"music100", "music101"};
+        Check(game->Pieces() == kExpected, "the pieces by their names");
         Check(!ErrorOf([&] { game->Convert(0, {}); }).empty(), "a file that isn't a piece fails");
     }
 
     const std::vector<uint8_t> piece = RedPiece(127, {});
     const std::unique_ptr<red::GameInput> no_bank =
         red::GameInput::Open(DiscWith({{"dvd/sound/Music/music100.bgm", piece}}));
-    Check(ErrorOf([&] { no_bank->Convert(0, {}); }) == "no file on the disc holds the piece's bank",
-          "a missing bank fails");
+    Check(
+        no_bank != nullptr && ErrorOf([&] { no_bank->Convert(0, {}); }) == "no file on the disc holds the piece's bank",
+        "a missing bank fails");
 }
 
 // The levels are lines in amplitude, and MIDI's values give squares. The tempo adds up once for each of AX's frames.
@@ -3524,17 +3352,20 @@ void TestRedOpen()
 void TestRedLevels()
 {
     const std::vector<uint8_t> bank = RedBank({{{}}}, 16);
+
     const Conversion c = ConvertRed(
         RedPiece(63, {{0, 0x08, 125, 96, 0x00}, {0, 0x22, 63, 0,  0x26, 0,    0,  0x0a, 32, 0,  0x60, 0,  0x20, 0,
                                                  0, 0x11, 60, 63, 48,   0x18, 12, 0x13, 0,  12, 0x18, 24, 0x00}}),
         bank);
-    Check(std::abs(c.performance.tempo[0].bpm - 125.0 * 32028.5 / 160.0 / 200.0) < 1e-6, "the tempo");
+
+    Check(!c.performance.tempo.empty() && std::abs(c.performance.tempo[0].bpm - 125.0 * 32028.5 / 160.0 / 200.0) < 1e-6,
+          "the tempo");
     Check(c.performance.end_tick == 97, "the piece ends with its last track");
 
-    const std::vector<std::pair<uint32_t, int>> on = {{0, 90}, {60, 127}};
-    Check(RedEvents(c, 1, EventKind::kNoteOn) == on, "the notes' starts and velocities");
-    const std::vector<std::pair<uint32_t, int>> off = {{48, 0}, {72, 0}};
-    Check(RedEvents(c, 1, EventKind::kNoteOff) == off, "the notes' ends");
+    const std::vector<std::pair<uint32_t, int>> kOn = {{0, 90}, {60, 127}};
+    Check(RedEvents(c, 1, EventKind::kNoteOn) == kOn, "the notes' starts and velocities");
+    const std::vector<std::pair<uint32_t, int>> kOff = {{48, 0}, {72, 0}};
+    Check(RedEvents(c, 1, EventKind::kNoteOff) == kOff, "the notes' ends");
 
     // The piece's volume and the track's are each 0.5, and the pan's total is 1. The left side alone sounds.
     const std::vector<std::pair<uint32_t, int>> expression = RedEvents(c, 1, EventKind::kExpression);
@@ -3551,31 +3382,18 @@ void TestRedLevels()
 void TestRedKeyOffs()
 {
     const std::vector<uint8_t> bank = RedBank({{{}}}, 16);
+
     const Conversion c =
         ConvertRed(RedPiece(127, {{0, 0x08, 120, 48, 0x00}, {0, 0x20, 0,  0,  0x12, 60, 0, 0x18, 10, 0x12, 61,
                                                              0, 0x12, 62, 10, 0x1a, 61, 0, 0x12, 61, 10,   0x00}}),
                    bank);
-    std::vector<std::pair<uint32_t, int>> on;
-    for (const TrackEvent& e : c.performance.tracks[1])
-    {
-        if (e.kind == EventKind::kNoteOn)
-        {
-            on.emplace_back(e.tick, e.key);
-        }
-    }
-    const std::vector<std::pair<uint32_t, int>> expected = {{10, 61}, {10, 62}, {20, 61}};
-    Check(on == expected, "the cancelled note never starts, and the note after a key-off does");
 
-    std::vector<std::pair<uint32_t, int>> off;
-    for (const TrackEvent& e : c.performance.tracks[1])
-    {
-        if (e.kind == EventKind::kNoteOff)
-        {
-            off.emplace_back(e.tick, e.key);
-        }
-    }
-    const std::vector<std::pair<uint32_t, int>> offs = {{20, 61}, {30, 61}, {49, 62}};
-    Check(off == offs, "a stop releases the track's key, and the other note ends with the piece");
+    const std::vector<std::pair<uint32_t, int>> kOn = {{10, 61}, {10, 62}, {20, 61}};
+    Check(KeysOf(c.performance, 1, EventKind::kNoteOn) == kOn,
+          "the cancelled note never starts, and the note after a key-off does");
+    const std::vector<std::pair<uint32_t, int>> kOff = {{20, 61}, {30, 61}, {49, 62}};
+    Check(KeysOf(c.performance, 1, EventKind::kNoteOff) == kOff,
+          "a stop releases the track's key, and the other note ends with the piece");
 }
 
 // The loop's start saves each track at the end of its tick. The loop's end restores them at the end of its tick, and
@@ -3585,7 +3403,9 @@ void TestRedLoop()
     const std::vector<uint8_t> bank = RedBank({{{}}}, 16);
     const std::vector<uint8_t> piece = RedPiece(
         127, {{0, 0x08, 120, 24, 0x02, 96, 0x03, 0, 0x00}, {0, 0x20, 0, 30, 0x12, 60, 12, 0x18, 200, 1, 0x00}});
+
     const Conversion once = ConvertRed(piece, bank);
+
     const std::optional<Performance::Loop> loop = once.performance.loop;
     if (Check(loop.has_value(), "the piece loops"))
     {
@@ -3595,15 +3415,17 @@ void TestRedLoop()
 
     PerformOptions twice_options;
     twice_options.loops = 2;
+
     const Conversion twice = ConvertRed(piece, bank, twice_options);
+
     Check(twice.performance.end_tick == 217, "a second pass adds the loop's length");
     std::vector<uint32_t> starts;
     for (const auto& [tick, velocity] : RedEvents(twice, 1, EventKind::kNoteOn))
     {
         starts.push_back(tick);
     }
-    const std::vector<uint32_t> expected = {30, 126};
-    Check(starts == expected, "the second pass plays the note again");
+    const std::vector<uint32_t> kExpected = {30, 126};
+    Check(starts == kExpected, "the second pass plays the note again");
 
     const std::vector<uint8_t> no_start = RedPiece(127, {{0, 0x08, 120, 24, 0x03, 0, 0x00}});
     Check(ErrorOf([&] { ConvertRed(no_start, bank); }) == "a piece's loop ends before it starts",
@@ -3647,6 +3469,7 @@ void TestRedSplits()
     alone.sample = 48;
 
     const Conversion c = RedPlaying({{first, hidden, middle, last}, {alone}});
+
     std::vector<std::pair<int, int>> ranges;
     const seqlib::sf2::Records records = seqlib::sf2::Read(c.sf2);
     for (std::size_t zone = 0; zone + 1 < records.Count("ibag", 4); zone++)
@@ -3658,8 +3481,8 @@ void TestRedSplits()
             ranges.emplace_back(range & 0xff, range >> 8);
         }
     }
-    const std::vector<std::pair<int, int>> expected = {{0, 59}, {60, 70}, {71, 127}, {0, 127}};
-    Check(ranges == expected, "each region's keys");
+    const std::vector<std::pair<int, int>> kExpected = {{0, 59}, {60, 70}, {71, 127}, {0, 127}};
+    Check(ranges == kExpected, "each region's keys");
 }
 
 // A stereo wave's records play at the two sides, whatever the track's pan. A fixed pan leaves the track's out too. Its
@@ -3679,12 +3502,13 @@ void TestRedPans()
     centre.pan = 0x80;
 
     const Conversion c = RedPlaying({{left, right}, {fixed}, {centre}, {}});
-    const double place = std::atan2(32.0 * 182.0 / 63.0, 256.0 - 32.0 * 74.0 / 63.0) * 2.0 / std::numbers::pi;
+
+    const double kPlace = std::atan2(32.0 * 182.0 / 63.0, 256.0 - 32.0 * 74.0 / 63.0) * 2.0 / std::numbers::pi;
     const std::vector<int> pans = SampleZoneValues(c.sf2, seqlib::sf2::kPan);
 
     // The centre's zone leaves its pan of 0 out.
-    const std::vector<int> expected = {-500, 500, static_cast<int>(std::lround((place * 2.0 - 1.0) * 500.0))};
-    Check(pans == expected, "the zones' pans");
+    const std::vector<int> kExpected = {-500, 500, static_cast<int>(std::lround((kPlace * 2.0 - 1.0) * 500.0))};
+    Check(pans == kExpected, "the zones' pans");
 
     const seqlib::sf2::Records records = seqlib::sf2::Read(c.sf2);
     int fixed_zones = 0;
@@ -3694,6 +3518,7 @@ void TestRedPans()
         {
             continue;
         }
+
         for (const std::array<int, 5>& modulator : ZoneModulators(records, zone))
         {
             if (modulator[1] == seqlib::sf2::kPan && modulator[0] == seqlib::sf2::kCc10ToPan.source)
@@ -3714,7 +3539,9 @@ void TestRedEnvelope()
     RedRecord slow;
     slow.times = {0, 0, 640, 20};
     slow.levels = {0, 127, 15, 127};
+
     const Conversion c = RedPlaying({{slow}});
+
     constexpr double kFrameMs = 160.0 * 1000.0 / 32028.5;
     const std::vector<int> attacks = SampleZoneValues(c.sf2, seqlib::sf2::kAttackVolEnv);
     Check(attacks == std::vector<int>{seqlib::sf2::ToTimecents(640.0 * kFrameMs, -12000, 8000)},
@@ -3731,7 +3558,9 @@ void TestRedWaveEnd()
     past.end = 0x1000;
     RedRecord outside;
     outside.sample = 0x1000;
+
     const Conversion c = RedPlaying({{past}, {outside}}, 16);
+
     Check(c.samples == 1, "the wave that starts inside the bank plays");
     const seqlib::sf2::Records records = seqlib::sf2::Read(c.sf2);
     const uint8_t* header = records.Record("shdr", 46, 0);
@@ -3756,6 +3585,7 @@ void TestRedSharedChannels()
     }
 
     const Conversion separate = ConvertRed(RedPiece(127, apart), bank);
+
     Check(separate.channels <= 16, "the tracks fit in MIDI's channels");
     const std::string kFault = "tracks with different controllers that share a channel";
     Check(!separate.performance.approximations.contains(kFault), "tracks that sound apart share with no fault");
@@ -3768,6 +3598,7 @@ void TestRedSharedChannels()
     Check(notes == 18, "every track's note plays");
 
     const Conversion crowded = ConvertRed(RedPiece(127, together), bank);
+
     Check(crowded.channels <= 16, "the tracks fit in MIDI's channels");
     Check(crowded.performance.approximations.contains(kFault),
           "tracks that sound together with other levels are a fault");
@@ -3780,15 +3611,8 @@ int main(int argc, char** argv)
 {
     TestMusyxPaths();
     TestMusyxSongLists();
-    TestSoundManagerFile();
-    TestSoundTest();
-    TestSoundTestGlyphs();
-    TestMusyxSoundTable();
     TestSoundRoom();
     TestSongsInOneFile();
-    TestSongPaths();
-    TestYay0();
-    TestRelModule();
     TestDlsMilliseconds();
     TestPianoPan();
     TestScaleVolume();
@@ -3801,6 +3625,9 @@ int main(int argc, char** argv)
     TestMusyxSongVolume();
     TestMusyxSongFadeIn();
     TestMusyxTailCut();
+    TestMusyxTailUnderNextNote();
+    TestMusyxLoopTailCut();
+    TestMusyxFadeTailCut();
     TestMusyxVolumeTable();
     TestMusyxTableLevels();
     TestMusyxSong();

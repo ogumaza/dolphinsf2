@@ -51,6 +51,7 @@ struct Envelope
     double decay_timecents = 0.0;
     double attack_tc_per_velocity = 0.0;
     double decay_tc_per_key = 0.0;
+
     // The DLS envelope's attack and decay are attack_ms and decay_ms, in whole milliseconds, with no scales. An
     // envelope that a macro takes from the channel's controllers gives its times so (SetAdsrFromControllers).
     bool times_in_ms = false;
@@ -65,6 +66,27 @@ using ChannelControls = std::vector<std::pair<uint8_t, uint8_t>>;
 // (SplitVelocity). A channel's controls hold the note's velocity there, and a voice's controls hold the voice's start
 // volume (VoiceControls). MusyX's controllers end at 0xA4, so no controller has this number.
 constexpr uint8_t kVelocityControl = 0xff;
+
+// The MIDI controllers that MusyX songs and macros give a meaning: the mod wheel, the volume, the pan, the expression
+// and the sends to aux A and aux B.
+constexpr uint8_t kModWheel = 1;
+constexpr uint8_t kVolumeController = 7;
+constexpr uint8_t kPanController = 10;
+constexpr uint8_t kExpressionController = 11;
+constexpr uint8_t kReverbController = 91;
+constexpr uint8_t kChorusController = 93;
+
+// The MusyX controllers from 0x80 up that a macro step can name: the channel pitch wheel, the two voice LFOs and
+// controller 132. MusyX turns 0x82 and 0x83 into 0xA0 and 0xA1 (inpTranslateExCtrl, 0x80161D20 in Pokémon Colosseum).
+constexpr uint8_t kPitchWheelControl = 0x80;
+constexpr uint8_t kLfo0Control = 0x82;
+constexpr uint8_t kLfo1Control = 0x83;
+constexpr uint8_t kController132 = 0x84;
+
+// The controller whose value MusyX keeps for controller `controller` of a song's channel. Below 64, the controllers
+// come in pairs of 14 bits. A controller below 32 holds the high 7 bits, and the one 32 above it the low 7. MusyX
+// reads both through the lower one.
+uint8_t KeptController(uint8_t controller);
 
 // The volume from 0 to 127 with which a voice starts for a note of velocity `velocity`: the velocity times `share`, the
 // share of the note's volume that the layers give the voice (KeyVoice::volume). MusyX multiplies the volume by each
@@ -84,10 +106,6 @@ constexpr double kSilentSustain = 0.01;
 // line from full level falls as 1 - t/T, with an energy of T/3. A fall of r dB in T has an energy of 10 T / (r ln 10).
 // The two match at r = 30 / ln 10, about 13 dB.
 constexpr double kEnergyFitDb = 30.0 / std::numbers::ln10;
-
-// The decibels that a SoundFont envelope's decay and release fall in their time. A voice of the files counts as silent
-// after this fall.
-constexpr double kSoundFontFallDb = 100.0;
 
 // The milliseconds of `timecents`. MusyX turns a DLS envelope's time into whole milliseconds this way.
 double DlsMilliseconds(double timecents);
@@ -254,7 +272,7 @@ struct InputSource
 };
 
 // A controller's full value in MusyX's inputs: 14 bits.
-constexpr double kFullInput = 0x3fff;
+constexpr double kFullInput = kWheelHighest;
 
 // The value of `source`, from 0 to kFullInput, with the source's controller at `controller` in the same units. MusyX
 // takes a variable, the mod wheel (CC1) and the pan (CC10) as signed sources. Their value is half of full plus the
@@ -270,9 +288,11 @@ struct MacroVoice
     int key_shift = 0;              // keys added to the note's key (AddKey)
     std::optional<int> fixed_key;   // a key that replaces the note's key (SetKey)
     double detune_cents = 0.0;
+
     // A rate in Hz at which the voice plays its sample, whatever its key and detune (SetPitch). A later SetKey takes
     // its place.
     std::optional<double> rate_hz;
+
     // The settings above give the tuning of the voice's zone. `pitch_changes` holds each change of them, in order,
     // and `sweeps` the pitch sweeps. MusyX updates a voice's pitch and pan every 15 ms, at its start and at the end
     // of each of its macro's waits (`updates`). These times count from the voice's start. VoiceFrom moves them to the
@@ -280,59 +300,79 @@ struct MacroVoice
     std::vector<PitchSettings> pitch_changes;
     std::vector<PitchSweep> sweeps;
     std::vector<double> updates;
+
     double volume = 1.0;     // the scale of the note's volume (ScaleVolumeDLS, ScaleVolume, FadeIn)
     double volume_add = 0.0; // what ScaleVolume and FadeIn add to the scaled volume, in units of full volume
+
     // The time from the voice's start over which its volume rises from silence (FadeIn).
     double fade_in_ms = 0.0;
+
     // The share of the volume controller (CC7) that the voice's volume follows (VolumeSelect). MusyX holds the
     // controller's value times the share at full volume. With `source_fixed`, the voice follows a variable instead.
     // Its volume then takes `source_volume` as it is. The controller doesn't change it.
     double source_volume = 1.0;
     bool source_fixed = false;
+
     // The volume controller from 0 to 1, if the macro sets it (SetVariable on a controller). In an effect, it takes the
     // place of the effect's volume controller at full. A song's channel holds the controller. A song's note leaves it
     // out.
     std::optional<double> volume_controller;
+
     // The sends to aux A and aux B (CC91 and CC93) from 0 to 1, if the macro sets them. An effect's note takes them in
     // place of the effect's sends. A song's note leaves them out.
     std::optional<double> reverb_controller;
     std::optional<double> chorus_controller;
+
     // The source of the send to aux A that a ReverbSelect puts in place of the reverb controller (CC91). MusyX starts a
     // voice on CC91 in full.
     std::optional<InputSource> reverb_source;
+
     bool dls_volume = false; // the voice's level is the square of its volume (ModeSelect)
     bool itd = false;        // the pan narrows to 0.766 of its range (ModeSelect)
+
     // A pan that follows the key, in place of the pan of the keymap or the layer.
     std::optional<PianoPan> piano_pan;
+
     // A pan from 0 to 127 that the voice sets itself (Panning). The voice takes it in place of the pan of the keymap
     // or the layer, and of a PianoPan before it.
     std::optional<int> pan;
+
     bool pan_last = false;  // a Panning step comes after the last PianoPan
     bool pan_moves = false; // a Panning step moves the pan (the voice keeps the first pan)
+
     // Each Panning step, in order. An effect's note follows them with CC10 (PanCurve).
     std::vector<PanSetting> pan_changes;
+
     // The voices that the macro starts on other voices (PlayMacro), in order.
     std::vector<StartedVoice> started;
+
     // The parts of a voice whose macro starts one sample after another, one for each sample: from the sample's start
     // to the next one's, with the settings that the macro has made by the time the sample has played for a moment.
     // Empty for a voice that starts one sample. A song's note plays the first sample with the voice's settings, and an
     // effect plays every part.
     std::vector<MacroVoice> parts;
+
     std::optional<Envelope> envelope;
+
     // The controllers whose values the envelope takes (SetAdsrFromControllers), in order. MusyX reads the 7 high bits
     // of each. A controller below 32 stands for its pair of 14 bits.
     std::vector<uint8_t> controllers;
+
     // The splits that the macro meets, in order: each a controller and the value from which the voice goes another way.
     // SplitModulation reads the mod wheel, and SplitVelocity the start volume (kVelocityControl). A song's voice reads
     // its controls there. An effect's voice goes on. The list comes from a run without controls, which goes on at each
     // split. A split that only another way reaches isn't listed.
     std::vector<std::pair<uint8_t, uint8_t>> splits;
+
     // The ramps of the voice's volume while its note is held, up to the voice's stop (stop_ms).
     std::vector<VolumeRamp> held_ramps;
+
     KeyOff key_off = KeyOff::kIgnored;
-    ReleaseFade release_fade;      // for KeyOff::kFade
+    ReleaseFade release_fade; // for KeyOff::kFade
+
     // The voice's KeyOff comes at stop_ms whatever its note's release does. The release doesn't end the voice.
     bool releases_itself = false;
+
     std::optional<double> stop_ms; // when a held note's voice stops or releases itself, after its start
     std::optional<Vibrato> vibrato;
     std::optional<Tremolo> tremolo;
@@ -340,6 +380,7 @@ struct MacroVoice
     uint8_t key_group = 0; // the voice stops the group's other voices when it starts
     int bend_up = 2;       // the pitch wheel's range in semitones above the note (PitchWheelRange)
     int bend_down = 2;     // and below it
+
     // Whether the channel's pitch wheel bends the voice. A macro can turn the voice's pitch wheel to other sources
     // (PitchWheelSelect), such as an LFO (`wheel_lfo`).
     bool follows_wheel = true;
@@ -484,6 +525,9 @@ public:
     // (SfzSampleNames), or "s" and its ID, such as "s12".
     Instruments(const SongGroup& group, const VolumeTable& volumes, std::map<uint16_t, std::string> sfz_names = {});
 
+    // The instruments keep a reference to the group. A temporary group can't be read.
+    Instruments(SongGroup&& group, const VolumeTable& volumes, std::map<uint16_t, std::string> sfz_names = {}) = delete;
+
     const SongGroup& Group() const
     {
         return group_;
@@ -526,15 +570,15 @@ public:
     // The amplitude of `voice` at `volume`: the volume squared on the DLS curve, else the volume table's level.
     double Level(const MacroVoice& voice, double volume) const;
 
-    // Sample `id`, decoded once. Return nullptr if the sample directory lacks it, or record why if it can't be
-    // decoded.
+    // Sample `id`, decoded once. Return nullptr if the sample directories have no such sample, or if it can't be
+    // decoded. The instruments record why a sample can't be decoded.
     const Sample* GetSample(uint16_t id);
 
     // The sample that `voice` starts, as GetSample gives it. Return nullptr for a voice that starts none.
     const Sample* SampleOf(const MacroVoice& voice);
 
     // The seconds that sample `id` plays when its pitch is `ratio` times its rate, or nothing if it loops. Return 0 for
-    // a sample that can't be decoded.
+    // a sample that GetSample doesn't give.
     std::optional<double> SampleSeconds(uint16_t id, double ratio);
 
     const std::vector<std::string>& Errors() const
@@ -558,10 +602,13 @@ private:
     const SongGroup& group_;
     VolumeTable volumes_;
     std::map<uint16_t, MacroVoice> macros_;
+
     // By macro, part and the note's start (VoiceFrom).
     std::map<std::tuple<uint16_t, std::size_t, double>, MacroVoice> later_macros_;
+
     // By macro, part, the note's start and the controllers' values, for the macros that read them.
     std::map<std::tuple<uint16_t, std::size_t, double, ChannelControls>, MacroVoice> controlled_macros_;
+
     std::map<uint16_t, ObjectReads> object_reads_;
     std::vector<Variant> variants_;
     std::map<uint16_t, std::unique_ptr<Sample>> samples_;

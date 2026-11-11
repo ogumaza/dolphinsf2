@@ -156,12 +156,6 @@ public:
     // main.dol or a part of the sound data outside `rom`.
     SoundData(const ntdlib::Dol& dol, const LibraryTables& tables, std::vector<uint8_t> rom);
 
-    // The sequences in the table.
-    std::size_t SequenceCount() const
-    {
-        return sequences_.size();
-    }
-
     // The number of the sequence whose data sequence `number` plays: a sequence of size 0 plays the one whose number
     // its offset holds. Throw FormatError for a number outside the table or a chain that doesn't end.
     uint32_t Resolve(uint32_t number) const;
@@ -179,7 +173,7 @@ public:
     // Bank `number`, read on first use, or nullptr if it can't be read. Errors() then says why.
     const Bank* GetBank(uint8_t number);
 
-    // The library's tables of pitches and pans (LibraryTables).
+    // The library's tables of pitches, and the tables that a new sequence takes (LibraryTables).
     const std::array<float, 256>& Cents() const
     {
         return cents_;

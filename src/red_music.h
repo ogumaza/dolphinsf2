@@ -19,12 +19,17 @@
 namespace dolphinsf2::red
 {
 
+// A bank of waves (a .wd file) with its waves decoded as the pieces play them (red_music.cpp).
+class Bank;
+
 // A game with the Red driver being converted.
 class GameInput
 {
 public:
     // Open the game whose files `disc` holds. Return nullptr if its disc has no folder of Red's pieces.
     static std::unique_ptr<GameInput> Open(const std::shared_ptr<ntdlib::disc::GameFiles>& disc);
+
+    ~GameInput();
 
     // The names of the pieces, in the order of their numbers.
     const std::vector<std::string>& Pieces() const
@@ -39,9 +44,14 @@ private:
     GameInput(std::shared_ptr<ntdlib::disc::GameFiles> disc, std::vector<std::string> names,
               std::vector<std::string> paths);
 
+    // Bank `number`, from the wave folder. The input keeps the bank that it read last, with its decoded waves. Throw
+    // FormatError if the disc has no such bank, or if it can't be read.
+    Bank& BankOf(int number);
+
     std::shared_ptr<ntdlib::disc::GameFiles> disc_;
     std::vector<std::string> names_;
     std::vector<std::string> paths_;
+    std::unique_ptr<Bank> bank_; // the bank read last
 };
 
 } // namespace dolphinsf2::red
