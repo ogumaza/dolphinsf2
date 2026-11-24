@@ -49,9 +49,8 @@ void Usage()
         "input. You can also drop files onto dolphinsf2.exe on Windows or Dolphinsf2.app\n"
         "on macOS.\n"
         "\n"
-        "options:\n"
-        "  --output DIR   write to DIR (one input only)\n"
-        "  --only REGEX   convert matching sequence names (for example --only BGM)\n";
+        "options:\n";
+    text += frame::OutputOnlyHelp("input", "BGM");
     text += frame::kLoopsHelp;
     text +=
         "  --seed N       initial game random state (default 0; JAudio2 games,\n"

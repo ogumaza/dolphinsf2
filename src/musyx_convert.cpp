@@ -172,8 +172,10 @@ std::vector<Zone> ZonesOf(Instruments& instruments, uint16_t object, const Chann
                 zones.push_back(open[i]);
             }
         }
+
         open = std::move(next);
     }
+
     zones.insert(zones.end(), open.begin(), open.end());
 
     // A voice's pitch rises with the key. Each zone therefore splits at the lowest key whose voice the DSP plays at its
@@ -272,7 +274,7 @@ int VelocityAttenuation(const Instruments& instruments, const MacroVoice& voice,
     {
         const double curve = -20.0 / 96.0 * std::log10(std::pow(velocity / 127.0, 2.0));
         const double response = VelocityResponse(instruments, voice, zone, velocity);
-        const double centibels = response > 0.0 ? -200.0 * std::log10(response) : kSilentCentibels;
+        const double centibels = response > 0.0 ? -200.0 * std::log10(response) : sf2::kMaxCentibels;
         product += curve * centibels;
         square += curve * curve;
     }
@@ -334,19 +336,6 @@ double ZonePan(const MacroVoice& voice, const Zone& zone)
     return std::clamp((zone.pan - 64) / 63.0, -1.0, 1.0) * (voice.itd ? kItdPan : 1.0);
 }
 
-// The instrument's global zone holds seqlib's kGlobalZoneModulators. MusyX doesn't filter by velocity. Its pitch wheel
-// has its full range. CC10 pans at the amount of 500 that most synthesizers play (kCc10ToPan). The mod wheel gives only
-// the macros' vibrato. SoundFont's default CC1 modulator would add 50 cents.
-sf2::Zone GlobalZone()
-{
-    sf2::Zone global;
-    global.modulators.assign(sf2::kGlobalZoneModulators.begin(), sf2::kGlobalZoneModulators.end());
-    global.modulators.push_back({sf2::kSrcModWheel, sf2::kVibLfoToPitch, 0, 0});
-
-    return global;
-}
-
-
 // Add the scales of DLS envelope `e` to `zone`: its decay by the voice's key, and its attack by the note's velocity. An
 // attack that takes no time (`attack_ms`) gets no scale.
 void AddDlsScales(sf2::Zone& zone, const Envelope& e, double attack_ms)
@@ -369,7 +358,7 @@ void AddVibrato(sf2::Zone& zone, const Vibrato& v)
     if (v.delay_ms > 0.0)
     {
         sf2::AddGenerator(zone, sf2::kDelayVibLfo,
-                          ToTimecents(v.delay_ms * kMsScale, kShortestTimecents, kLongestHoldTimecents));
+                          ToTimecents(v.delay_ms * kMsScale, sf2::kShortestTimecents, sf2::kLongestHoldTimecents));
     }
     sf2::AddGenerator(zone, sf2::kFreqVibLfo, sf2::LfoFrequency(LfoHz(v.period_ms)));
     if (!v.mod_scales_depth && v.depth_cents != 0.0)
@@ -391,10 +380,13 @@ void AddPitchEnvelope(sf2::Zone& zone, const PitchEnvelope& envelope, int key)
 {
     const PitchShape p = PitchOf(envelope, key);
     sf2::AddGenerator(zone, sf2::kModEnvToPitch, ClampedCents(p.range_cents));
-    sf2::AddGenerator(zone, sf2::kAttackModEnv, ToTimecents(p.attack_ms, kShortestTimecents, kLongestTimecents));
-    sf2::AddGenerator(zone, sf2::kDecayModEnv, ToTimecents(p.decay_ms, kShortestTimecents, kLongestTimecents));
+    sf2::AddGenerator(zone, sf2::kAttackModEnv,
+                      ToTimecents(p.attack_ms, sf2::kShortestTimecents, sf2::kLongestTimecents));
+    sf2::AddGenerator(zone, sf2::kDecayModEnv,
+                      ToTimecents(p.decay_ms, sf2::kShortestTimecents, sf2::kLongestTimecents));
     sf2::AddGenerator(zone, sf2::kSustainModEnv, static_cast<int>(std::lround(1000.0 * (1.0 - p.sustain))));
-    sf2::AddGenerator(zone, sf2::kReleaseModEnv, ToTimecents(p.release_ms, kShortestTimecents, kLongestTimecents));
+    sf2::AddGenerator(zone, sf2::kReleaseModEnv,
+                      ToTimecents(p.release_ms, sf2::kShortestTimecents, sf2::kLongestTimecents));
     const double per_key = envelope.envelope.decay_tc_per_key;
     if (per_key != 0.0)
     {
@@ -409,7 +401,7 @@ void AddWheelLfo(sf2::Zone& zone, const MacroVoice& voice, const WheelLfo& lfo, 
     if (lfo.delay_ms > 0.0)
     {
         sf2::AddGenerator(zone, sf2::kDelayModLfo,
-                          ToTimecents(lfo.delay_ms * kMsScale, kShortestTimecents, kLongestHoldTimecents));
+                          ToTimecents(lfo.delay_ms * kMsScale, sf2::kShortestTimecents, sf2::kLongestHoldTimecents));
     }
     if (!tremolo)
     {
@@ -453,12 +445,12 @@ sf2::Zone SoundFontZone(const Instruments& instruments, const Zone& z, const Mac
     values.pan = static_cast<int>(std::lround(ZonePan(voice, z) * kPanRange));
     if (shape.delay_ms > 0.0)
     {
-        values.delay = ToTimecents(shape.delay_ms, kShortestTimecents, kLongestHoldTimecents);
+        values.delay = ToTimecents(shape.delay_ms, sf2::kShortestTimecents, sf2::kLongestHoldTimecents);
     }
-    values.attack = ToTimecents(shape.attack_ms, kShortestTimecents, kLongestTimecents);
-    values.hold = ToTimecents(shape.hold_ms, kShortestTimecents, kLongestHoldTimecents);
+    values.attack = ToTimecents(shape.attack_ms, sf2::kShortestTimecents, sf2::kLongestTimecents);
+    values.hold = ToTimecents(shape.hold_ms, sf2::kShortestTimecents, sf2::kLongestHoldTimecents);
     values.decay = ShapeFallTimecents(shape.decay_db_per_ms);
-    values.sustain = SustainCentibels(shape.sustain_db);
+    values.sustain = sf2::SustainCentibels(shape.sustain_db);
     values.release = ShapeFallTimecents(shape.release_db_per_ms);
     values.root_key = sample.key;
     values.coarse_tune = cents / 100;
@@ -558,7 +550,11 @@ void SoundFontBuilder::Add(uint32_t index, const std::string& name, const std::v
 {
     sf2::Instrument inst;
     inst.name = name;
-    inst.zones.push_back(GlobalZone());
+
+    // The global zone. MusyX doesn't filter by velocity. Its pitch wheel has its full range. CC10 pans at the amount of
+    // 500 that most synthesizers play (kCc10ToPan). The mod wheel gives only the macros' vibrato. SoundFont's default
+    // CC1 modulator would add 50 cents.
+    inst.zones.push_back(NoModVibratoGlobalZone());
     for (const Zone& z : zones)
     {
         const MacroVoice& voice = instruments_.Macro(z.macro, z.part, z.from_ms, z.controls);
@@ -664,10 +660,10 @@ std::string SfzRegion(const Instruments& instruments, const Zone& z, int low, in
     }
     s += velocity_curve;
 
-    // SFZ's decays and releases fall kSfzFallDb in their time.
+    // SFZ's decays and releases fall seqlib's sfz::kEnvelopeFallDb in their time.
     const auto fall_seconds = [](double db_per_ms)
     {
-        return db_per_ms == kAtOnce ? 0.0 : kSfzFallDb / db_per_ms / 1000.0;
+        return db_per_ms == kAtOnce ? 0.0 : seqlib::sfz::kEnvelopeFallDb / db_per_ms / 1000.0;
     };
     s += seqlib::sfz::AmpEnvelopeOpcodes({.delay = slow.delay_ms / 1000.0,
                                           .attack = slow.attack_ms / 1000.0,
@@ -756,8 +752,8 @@ std::string SfzGroup(const std::vector<Zone>& zones, Instruments& instruments, S
     return s;
 }
 
-// The zones of each preset of `perf`, from the song group's pages. A preset whose page the song group lacks has none.
-// Add a warning for it to `warnings`, after its name in `names`.
+// The zones of each preset of `perf`, from the song group's pages. A preset whose page is missing from the song group
+// has none. Add a warning for it to `warnings`, after its name in `names`.
 std::vector<std::vector<Zone>> PresetZones(const Performance& perf, Instruments& instruments,
                                            const std::vector<std::string>& names, std::vector<std::string>& warnings)
 {
@@ -785,7 +781,7 @@ std::vector<std::vector<Zone>> PresetZones(const Performance& perf, Instruments&
     return zones;
 }
 
-// The loudest of the zones that play a sample, as amplitude (ZoneGain).
+// The loudest of the zones that play a sample, in amplitude (ZoneGain).
 double LoudestZone(const std::vector<std::vector<Zone>>& zones, Instruments& instruments)
 {
     double loudest = 0.0;
@@ -806,7 +802,7 @@ double LoudestZone(const std::vector<std::vector<Zone>>& zones, Instruments& ins
 
 // Write the SoundFont and the SFZ files of `c`, whose MIDI file `midi` describes, titled `title`. The presets play
 // `zones` and take `names`. The SoundFont's comment says that the files come from `source`, such as "song
-// title_song". `warnings` holds the warnings so far. The builder's go before them.
+// title_song". `warnings` contains the warnings so far. The builder's go before them.
 void WriteInstruments(Conversion& c, const MidiReport& midi, const std::vector<std::vector<Zone>>& zones,
                       const std::vector<std::string>& names, std::vector<std::string> warnings,
                       Instruments& instruments, const std::string& title, const std::string& source)
@@ -819,6 +815,7 @@ void WriteInstruments(Conversion& c, const MidiReport& midi, const std::vector<s
     {
         builder.Add(static_cast<uint32_t>(i), names[i], zones[i]);
     }
+
     for (uint32_t preset : midi.channel_10_presets)
     {
         builder.AddChannel10Copy(preset);
@@ -836,21 +833,11 @@ void WriteInstruments(Conversion& c, const MidiReport& midi, const std::vector<s
     ntdlib::sequence_export::CollectWarnings(c, midi, warnings, {});
 }
 
-// The data of the sample that `info` describes in `data`, a samples file: 8 bytes for each frame of 14 DSP-ADPCM
-// samples, 2 for each 16-bit sample and 1 for each 8-bit sample. Empty if the data runs past the file's end.
+// The data of the sample that `info` describes in `data`, a samples file (ntdlib's SampleDataSize). Empty if the data
+// runs past the file's end.
 std::span<const uint8_t> SampleBytes(const ntdlib::musyx::SampleInfo& info, std::span<const uint8_t> data)
 {
-    constexpr std::size_t kFrameSamples = 14, kFrameBytes = 8;
-    std::size_t size = info.length;
-    if (info.format == ntdlib::musyx::SampleFormat::kAdpcm || info.format == ntdlib::musyx::SampleFormat::kAdpcmPlus)
-    {
-        size = (size + kFrameSamples - 1) / kFrameSamples * kFrameBytes;
-    }
-    else if (info.format == ntdlib::musyx::SampleFormat::kPcm16)
-    {
-        size *= 2;
-    }
-
+    const std::size_t size = ntdlib::musyx::SampleDataSize(info);
     if (info.offset > data.size() || size > data.size() - info.offset)
     {
         return {};
@@ -911,6 +898,7 @@ Conversion ConvertEffect(const GameEffect& effect, Instruments& instruments)
     {
         zones.push_back(ZonesOf(instruments, note));
     }
+
     zones.resize(c.performance.presets.size());
     const std::vector<std::string> names = PresetNames(c.performance.presets);
     WriteInstruments(c, midi, zones, names, {}, instruments, effect.name, "effect " + effect.name);
@@ -930,7 +918,7 @@ std::vector<std::map<uint16_t, std::string>> SfzSampleNames(const std::vector<st
         }
     }
 
-    // A sample takes the index of the first group that holds it, unless that group is the first to hold its ID.
+    // A sample takes the index of the first group that contains it, unless that group is the first to contain its ID.
     std::vector<std::map<uint16_t, std::string>> names(groups.size());
     for (std::size_t g = 0; g < groups.size(); g++)
     {

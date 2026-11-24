@@ -119,6 +119,7 @@ double MedianNoteMs(const NoteLengths& lengths, uint32_t preset, int low, int hi
     {
         return kUsualNoteMs;
     }
+
     const auto middle = all.begin() + static_cast<std::ptrdiff_t>(all.size() / 2);
     std::nth_element(all.begin(), middle, all.end());
 
@@ -282,23 +283,14 @@ sf2::Zone SoundFontZone(const PresetVoice& voice, const Zone& z, const SoundFont
         sf2::AddGenerator(zone, sf2::kFreqVibLfo, sf2::LfoFrequency(VibratoHz(voice)));
         if (voice.vibrato_delay != 0)
         {
-            sf2::AddGenerator(zone, sf2::kDelayVibLfo,
-                              sf2::ToTimecents(VibratoDelayMs(voice), kShortestTimecents, kLongestHoldTimecents));
+            sf2::AddGenerator(
+                zone, sf2::kDelayVibLfo,
+                sf2::ToTimecents(VibratoDelayMs(voice), sf2::kShortestTimecents, sf2::kLongestHoldTimecents));
         }
         zone.modulators.push_back({sf2::kSrcModWheel, sf2::kVibLfoToPitch, sf2::ToAmount(-kVibratoRangeCents), 0});
     }
 
     return zone;
-}
-
-// The SoundFont's global zone: seqlib's kGlobalZoneModulators, and CC1 with no vibrato of its own.
-sf2::Zone GlobalZone()
-{
-    sf2::Zone global;
-    global.modulators.assign(sf2::kGlobalZoneModulators.begin(), sf2::kGlobalZoneModulators.end());
-    global.modulators.push_back({sf2::kSrcModWheel, sf2::kVibLfoToPitch, 0, 0});
-
-    return global;
 }
 
 // The SFZ region of `z` with `wave`, `gain_db` above its level.
@@ -350,6 +342,7 @@ VolumeShape ShapeOf(const std::vector<EnvelopePoint>& envelope, uint8_t release,
         {
             continue;
         }
+
         ends = p.delay == kEnvelopeEnd;
         break;
     }
@@ -357,6 +350,7 @@ VolumeShape ShapeOf(const std::vector<EnvelopePoint>& envelope, uint8_t release,
     {
         curve.push_back({time, 0.0});
     }
+
     VolumeShape shape = FitFades(curve);
 
     // The release falls linearly in amplitude, from the note's level to silence in its frames times that level. The
@@ -406,16 +400,22 @@ Conversion ConvertPiece(const Piece& piece, SoundData& data, const PerformOption
         for (const Zone& z : zones[i])
         {
             const Sample* sample = z.sample;
+            const auto soundfont = [&voice, &z, quieter](const SoundFontSamples::Sample& added)
+            {
+                return SoundFontZone(voice, z, added, quieter);
+            };
+            const auto sfz = [&voice, &z, level_cut_db](const SfzSamples::Wave& wave)
+            {
+                return SfzRegion(voice, z, wave, level_cut_db);
+            };
             files[i].push_back({.sample = SampleName(voice.bank, *sample),
                                 .root_key = static_cast<uint8_t>(z.root),
                                 .pcm = [sample] { return &sample->pcm; },
-                                .soundfont = [&voice, &z, quieter](const SoundFontSamples::Sample& added)
-                                { return SoundFontZone(voice, z, added, quieter); },
-                                .sfz = [&voice, &z, level_cut_db](const SfzSamples::Wave& wave)
-                                { return SfzRegion(voice, z, wave, level_cut_db); }});
+                                .soundfont = soundfont,
+                                .sfz = sfz});
         }
     }
-    WriteInstrumentFiles(c, midi, piece.name, piece.name, names, GlobalZone(), files);
+    WriteInstrumentFiles(c, midi, piece.name, piece.name, names, NoModVibratoGlobalZone(), files);
 
     return c;
 }

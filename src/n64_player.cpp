@@ -200,6 +200,7 @@ void Performer::OpenChannel(std::size_t c, uint32_t pc)
     {
         CloseLayer(c, l);
     }
+
     ch.enabled = true;
     ch.stop_script = false;
     ch.script = Script{};
@@ -213,6 +214,7 @@ void Performer::ReleaseChannel(std::size_t c)
     {
         CloseLayer(c, l);
     }
+
     group_.channels[c].enabled = false;
 }
 
@@ -265,6 +267,7 @@ void Performer::SetInstrument(std::size_t c, uint8_t program)
         ch.instrument = kNoInstrument;
         return;
     }
+
     const Instrument& inst = *bank->instruments[program];
     ch.adsr = {inst.envelope, inst.release};
     ch.instrument = program;
@@ -276,6 +279,7 @@ void Performer::EndGroup()
     {
         ReleaseChannel(c);
     }
+
     group_.enabled = false;
 }
 
@@ -449,6 +453,7 @@ void Performer::SetFadeVolume(float volume)
         group_.fade_volume = 0.0f;
         group_.state = 0;
     }
+
     if (group_.state == 0)
     {
         group_.fade_timer = group_.stored_fade_timer;
@@ -543,6 +548,7 @@ void Performer::GroupFlow(uint8_t command)
                 warnings_.push_back("sequence " + std::to_string(group_.sequence) + " starts sequence " +
                                     std::to_string(sequence) + ", which plays no further");
             }
+
             EndGroup();
             break;
         }
@@ -686,6 +692,7 @@ bool Performer::ChannelScript(std::size_t c)
             {
                 ChannelFlow(c, command);
             }
+
             if (ch.stop_script)
             {
                 return true;

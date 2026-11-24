@@ -33,7 +33,7 @@ namespace dolphinsf2::n64
 namespace
 {
 
-// What a game's code says about its music: where the library's tables lie, and how the game starts its pieces. The
+// What a game's code says about its music: where the tables of the library are, and how the game starts its pieces. The
 // addresses come from the disc's link map of main.dol.
 struct GameRules
 {
@@ -152,7 +152,7 @@ constexpr std::array<GameRules, 5> kGames{{
     },
     {
         // Doubutsu no Mori+ (Japan), disc version 0. The disc's link map of main.dol (static.map) gives each address.
-        // The tables hold disc version 1's values, except the offsets of what follows sequence 240 in audiorom.img.
+        // The tables contain disc version 1's values, except the offsets of what follows sequence 240 in audiorom.img.
         // That sequence is 32 bytes shorter here.
         .dol_sha1 = "afb54e84f33c77165b3b7672ab098b88bbdefd09",
         .tables =
@@ -178,7 +178,7 @@ constexpr std::array<GameRules, 5> kGames{{
     },
     {
         // Doubutsu no Mori e+ (Japan), disc version 0. The disc's link map of main.dol (static.map) gives each address.
-        // Every table holds disc version 1's values, and the disc holds disc version 1's audiorom.img.
+        // Every table contains disc version 1's values, and the disc contains disc version 1's audiorom.img.
         .dol_sha1 = "25d65de224306e90b12e89613c5658e4214c63b2",
         .tables =
             {
@@ -209,7 +209,7 @@ constexpr std::array<GameRules, 5> kGames{{
     },
 }};
 
-// The pieces that play the hour, and the weathers for which they hold arrangements, in the order of
+// The pieces that play the hour, and the weathers for which they have arrangements, in the order of
 // GameRules::weather_masks. The game plays another piece in the rain.
 constexpr uint32_t kFirstHour = 1;
 constexpr uint32_t kLastHour = 24;
@@ -270,7 +270,7 @@ std::vector<Piece> PiecesOf(const ntdlib::Dol& dol, const GameRules& rules, cons
     const std::span<const uint8_t> museum_masks =
         dol.Bytes(rules.museum_masks, 2 * (kMuseumRooms.size() + 1), "the table of the museum's masks");
 
-    // A port holds a byte. The empty piece's sequence has a number below 256.
+    // A port contains a byte. The empty piece's sequence has a number below 256.
     const uint32_t empty_sequence = sequence_of(rules.empty_piece);
 
     std::vector<Piece> pieces;
@@ -329,6 +329,7 @@ std::vector<Piece> PiecesOf(const ntdlib::Dol& dol, const GameRules& rules, cons
             piece.ports = {{0, kThisPlayer}, {1, static_cast<int8_t>(empty_sequence & 0xff)}};
             piece.end_sequence = static_cast<int>(empty_sequence);
         }
+
         pieces.push_back(std::move(piece));
     }
 

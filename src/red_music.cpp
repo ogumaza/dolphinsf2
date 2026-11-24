@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "ntdlib/disc/game.h"
+#include "ntdlib/red/files.h"
 #include "ntdlib/sequence_export/conversion.h"
 #include "seqlib/midi/recorder.h"
 #include "seqlib/sf2/presets.h"
@@ -94,11 +95,6 @@ double LevelOf(int value)
     return value == 0 ? 0.0 : (value + 1) / kLevelScale;
 }
 
-} // namespace
-
-namespace
-{
-
 // A piece's file: its bank, its volume and the data of each track.
 struct PieceFile
 {
@@ -109,13 +105,14 @@ struct PieceFile
 
 PieceFile ReadPiece(std::span<const uint8_t> data)
 {
-    if (data.size() < kPieceHeader || std::string_view(reinterpret_cast<const char*>(data.data()), 4) != "BGM ")
+    const std::optional<uint32_t> bank = ntdlib::red::PieceBank(data);
+    if (data.size() < kPieceHeader || !bank)
     {
         throw FormatError("a piece doesn't start with the magic BGM");
     }
 
     PieceFile piece;
-    piece.bank = xsflib::LoadBe16(data.data() + 6);
+    piece.bank = static_cast<int>(*bank);
     piece.volume = xsflib::LoadBe16(data.data() + 0xc) & 0x7f;
     std::size_t at = kPieceHeader;
     for (int t = 0; t < data[8]; t++)
@@ -131,6 +128,7 @@ PieceFile ReadPiece(std::span<const uint8_t> data)
         {
             throw FormatError("a track runs past the end of its piece");
         }
+
         piece.tracks.push_back(data.subspan(at, size));
         at += size;
     }
@@ -260,6 +258,7 @@ ChannelChoice ChannelsOf(const std::vector<TrackNotes>& tracks)
     {
         choice.noted.push_back(!t.empty());
     }
+
     for (std::size_t g = 0; g < groups.size(); g++)
     {
         for (const std::size_t t : groups[g])
@@ -465,7 +464,7 @@ void Performer::SendControllers(std::size_t index)
     const Track& t = tracks_[index];
     TrackOutput& out = outputs_[channels_[index]];
 
-    // CC11 holds the square root of the track's levels and the total of the pan's two sides.
+    // CC11 contains the square root of the track's levels and the total of the pan's two sides.
     const double total = std::hypot(PanLevel(t.pan), PanLevel(kHighestPan - t.pan));
     const double level = (piece_.volume + 1) / kLevelScale * LevelOf(t.volume) * total;
     recorder_.SendSetting(out_.performance, out, tick_, EventKind::kVolume, 127);
@@ -567,7 +566,7 @@ void Performer::Command(std::size_t index, uint8_t command)
         t.at += 2;
         break;
 
-    case 0x0d: // __MidiCtrl_KeySignature does nothing while the driver's transposition by key is off, as it stays here
+    case 0x0d: // __MidiCtrl_KeySignature does nothing while the driver's transposition by key is off. It stays off here
         t.at += 1;
         break;
 
@@ -612,7 +611,7 @@ void Performer::Command(std::size_t index, uint8_t command)
         t.pan = std::min<int>(Byte(t), kHighestPan);
         break;
 
-    case 0x4d: // __MidiCtrl_TremoloRateChange does nothing while the track's tremolo is off, as it stays here
+    case 0x4d: // __MidiCtrl_TremoloRateChange does nothing while the track's tremolo is off. It stays off here
         t.at += 2;
         break;
 
@@ -718,6 +717,7 @@ Played Performer::Run()
             recorder_.SetTempo(out_.performance, tick_, now);
             bpm = now;
         }
+
         for (std::size_t i = 0; i < tracks_.size(); i++)
         {
             StartNotes(i);
@@ -947,14 +947,18 @@ Conversion ConvertPiece(const std::string& name, const PieceFile& piece, Bank& b
         for (const Region& r : bank.Regions(static_cast<std::size_t>(instrument)))
         {
             const FadeShape& shape = shapes.at(&r);
+            const auto soundfont = [&r, &shape, quieter](const SoundFontSamples::Sample& added)
+            {
+                return SoundFontZone(r, shape, added, quieter);
+            };
             zones.push_back({.sample = SampleName(bank, r),
                              .root_key = kRootKey,
                              .pcm = [&bank, &r] { return bank.Wave(r); },
-                             .soundfont = [&r, &shape, quieter](const SoundFontSamples::Sample& added)
-                             { return SoundFontZone(r, shape, added, quieter); },
+                             .soundfont = soundfont,
                              .sfz = [&r, &shape](const SfzSamples::Wave& wave) { return SfzRegion(r, shape, wave); }});
         }
     }
+
     sf2::Zone global;
     global.modulators.assign(sf2::kGlobalZoneModulators.begin(), sf2::kGlobalZoneModulators.end());
     WriteInstrumentFiles(c, midi, name, name, names, global, files);
@@ -974,15 +978,7 @@ GameInput::~GameInput() = default;
 
 std::unique_ptr<GameInput> GameInput::Open(const std::shared_ptr<ntdlib::disc::GameFiles>& disc)
 {
-    std::map<std::string, std::string> found;
-    for (const ntdlib::disc::GameFile& file : disc->files)
-    {
-        const std::string lower = xsflib::AsciiLower(file.path);
-        if (lower.starts_with(kMusicFolder) && lower.ends_with(".bgm"))
-        {
-            found.emplace(lower.substr(kMusicFolder.size(), lower.size() - kMusicFolder.size() - 4), file.path);
-        }
-    }
+    std::map<uint32_t, std::string> found = ntdlib::red::Files(*disc, kMusicFolder, ntdlib::red::kPiece);
     if (found.empty())
     {
         return nullptr;
@@ -990,9 +986,9 @@ std::unique_ptr<GameInput> GameInput::Open(const std::shared_ptr<ntdlib::disc::G
 
     std::vector<std::string> names;
     std::vector<std::string> paths;
-    for (auto& [name, path] : found)
+    for (auto& [number, path] : found)
     {
-        names.push_back(name);
+        names.push_back(xsflib::AsciiLower(ntdlib::red::Label(path, ntdlib::red::kPiece)));
         paths.push_back(std::move(path));
     }
 
@@ -1020,20 +1016,16 @@ Bank& GameInput::BankOf(int number)
         return *bank_;
     }
 
-    // The bank is in the wave folder. The number in the file's name has four digits.
-    std::string digits = std::to_string(number);
-    digits.insert(0, 4 - std::min<std::size_t>(digits.size(), 4), '0');
-    const std::string wanted = std::string(kWaveFolder) + "wave" + digits + ".wd";
-    for (const ntdlib::disc::GameFile& f : disc_->files)
+    // The bank is in the wave folder.
+    const std::map<uint32_t, std::string> banks = ntdlib::red::Files(*disc_, kWaveFolder, ntdlib::red::kBank);
+    const auto found = banks.find(static_cast<uint32_t>(number));
+    if (found == banks.end())
     {
-        if (xsflib::AsciiLower(f.path) == wanted)
-        {
-            bank_ = std::make_unique<Bank>(number, ntdlib::disc::ReadGameFile(*disc_, f.path));
-            return *bank_;
-        }
+        throw FormatError("no file on the disc holds the piece's bank");
     }
 
-    throw FormatError("no file on the disc holds the piece's bank");
+    bank_ = std::make_unique<Bank>(number, ntdlib::disc::ReadGameFile(*disc_, found->second));
+    return *bank_;
 }
 
 } // namespace dolphinsf2::red

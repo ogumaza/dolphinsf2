@@ -7,7 +7,7 @@ and Wii U games that use JAudio. dolphinsf2 also converts the music and sound ef
 games that play them through Factor 5's MusyX. It converts the music of the games that play it
 through a port of Nintendo's sound library for the Nintendo 64, and of a game that plays it
 through Square's Red driver. Each sequence gets a MIDI file and a SoundFont containing its
-instruments. The SFZ files hold the same instruments at the game's level (see
+instruments. The SFZ files contain the same instruments at the game's level (see
 [SFZ files](#sfz-files)).
 
 Games known to work:
@@ -24,8 +24,8 @@ Games known to work:
 - Mario Kart: Double Dash!! (USA, JAudio2): the music in sequences and the sound effects, with
   the voices
 - Donkey Kong Jungle Beat (USA, JAudio2), on the GameCube and the Wii: the music and sound
-  effects. Most of the effects that the game plays in the chords of its music come out silent
-  (see [Game rules](#game-rules)).
+  effects, and the stage music with the enemies' chord effects beside it. The other effects that
+  the game plays in the chords of its music come out silent (see [Game rules](#game-rules)).
 - Super Mario Sunshine (USA, the first JAudio): the music and sound effects
 - Pikmin (USA, the first JAudio): the music and sound effects
 - Pikmin 2 (USA, the first JAudio), on the GameCube and the Wii: the music and sound effects. Many
@@ -70,12 +70,12 @@ game's sound test lists and gives them the sound test's names. The sound test's 
 recorded audio, not songs. dolphinsf2 leaves them out. WarioWare, Inc.: Mega Party Game$! lists
 its music in its sound room. dolphinsf2 converts those songs and gives them the sound room's
 names. Nintendo Puzzle Collection keeps its music in the modules of its code: one for the menu
-and one for each game. dolphinsf2 converts the songs that the modules hold. Each song's name
-starts with its module's name. Dr. Mario's and Panel de Pon's songs take the names that the
-games' debug modules give them. The menu's songs take their numbers. Yoshi's Cookie's songs take
-the names of their files. The NDDEMO disc's code lists the paths of its songs' files. dolphinsf2
-names each song after its file. It recognizes each of these games by its `main.dol`. It also
-converts the songs of ten catalogue games (see [MusyX](#musyx)). Other MusyX games don't
+and one for each game. dolphinsf2 converts the songs that the modules contain. Each song's name
+starts with its module's name. The songs of Dr. Mario and Panel de Pon take the names that the
+games' debug modules give them. The menu's songs take their numbers. The songs of Yoshi's Cookie
+take the names of their files. The NDDEMO disc's code lists the paths of its songs' files.
+dolphinsf2 names each song after its file. It recognizes each of these games by its `main.dol`.
+It also converts the songs of ten catalogue games (see [MusyX](#musyx)). Other MusyX games don't
 convert.
 
 Animal Crossing and its Japanese releases list their music in a table in their code. dolphinsf2
@@ -101,7 +101,7 @@ dolphinsf2 reads a game's disc image, an extracted disc or a JAudio game's start
   from the other one. An extracted disc has these files.
 
 Super Mario Sunshine keeps its start-up archive inside another archive. Pikmin has no start-up
-archive: its code holds the index of its sequences. dolphinsf2 reads these two games from a disc
+archive: its code contains the index of its sequences. dolphinsf2 reads these two games from a disc
 image or an extracted disc.
 
 dolphinsf2 doesn't read Wii discs or Wii U titles. Give it the game's start-up archive instead.
@@ -192,10 +192,10 @@ The sound of a JAudio2 game comes in three kinds of file:
   sequences. These are usually the sound effects.
 - **The sequence archive** (an RARC archive in `Seqs`) contains the music's sequences (BMS).
 - **The wave archives** (`.aw` files in `Waves`) contain the samples. Each wave system names the
-  archives that hold its waves.
+  archives that contain its waves.
 
 Mario Kart: Double Dash!! has the earliest known JAudio2. It keeps its music in sequence blocks
-of the start-up archive, not in a sequence archive. Another block of the start-up archive holds
+of the start-up archive, not in a sequence archive. Another block of the start-up archive contains
 three more start-up archives with the voices. The game loads one of them at a time. dolphinsf2
 reads all three.
 
@@ -213,7 +213,7 @@ sounds' names. Super Mario Sunshine has one too, in the folder of its `Seqs` and
 folders. That game keeps its start-up archive in an RARC archive that Yaz0 compresses (`.szs`).
 
 Pikmin has an earlier form of the first JAudio. A bank file (`.bx`) in `Banks` contains the
-instrument banks and the wave systems. One file in `Seqs` holds every sequence. The index that
+instrument banks and the wave systems. One file in `Seqs` contains every sequence. The index that
 divides that file is in the game's code (`main.dol`).
 
 Donkey Kong Jungle Beat compresses its start-up archive with Yaz0 (`.szs`). The game decodes it
@@ -232,7 +232,7 @@ interrupts and tracks that open other tracks. dolphinsf2 executes it and records
 notes and controllers. dolphinsf2 follows these parts of JAudio2's sequence player:
 
 - All 96 commands. That includes their register forms and their jump and call tables.
-- Timing in sub-frames of 80 samples at the DSP's output rate. A second holds about 400
+- Timing in sub-frames of 80 samples at the DSP's output rate. A second has about 400
   sub-frames. In each sub-frame, the voices move on first. Then the sequence runs the ticks that
   its tempo has reached. Like the game, dolphinsf2 computes tempo in single precision. Ticks
   therefore fall in the same sub-frames as in the game.
@@ -249,8 +249,8 @@ notes and controllers. dolphinsf2 follows these parts of JAudio2's sequence play
   counts at its release priority.
 - The game's random generator. It starts from the game's initial state. The first JAudio has
   another generator than JAudio2. Its state at the start is fixed, and `--seed` doesn't change
-  it. Luigi's Mansion's generator reads the console's clock at each draw. No state gives its
-  numbers. That game's sounds draw from JAudio2's generator, which `--seed` sets.
+  it. The generator of Luigi's Mansion reads the console's clock at each draw. No state gives its
+  numbers. That game's sounds draw from JAudio2's generator. `--seed` sets that generator.
 - Ports, interrupts and the timer that raises them.
 - Main-loop detection and MIDI loop markers. Tracks are taken in the order they opened. The main
   loop belongs to the first that can still advance. A pass counts only if earlier tracks
@@ -262,7 +262,7 @@ notes and controllers. dolphinsf2 follows these parts of JAudio2's sequence play
   on. Backward jumps to commands the track hasn't run aren't loops. Neither are passes without
   waits. The markers go on the first pass that a player looping on them repeats as the game
   plays the next pass: the same notes at the same times with the same settings and tempo. The
-  first pass often differs. Setup before the loop can land in its first tick. The game can carry
+  first pass often differs. Setup before the loop can land in its first tick. The game can keep
   a value from pass to pass. If no pass so far repeats that way but the next pass does, the
   performance plays that pass too. Otherwise the markers stay on the first pass. They also stay
   there in a loop that draws random numbers. At the loop's start, the MIDI file sends each
@@ -282,7 +282,7 @@ mix.
 Pikmin's sequences use an earlier form of that command set. Some of its commands take other
 arguments, and a few do nothing. Each track has 32 registers. A child track can set a tempo. It
 then runs at that tempo, but no faster than its parent. A track plays its volume as it is, where
-the later form squares it. CC7 then holds the volume's square root. dolphinsf2 follows these
+the later form squares it. CC7 is then the square root of the volume. dolphinsf2 follows these
 rules in Pikmin's sequences.
 
 Pikmin's code sets the level of its whole mix at start-up. The level comes to 0.549 of Super
@@ -297,9 +297,9 @@ sequence of the sound table. The sound library starts it when the game starts. P
 names another sequence of the table. dolphinsf2 recognizes these games by their start-up
 archives: those of The Wind Waker's USA, European and Japanese releases, of The Wind Waker HD's
 USA, European and Japanese releases, of Pac-Man Vs.'s USA, European and Japanese releases, and
-of Luigi's Mansion's USA release. For Pikmin 2, it recognizes the USA release's archives on the
-GameCube and on the Wii. For Super Mario Sunshine, it recognizes the USA release's archive. A
-release whose archive differs from all of these converts without its effects. Pikmin plays its
+of the USA release of Luigi's Mansion. For Pikmin 2, it recognizes the USA release's archives on
+the GameCube and on the Wii. For Super Mario Sunshine, it recognizes the USA release's archive.
+A release whose archive differs from all of these converts without its effects. Pikmin plays its
 effects in another way (see below). dolphinsf2 converts the effects of no other game that uses
 the first JAudio. Many of Pikmin 2's effects play quieter than in the game.
 
@@ -312,18 +312,18 @@ category. The library's writes come after the first tick of the effects sequence
 first note therefore comes a tick after the start of its file. Only the slot's track and the
 tracks below it count for the loops and the end. The effect ends when its slot is free again. An
 effect's volume is its volume in the sound table times the volume of its category. An effect
-also plays at the pitch that the table gives it. The MIDI file holds that pitch as a pitch bend.
-Luigi's Mansion's code gives its effects neither. They play at full volume and at their notes'
+also plays at the pitch that the table gives it. The MIDI file sets that pitch with a pitch bend.
+The code of Luigi's Mansion gives its effects neither. They play at full volume and at their notes'
 pitch.
 
 `--port` writes ports of the effect's slot. The game's code does the same when it passes values
 with an effect. A value for port 6 stands for the map's information. Some effects, such as
 footsteps, play another sound for each value there. Without a value, some of them play
 nothing. Ports 0, 3 and 4 take the library's values. `--port` doesn't change them. Some effects
-play nothing in any case. Most of those end at once. Their files hold no notes.
+play nothing in any case. Most of those end at once. Their files contain no notes.
 
-Pikmin plays its effects in two sequences. The sound library starts both at start-up. The game's
-code holds a catalogue of the effects. To start an effect of the system or of the player, the
+Pikmin plays its effects in two sequences. The sound library starts both at start-up. The game
+code contains a catalogue of the effects. To start an effect of the system or of the player, the
 library writes the effect's number to a port of a track of the first sequence. That track then
 opens a track below it to play the effect. The effects of the game's events go to tracks of the
 second sequence in the same way. dolphinsf2 plays each effect that way and names it after the
@@ -368,16 +368,16 @@ Sounds held without end stop 10 seconds after their last change. A wait of 9,600
 counts as waiting for ever. So does a wait for a looping note that nothing releases. Games use
 such waits for sounds that they stop themselves. A sequence that finishes ends when its last
 sound does. So does one whose tracks all wait for ever with nothing sounding. In Four Swords
-Adventures, Twilight Princess and Link's Crossbow Training, a sequence that sends to the game's
-echo ends when the echo falls silent instead (see [Game rules](#game-rules)). The last release
-can add up to 10 seconds. Performances stop after 15 minutes. One that has been silent for more
-than 10 seconds by then ends with its last sound too. A tempo or timebase of 0 stops the
-sequence. The performance ends there. dolphinsf2 reports the stop. A track that never waits
-would hang the game. dolphinsf2 stops the track and reports it.
+Adventures, Twilight Princess, Link's Crossbow Training and Pikmin 2, a sequence that sends to
+the game's echo ends when the echo falls silent instead (see [Game rules](#game-rules)). The
+last release can add up to 10 seconds. Performances stop after 15 minutes. One that has been
+silent for more than 10 seconds by then ends with its last sound too. A tempo or timebase of 0
+stops the sequence. The performance ends there. dolphinsf2 reports the stop. A track that never
+waits would hang the game. dolphinsf2 stops the track and reports it.
 
 ### Game rules
 
-Some rules for a game's sounds lie in the game's code, not in its files. dolphinsf2 recognizes
+Some rules for a game's sounds are in its code, not in its files. dolphinsf2 recognizes
 Four Swords Adventures by its start-up archive, in the USA, European and Japanese releases.
 dolphinsf2 then follows these rules of the game:
 
@@ -395,7 +395,7 @@ dolphinsf2 then follows these rules of the game:
   the players join and on the map where they pick a stage, every track but one of those two
   plays. The game's code mutes the other tracks. When the screen changes, the piece plays on
   with the other set. dolphinsf2 converts the piece twice and leaves out the muted tracks'
-  notes. `JA_BGM_SELECT` holds the first set and `JA_BGM_SELECT_map` the second. Each file
+  notes. `JA_BGM_SELECT` contains the first set and `JA_BGM_SELECT_map` the second. Each file
   starts from the piece's start.
 
 dolphinsf2 recognizes Donkey Kong Jungle Beat's start-up archive, from the USA release on the
@@ -430,17 +430,26 @@ some tracks of its music:
 - **The beat.** In 62 pieces, one track gives the game the music's beat. The game mutes that
   track. dolphinsf2 leaves its notes out.
 - **The chord effects.** The game plays 74 effects of its instruments in the chords of the
-  music. The game's code works out their notes' keys from the music as it plays. dolphinsf2
-  doesn't follow that code. 66 of those effects come out with no notes. The other 8 keep only
-  the notes whose keys don't come from the chords.
+  music. The game's code works out their notes' keys from the music as it plays. On their own,
+  66 of those effects come out with no notes, and the other 8 keep only the notes whose keys
+  don't come from the chords. Enemies and other objects of the stages loop 16 of them beside the
+  stage music, and dolphinsf2 follows the game's code for those. It converts each stage's music
+  once more with each such effect, and the music of two boss fights, JA_BGM_BOSS_FINAL and
+  JA_BGM_BOSS_GOROPY_B, too: 135 files on the GameCube and 135 on the Wii. A file takes
+  the name of the piece and the effect, such as `JA_BGM_MAIN_01_enemy_sleeping`. The effect
+  starts with the piece, plays its steps on the music's beats and takes its keys from the
+  music's chords. These files require the game's whole `AudioRes/Info` folder beside the
+  start-up archive's folders. Without it, dolphinsf2 leaves the files out and says so.
 
 dolphinsf2 recognizes Super Mario Sunshine's start-up archive, from the USA release. It follows
 these rules of the game:
 
 - **The music's volume.** The game plays its music at 0.75 of the volume that the sound table
   gives it. dolphinsf2 does the same.
-- **Yoshi's track.** In 14 pieces of music, the game mutes one track as the piece starts. The
-  game turns the track on while Mario rides Yoshi. dolphinsf2 leaves out the track's notes.
+- **Yoshi's track.** In 14 pieces of music, the game mutes one track as the piece starts. In
+  some of them, the game turns the track on while Mario rides Yoshi. Each piece's file leaves out
+  the track's notes. dolphinsf2 converts nine of those pieces once more with the track on. The
+  file's name adds `_YOSHI` to the piece's name, such as `MSD_BGM_RICCO_YOSHI`.
 - **The effects' volumes.** At start-up, the game turns down six of its nine categories of
   sound effects. The effects of the pump and of the other characters play at 0.76 of the sound
   table's volume, objects at 0.80, system sounds at 0.83, the surroundings at 0.58 and water at
@@ -452,15 +461,18 @@ game:
 
 - **Banks.** The game plays each piece of music with the bank whose number is the piece's number
   in the index. dolphinsf2 does the same.
-- **The cutscenes' music.** One sequence holds the music of the cutscenes, in parts. A cutscene
+- **The cutscenes' music.** One sequence contains the music of the cutscenes, in parts. A cutscene
   picks its part with a port of the sequence's first track. The game plays eight of the parts.
   dolphinsf2 converts each of them to a separate file. The file's name is the sequence's name
   with a hyphen and the part's number.
 - **The tracks' volumes.** The game sets a volume for each track of a piece of music, other than
   the cutscenes' music. Most pieces play at half their volume, one at 0.55 and one at 0.35.
-  dolphinsf2 does the same. Five pieces start with some of their tracks off. The game turns some
-  of them on as play goes on. dolphinsf2 leaves out the notes of the tracks that are off when
-  the piece starts.
+  dolphinsf2 does the same. Five pieces start with some of their tracks off: tutorial, play3,
+  yaku, cave and flow. The game plays other sets of their tracks when an enemy comes near and in
+  the evening. Each piece's file leaves out the notes of the tracks that are off when the piece
+  starts. dolphinsf2 converts each of the five once more in each of the three other states, 15
+  files in all. A file's name adds `_enemy_near`, `_evening` or `_evening_enemy_near` to the
+  piece's name, such as `cave_evening`.
 
 dolphinsf2 also recognizes The Wind Waker's start-up archives: those of the USA, European and
 Japanese releases on the GameCube, and of the USA, European and Japanese releases of The Wind
@@ -476,7 +488,7 @@ The Wind Waker's code also changes what some of its music plays:
 - **States.** The game plays some pieces in other states, with other tracks. Each state
   converts as another file, named after the piece with `_` and the state added. A state that
   the game starts by an ID of its own is named after the ID, such as
-  `JA_BGM_KAMI_TOWER_80000125`, which also plays 1.3143 times as fast. Others follow the game:
+  `JA_BGM_KAMI_TOWER_80000125`. That state also plays 1.3143 times as fast. Others follow the game:
   `SAILING` while the boat sails, `ON_BOARD` while Link is on the boat, `NEAR` while an enemy
   is near and `SWORD` while Link's sword is out.
 - **Ports.** The game writes port 9 of some pieces while they play, as a fight moves on. Each
@@ -489,7 +501,7 @@ A spin attack brings in a track of the battle music for a moment. The files leav
 
 dolphinsf2 also recognizes the start-up archive of Luigi's Mansion's USA release. The game plays
 one piece, LuigiSings, with some of its tracks. It picks them by where Luigi is and how much
-health he has. Four of the root track's children hold the tune. One plays above 70 of Luigi's 100
+health he has. Four children of the root track play the tune. One plays above 70 of Luigi's 100
 points of health, one above 40, one below that, and one in a lit room. The game mutes the other
 three. The hallways, the outdoors and the other rooms each play other children as the
 accompaniment. Some rooms play none. The piece also plays slower as Luigi's health falls, at
@@ -500,27 +512,27 @@ piece in 13 states: the hallway, a room, outdoors and a room without accompanime
 health. The files are named after the state, such as
 `LuigiSings_hallway_70_HP` and `LuigiSings_lit_room`. There's no file with every track.
 
-dolphinsf2 also recognizes the start-up archive of Mario Kart: Double Dash!!'s USA release. Its
-sound table gives each sound's volume in 255ths. The game plays its five categories of sound
+dolphinsf2 also recognizes the start-up archive of the USA release of Mario Kart: Double Dash!!.
+Its sound table gives each sound's volume in 255ths. The game plays its five categories of sound
 effects at 1.2 to 1.8 times that volume, and its music at 1.95 times. With some race settings,
 it plays four of the categories at 0.8, 0.7 or 0.65 of those volumes. dolphinsf2 follows the
-default setting. The disc also holds a sequence archive, `AudioRes/Seqs/JaiSeqs.arc`. The game
-never reads it. It holds the music's sequences again. dolphinsf2 leaves it out. The award
-ceremony's 20 effects of the characters wait until the game has loaded the ceremony's voices.
-dolphinsf2 plays them as the game does once the voices are loaded. The courses stream their
-music. dolphinsf2 leaves the streams out.
+default setting. The disc also contains a sequence archive, `AudioRes/Seqs/JaiSeqs.arc`. The
+game never reads it. It contains a second copy of the music's sequences. dolphinsf2 leaves it
+out. The award ceremony's 20 effects of the characters wait until the game has loaded the
+ceremony's voices. dolphinsf2 plays them as the game does once the voices are loaded. The
+courses stream their music. dolphinsf2 leaves the streams out.
 
-dolphinsf2 recognizes Twilight Princess's two start-up archives too. The USA, European and
-Japanese releases on the GameCube share one. The Wii's release and Twilight Princess HD share
-the other. The game gives its categories of sound effects their volumes at start-up. Category
-1, Link's voice, keeps the volume of the sound table. The others play at 120/127 of it.
-dolphinsf2 does the same. During a conversation and in the pause menu, the game plays most
-categories quieter for a while. dolphinsf2 leaves that out.
+dolphinsf2 recognizes the start-up archives of Twilight Princess too. The USA, European and
+Japanese releases on the GameCube share one. The releases on the Wii have three others, and
+Twilight Princess HD shares one of those three. The game gives its categories of sound effects
+their volumes at start-up. Category 1, Link's voice, keeps the volume of the sound table. The
+others play at 120/127 of it. dolphinsf2 does the same. During a conversation and in the pause
+menu, the game plays most categories quieter for a while. dolphinsf2 leaves that out.
 
 As Twilight Princess starts five pieces of music, it mutes some of their tracks. Hyrule Field's
-day music holds two arrangements. One plays while Link walks, and the other while he rides.
+day music contains two arrangements. One plays while Link walks, and the other while he rides.
 dolphinsf2 converts the piece twice and leaves out the muted tracks' notes.
-`Z2BGM_FIELD_LINK_DAY` holds the walking arrangement and `Z2BGM_FIELD_LINK_DAY_riding` the
+`Z2BGM_FIELD_LINK_DAY` contains the walking arrangement and `Z2BGM_FIELD_LINK_DAY_riding` the
 riding one. `Z2BGM_TOAL_VILLEGE`, `Z2BGM_HORSE_BATTLE`, `Z2BGM_BOSS_SNOWWOMAN_1` and
 `Z2BGM_VS_GANON_02` leave out the tracks that the game mutes as they start. Later, the game's
 scenes, fights and other code change the tracks of 17 pieces. Some states play a track at part
@@ -551,14 +563,23 @@ answers the piece's calls to the game. dolphinsf2 follows these rules of the gam
   same answers.
 - **The directors' tracks.** Some tracks of a piece follow the game's action, such as an enemy
   nearby or a treasure carried. The game mutes them as they start. dolphinsf2 leaves out their
-  notes, so each piece plays as it does with nothing going on.
+  notes. Each piece then plays as it does with nothing going on.
+- **The bosses' music.** A boss's actions move its music to other parts. dolphinsf2 converts
+  each other part of m_boss and l_boss once more, from the start of that part. The file's name
+  adds a hyphen and the part's number, such as `m_boss-3`. The game plays l_boss only with the
+  final boss in place. Its directors then take tracks 14 and 15. While a captain stands near the
+  boss, the game turns track 15 on. Only parts 4 and 11 play notes on that track. They convert
+  once more with it on, as `l_boss-4-near` and `l_boss-11-near`.
 - **The cave music.** A cave's piece has a conductor. The conductor picks the phrases and rests
   that each track plays, at random, and sets the track's instrument, volume and pan. dolphinsf2
   plays each piece with the first conductor of its family, such as caveconc_00_0. It draws the
   random numbers as the game does from the start. Such a piece plays until each track reaches
   its last part. The file has no loop: the game picks the phrases at random from then on. The
-  game's echo leaves quiet tails between the notes. MIDI and SoundFont can't describe an echo,
-  so the files don't hold them.
+  conductor also sets each track's send to the game's echo. dolphinsf2 writes the send in CC91.
+- **The echo.** The game sets up an echo at start-up. A sound that sends to it repeats about
+  every 120 ms, quieter each time. MIDI and SoundFont can't describe an echo. The files leave out
+  its tails. The MIDI file of a sequence that sends to it ends when the echo falls silent.
+  Looping and held sounds keep their ends.
 - **The volumes.** The game plays each piece at a volume from a list in its files. dolphinsf2
   does the same.
 
@@ -573,7 +594,7 @@ channel. dolphinsf2 copies that channel's presets to bank 128.
 MIDI output keeps tempo changes. It uses at least 7680 ticks per quarter note and a whole number
 of MIDI ticks per sequence tick. The game runs each tick at the start of a sub-frame. The DSP
 plays the tick's changes from the next sub-frame. dolphinsf2 places events at the start of the
-sub-frame that holds each tick's time. It rounds them to the nearest MIDI tick. This moves the
+sub-frame that contains each tick's time. It rounds them to the nearest MIDI tick. This moves the
 whole sequence a few milliseconds earlier but keeps the spacing of events. At 120 BPM, the
 rounding error is at most 1/30 ms. Events never cross a loop marker when moved. The loop keeps
 its contents.
@@ -592,9 +613,9 @@ its tick's final settings. MIDI controller changes come before notes at the same
 | Effect send | CC91 (reverb) |
 | Bank and program, the track's oscillators and direct release, and the vibrato's speed and delay | Bank select (CC0) and program change |
 
-A MIDI channel can hold only one note per key. Repeated strikes that overlap are common in
-drums. They get extra channels with matching controllers. These are called layers. Layers stop
-at the 16-channel limit.
+A MIDI channel can play only one note per key at a time. Repeated strikes that overlap are
+common in drums. They get extra channels with matching controllers. These are called layers.
+Layers stop at the 16-channel limit.
 
 A MIDI channel has one set of controllers for all its notes. In the game, a note follows its
 track's settings until the track detaches it. A detached note, such as a release tail, keeps its
@@ -641,9 +662,9 @@ regions become zones with:
 
 Programs 0xf0 and up play the DSP's built-in oscillators. The square wave, the sawtooth, the
 pulse of 25% duty, the triangle and the sine become looping samples of one cycle, one for each
-program. Each preset of such a program has one zone, for every key and velocity. The zone holds
+program. Each preset of such a program has one zone, for every key and velocity. The zone has
 the oscillators' envelope: full volume until the release, then a fall to silence over about
-17 ms. The DSP changes its noise and its ramp as it plays. No sample can hold them.
+17 ms. The DSP changes its noise and its ramp as it plays. No sample can contain them.
 
 An ADPCM wave's loop repeats from the decoder history that the wave system stores. Where that
 history differs from the decoder's state at the loop start, dolphinsf2 unrolls the loop once.
@@ -658,9 +679,9 @@ Mario Golf: Toadstool Tour, Mario Power Tennis and Pokémon Colosseum play their
 MusyX 2, Factor 5's sound system. Mario Party 4 plays its music through MusyX under Hudson's
 sound manager. WarioWare, Inc.: Mega Party Game$!, Nintendo Puzzle Collection and the NDDEMO
 disc play their music through MusyX too. The NDDEMO disc links an early build. A song group
-holds the instruments. The group's pool holds the SoundMacros, keymaps, layers and tables.
+contains the instruments. The group's pool contains the SoundMacros, keymaps, layers and tables.
 The group's project gives the programs and each song's MIDI setup. A sample directory and a
-sample file hold the samples. A song holds tracks of patterns: notes, controllers, program
+sample file contain the samples. A song contains tracks of patterns: notes, controllers, program
 changes and the pitch and mod wheels on 16 MIDI channels. dolphinsf2 follows these parts of
 MusyX:
 
@@ -669,38 +690,37 @@ MusyX:
   group instead of a volume. It also gives each song one of the game's reverb presets. The game
   sets the reverb on aux A to that preset before the song starts. dolphinsf2 leaves the presets
   out. Synths play the songs' CC91 through their reverb, whatever the song. The game keeps its
-  songs and song groups in FSYS archives. LZSS
-  compresses some of the archives' files. dolphinsf2 names each song after its file in the
-  archive.
-- Mario Party 4's sound manager. One file holds every group and song. The sound manager's
+  songs and song groups in FSYS archives. LZSS compresses some of the archives' files.
+  dolphinsf2 names each song after its file in the archive.
+- Mario Party 4's sound manager. One file contains every group and song. The sound manager's
   table gives each song's group, MIDI setup and volume. The sound test gives the songs' order
   and names. The Japanese release gives the names in Japanese. The sound manager keeps its
   base groups loaded. A song's macros can start their samples. dolphinsf2 adds those samples to
   the song's group.
-- WarioWare's sound room. One file holds all of the game's songs. The game loads every song
+- WarioWare's sound room. One file contains all of the game's songs. The game loads every song
   group of its MusyX project at once. The sound room's list gives each song's group, volume
   and name. The songs keep the list's order.
 - Nintendo Puzzle Collection's modules. Yay0 packs each module of the game's code. A module
-  holds its songs and the files of its song groups, or a table of where another file holds
-  them. dolphinsf2 follows the module's relocations to the songs and the files. The menu gives
+  contains its songs and the files of its song groups, or a table of where they are in another
+  file. dolphinsf2 follows the module's relocations to the songs and the files. The menu gives
   each song a volume from a table. So does Panel de Pon's table of songs. Yoshi's Cookie plays
   its songs at the music volume that its options start at.
 - The NDDEMO disc's table of paths. The disc's code lists the paths of its nine songs' files.
   One song group plays them all.
 - The catalogue games: Star Fox Adventures, Paper Mario: The Thousand-Year Door, Pokémon
-  Channel, the two Rogue Squadron games, Resident Evil, Resident Evil Zero, Tales of Symphonia and the two
-  Metroid Prime games. Each one keeps its songs and groups in a layout of its own. dolphinsf2
-  reads each game's list of songs: a table in the code, or a file of the game's. The list gives
-  each song's file, group and volume. Star Fox Adventures takes each song's volume from the
-  triggers that start it. Rogue Leader's music hall gives its songs' names and volumes. A song
-  plays with the groups that the game has pushed when it starts the song. MusyX plays a song
-  through the first pushed group with the song's group ID. It plays nothing if that group has
-  no MIDI setup for the song. Resident Evil Zero's cutscenes also play some of their sound
-  effects as songs. A table in the code gives each cutscene's group of effects and the ID of
-  its first song. dolphinsf2 converts each of those songs and names it after the cutscene and
-  the song's ID.
+  Channel, the two Rogue Squadron games, Resident Evil, Resident Evil Zero, Tales of Symphonia
+  and the two Metroid Prime games. Each one keeps its songs and groups in a layout of its own.
+  dolphinsf2 reads each game's list of songs: a table in the code, or a file of the game's. The
+  list gives each song's file, group and volume. Star Fox Adventures takes each song's volume
+  from the triggers that start it. Rogue Leader's music hall gives its songs' names and volumes.
+  A song plays with the groups that the game has pushed when it starts the song. MusyX plays a
+  song through the first pushed group with the song's group ID. It plays nothing if that group
+  has no MIDI setup for the song. Resident Evil Zero's cutscenes also play some of their sound
+  effects as songs. A table in the code gives each cutscene's group of effects and the ID of its
+  first song. dolphinsf2 converts each of those songs and names it after the cutscene and the
+  song's ID.
 - Streams. Rogue Leader plays 68 of its songs from streamed audio through a MusyX voice. The
-  stream's buffer is a sample of the bank. A MIDI file can't hold the stream. dolphinsf2
+  stream's buffer is a sample of the bank. A MIDI file can't contain the stream. dolphinsf2
   leaves out the 60 songs that play only a stream and the 8 that play one along with their
   notes. Pokémon Channel's music is recorded audio that MusyX effects play. It converts as
   effects do. Paper Mario, Rebel Strike, Metroid Prime and Metroid Prime 2 stream most of
@@ -722,7 +742,7 @@ MusyX:
   Rogue Leader's music hall starts a song with a fade from the level that the song before
   left. dolphinsf2 starts each song of the hall at its volume.
 - The volume table. MusyX plays a voice's volume through a table of levels in the game's code.
-  A macro can pick the DLS curve instead: the volume squared. The table lies a little below
+  A macro can pick the DLS curve instead: the volume squared. The table is a little below
   that curve. dolphinsf2 reads the table from the game's code. For the voices on the table, it
   writes values of CC7, CC11 and the velocity whose squares follow the table.
 - The pitch wheel's range. A macro can set the range over which the pitch wheel bends its
@@ -833,20 +853,20 @@ last end of a note that falls silent by itself.
 Animal Crossing and its two Japanese releases keep all their sound in one file, `audiorom.img`.
 Tables in `main.dol` place the sequences, the banks and the samples in it. A sequence player runs
 a script once a tick. The script starts up to 16 channels, and each channel starts up to four
-layers. The layers' scripts play the notes. Each channel gets a MIDI track. A bank holds
+layers. The layers' scripts play the notes. Each channel gets a MIDI track. A bank contains
 instruments, drums and effects, and each plays a VADPCM sample with an envelope. dolphinsf2 follows
 these parts of the game:
 
 - The pieces. The game numbers its pieces, and a table in its code gives each number's sequence.
   Each piece's name is `bgm` and its number in three digits. A number that plays the same
   sequence as a lower one isn't listed again.
-- The hours. A piece of the hour holds an arrangement for each kind of weather, and the game mutes
-  the channels of the others. Each one gets a file: `bgm013-fine`, `bgm013-snow` and
+- The hours. A piece of the hour contains an arrangement for each kind of weather, and the game
+  mutes the channels of the others. Each one gets a file: `bgm013-fine`, `bgm013-snow` and
   `bgm013-sakura`.
-- The museum. Its piece holds an arrangement for each room: `bgm088-lobby`, `bgm088-paintings`,
+- The museum. Its piece contains an arrangement for each room: `bgm088-lobby`, `bgm088-paintings`,
   `bgm088-fish`, `bgm088-insects` and `bgm088-fossils`.
-- The island. Doubutsu no Mori e+'s piece of the island holds an arrangement for when the islander
-  is there and one for when he isn't: `bgm376-islander` and `bgm376-no-islander`.
+- The island. The island piece of Doubutsu no Mori e+ contains an arrangement for when the
+  islander is there and one for when he isn't: `bgm376-islander` and `bgm376-no-islander`.
 - The music discs. The game plays them from a stereo, at a volume of 0.8 with every pan in the
   centre.
 - Kapp'n's songs. Each one plays in two parts. The game tells the sequence which part follows.
@@ -870,8 +890,9 @@ for each piece, such as a layer's bend.
 ### Square's Red driver
 
 Final Fantasy Crystal Chronicles keeps each piece in a `.bgm` file in `dvd/sound/Music` and each
-bank of waves in a `.wd` file in `dvd/sound/Wave`. A piece holds tracks of commands at 48 ticks a
-beat. A delta time comes before each command. dolphinsf2 follows these parts of the driver:
+bank of waves in a `.wd` file in `dvd/sound/Wave`. A piece contains tracks of commands at 48
+ticks a beat. A delta time comes before each command. dolphinsf2 follows these parts of the
+driver:
 
 - The tempo. The driver adds the tempo up once for each of the DSP's frames, 200.18 a second. It
   runs a tick each time that the sum passes 250.
@@ -879,7 +900,7 @@ beat. A delta time comes before each command. dolphinsf2 follows these parts of 
   cancels it. A key-off releases each of the track's notes of its key.
 - The loop. The driver saves every track at the end of the tick of the loop's start. It restores
   them at the end of the tick of the loop's end. Volumes, pans and instruments stay as they are.
-  The loop's markers therefore lie one tick after those two.
+  The loop markers are therefore one tick after those two.
 - The levels. The piece's volume, the track's volume, the velocity and the region's volume are each
   lines in amplitude: a value of x gives (x + 1) / 128. A MIDI value gives the square of its
   fraction. Each value that dolphinsf2 sends is therefore a square root.
@@ -959,7 +980,7 @@ The opcodes follow their documentation at sfzformat.com, with these exceptions:
 
 - **Long decays.** A decay can last longer than the documented limit of 100 s. The game's
   envelope falls that slowly. sfizz 1.2 plays the time as written.
-- **Loud regions.** A region's `volume` can lie above the documented limit of 6 dB. sfizz 1.2
+- **Loud regions.** A region's `volume` can be above the documented limit of 6 dB. sfizz 1.2
   takes volumes up to 48 dB.
 
 ## Differences from the game
@@ -982,7 +1003,7 @@ in MIDI, SoundFont or SFZ:
   square-root and other curves. SoundFont and SFZ envelopes have one attack, hold, decay,
   sustain and release. The fitted envelope can't follow a table that rises again or loops. A
   straight fall to silence becomes a fall in decibels. It reaches the game's level 20 dB down at
-  the same time as the game's line. Before then it lies under the game's level, by up to 5.4 dB
+  the same time as the game's line. Before then it is under the game's level, by up to 5.4 dB
   at about 60% of the fall. A short note that ends during such a fall plays quieter than in the
   game. Many of The Wind Waker's effects fall that way.
 - **Random instruments.** An instrument's random effects vary the volume or pitch of each note.
@@ -996,15 +1017,15 @@ in MIDI, SoundFont or SFZ:
   reported. SoundFont's LFO is a triangle wave. The game uses a sine.
 - **Omitted features.** dolphinsf2 leaves these out and reports them: tremolo, the track
   filters of sound effects and the filters that change from note to note, notes on the DSP's
-  noise, ramp and other oscillators that no sample can hold, sample skips and notes on a
+  noise, ramp and other oscillators that no sample can contain, sample skips and notes on a
   missing bank.
-- **Track filters.** The zones follow the game's filter within about 1 dB rms in a model of
-  FluidSynth 2.6.1's low-pass. A filter that a track changes during a note keeps its value from
-  the note's start.
+- **Track filters.** The zones only approximate the game's filter. Their levels are fitted to a
+  model of FluidSynth 2.6.1's low-pass. A filter that a track changes during a note keeps its
+  value from the note's start.
 - **Effect send.** Synths play CC91 as reverb. In the game, the send reaches whatever effect the
   game has set up. There may be none.
 - **Volume limits.** JAudio2 multiplies the volumes of a track, the tracks above it and the
-  sound. MIDI CC7 holds the track's volume. CC11 holds the rest. CC11 stops at 127. If
+  sound. MIDI CC7 sets the track's volume. CC11 sets the rest. CC11 stops at 127. If
   necessary, all CC11 values are scaled equally. This keeps the balance of the tracks but lowers
   the level of the sequence. dolphinsf2 reports the reduction. SFZ restores the MIDI gain.
 - **Resampling.** Synths resample waves differently from the GameCube's DSP. High frequencies
@@ -1012,8 +1033,8 @@ in MIDI, SoundFont or SFZ:
 - **The Wii's and the Wii U's rate.** JAudio times its music for the GameCube's rate of about
   32,028 Hz. The Wii and the Wii U play it at 32,000 Hz. There the music plays 0.089% slower and
   1.5 cents lower than in the files.
-- **Luigi's Mansion.** After TelesaBattle's first 30 seconds, its balance lies to the right of
-  the game's. Nobody has traced that yet. The game's code sets LuigiSings's tempo in the game's
+- **Luigi's Mansion.** After the first 30 seconds of TelesaBattle, its balance is to the right
+  of the game's. Nobody has traced that yet. The game's code sets LuigiSings's tempo in the game's
   frames. In a lit room, the tempo rises from 0.5 over about ten frames. The files play the
   state's tempo from the start. Their notes come a little later than the game's at 70 and 40 HP,
   and earlier in a lit room.
@@ -1023,16 +1044,16 @@ nine where a song has them:
 
 - **Linear envelopes.** A linear envelope's decay and release fall in a straight line in
   amplitude. SoundFont and SFZ envelopes fall in decibels. A fall to silence, or to a sustain
-  more than 40 dB down, is fitted to hold the same energy as the game's line. It falls about
-  13 dB in the game's time. It lies up to 0.8 dB under the game's level until about 60% of the
+  more than 40 dB down, is fitted to have the same energy as the game's line. It falls about
+  13 dB in the game's time. It is up to 0.8 dB under the game's level until about 60% of the
   fall, and above it after that. A note whose decay falls that far ends where the game's decay
   does. A note whose release takes longer than its decay ends where the fitted decay has fallen
   silent. A release goes on falling after the game's has ended. Once the game's voices of a
   MIDI channel have all fallen silent, CC11 takes such a release down along the game's line,
   and CC120 (All Sound Off) stops it. CC11 then goes back to its value. A release that ends
   under a later note of its channel goes on falling. A decay to a higher sustain reaches the
-  level halfway down in decibels when the game's line does. A macro's fade, while
-  its note is held or after the note's release, is fitted to reach the game's level 20 dB down.
+  level halfway down in decibels when the game's line does. A macro's fade, while its note is
+  held or after the note's release, is fitted to reach the game's level 20 dB down.
   A voice that plays on after its note's release goes on with its attack. A SoundFont note that
   ends during its attack releases from the level reached. Such a note lasts until the file's
   attack reaches the game's highest level.
@@ -1049,14 +1070,14 @@ nine where a song has them:
 - **Fade-ins.** MusyX fades a voice in through its volume table. A SoundFont or SFZ attack
   rises in a straight line. The files start such an attack after a delay. It then reaches the
   level 20 dB below the fade's end when the game's fade does. With an envelope, the longer of
-  the two attacks plays. A fade-in
-  after the voice's start ramps from the voice's volume, not from silence. dolphinsf2 reports
+  the two attacks plays. A fade-in after the voice's start ramps from the voice's volume, not
+  from silence. dolphinsf2 reports
   both.
 - **Key groups.** In MusyX, a note of a key group releases the group's sounding voices.
   SoundFont and SFZ stop them at once.
 - **Early releases.** A macro's steps can do something different for a note released before
   the macro's waits are over. dolphinsf2 plays every release as a late one.
-- **Layers.** A MIDI channel holds one note per key. Overlapping notes of the same key take
+- **Layers.** A MIDI channel plays one note per key. Overlapping notes of the same key take
   extra channels. When all 16 channels are in use, such notes end early.
 - **Pitch wheel ranges.** In MusyX, each voice bends over its range. A MIDI channel bends all
   its notes over one range. dolphinsf2 gives a channel the range of its latest note. A note
@@ -1093,7 +1114,7 @@ nine where a song has them:
 - **Random choices in the Metroid Prime games.** Many of the effects of the two Metroid Prime
   games pick a random key or a random branch of their macro. dolphinsf2 plays the note's key and
   the first branch.
-- **Effect sends.** CC91 and CC93 hold each channel's reverb and chorus sends. Synths play them
+- **Effect sends.** CC91 and CC93 set each channel's reverb and chorus sends. Synths play them
   as reverb and chorus. In the game, the sends reach the effects that the game sets up.
 - **Sound effects.** An effect's files play it as MusyX does when the game starts it and leaves
   it alone. The game's code can change an effect's controllers while it plays, or stop it. A
@@ -1123,7 +1144,7 @@ remain:
 - **Attenuation.** FluidSynth, BASSMIDI and the E-mu chips apply 0.4 of a zone's initial
   attenuation. The specification calls for all of it. dolphinsf2 therefore writes 2.5 times a
   zone's attenuation in the generator, up to the generator's limit of 1440 cB. Those players
-  play that limit as 57.6 dB. A modulator without a source holds any attenuation beyond 57.6 dB.
+  play that limit as 57.6 dB. A modulator without a source contains any attenuation beyond 57.6 dB.
   FluidSynth 2.4.5 and later apply that modulator. BASSMIDI and earlier versions of FluidSynth
   ignore it. A player that follows the specification plays every attenuated zone too quietly.
   TinySoundFont plays a quarter of the attenuation. Before 27 January 2025, TinySoundFont played
@@ -1140,7 +1161,7 @@ remain:
   milliseconds. Its playback runs ahead by about half a millisecond per change on average.
 - **Note timing.** FluidSynth applies MIDI events at the start of each 64-sample render block.
   Notes can start up to 64 samples late. That's about 1.5 ms at 44.1 kHz.
-- **Short notes.** FluidSynth holds every note for at least 10 ms (`synth.min-note-length`).
+- **Short notes.** FluidSynth plays every note for at least 10 ms (`synth.min-note-length`).
   Shorter notes therefore sound longer than in the game.
 
 ## Building
@@ -1183,12 +1204,13 @@ C++ formatting uses clang-format with the repository's `.clang-format`.
 
 ## Tests and tools
 
-`ctest` runs unit tests without game data. The tests build MusyX songs in memory. They cover
-song lists and file paths, DLS envelope times, the song's volume and a game's master volume,
-MusyX's volume table, tempo tables, the early build's clock, and a song that loops. They build a
-piece of the Nintendo 64's sound library and pieces of Square's Red driver too, with their banks,
-and cover the fit of a fade. The JAudio conversion is part of ntdlib, and ntdlib's tests cover
-it. Those tests build archives, banks, wave systems and sequences in memory. Coverage includes:
+`ctest` runs unit tests without game data. The tests build MusyX songs and pools in memory. They
+cover song lists and file paths, the steps of SoundMacros, DLS envelope times, the zones, the
+song's volume and a game's master volume, MusyX's volume table, tempo tables, the early build's
+clock, songs that loop and sound effects. They build a piece of the Nintendo 64's sound library
+and pieces of Square's Red driver too, with their banks, and cover the fit of a fade. The JAudio
+conversion is part of ntdlib, and ntdlib's tests cover it. Those tests build archives, banks,
+wave systems and sequences in memory. Coverage includes:
 
 - Wave decoding, and what banks of both versions play for a note: instruments, drum sets,
   velocity regions and effects.

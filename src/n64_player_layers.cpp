@@ -12,7 +12,6 @@
 
 namespace dolphinsf2::n64::player
 {
-
 namespace
 {
 
@@ -128,6 +127,7 @@ void Performer::LayerTick(std::size_t c, std::size_t l)
         {
             return;
         }
+
         semitone = SetNote(c, l, command);
         if (semitone != kScriptEnd || layer.delay != 0)
         {
@@ -139,6 +139,7 @@ void Performer::LayerTick(std::size_t c, std::size_t l)
     {
         SetVoice(c, l, semitone);
     }
+
     if (layer.muted)
     {
         Release(c, l);
@@ -339,6 +340,7 @@ int Performer::SetNote(std::size_t c, std::size_t l, int command)
             layer.gate_time = ReadByte(s);
             break;
         }
+
         if (velocity > 127)
         {
             velocity = 127;
@@ -419,6 +421,7 @@ std::optional<NoteSound> Performer::InstrumentSound(const Channel& ch, Layer& la
         {
             sweep.extent = 1.0 / to_note - 1.0;
         }
+
         sweep.steps = 0.0;
         if (mode == 5)
         {
@@ -500,6 +503,7 @@ void Performer::SetSweepRate(Layer& layer)
         const int denominator = sweep.time * kUpdatesPerFrame / 3;
         speed = denominator != 0 ? 0x20000 / denominator : 0x7fff;
     }
+
     sweep.rate = std::clamp(speed, 1, 0x7fff) / 256.0;
 }
 
@@ -569,7 +573,7 @@ void Performer::SetVoice(std::size_t c, std::size_t l, int note)
         voice.note_pan = layer.pan;
     }
 
-    // The note: its preset, then its velocity, which squared gives its level.
+    // The note: its preset, then its velocity. The square of the velocity gives the level.
     const uint32_t preset = PresetOf(voice);
     recorder_.SendPreset(out_.performance, outputs_[c], tick_, preset);
     const int velocity = std::max(SquaredValue(layer.velocity), 1);
@@ -662,6 +666,7 @@ void Performer::SendControllers()
         {
             peak_level_ = std::max(peak_level_, level);
         }
+
         recorder_.SendSetting(out_.performance, out, tick_, EventKind::kVolume, 127);
         recorder_.SendSetting(out_.performance, out, tick_, EventKind::kExpression,
                               static_cast<uint8_t>(std::clamp(std::lround(127.0 * level * level_scale_), 0L, 127L)));
@@ -696,6 +701,7 @@ float Performer::LayerPitch(std::size_t c)
         {
             continue;
         }
+
         float pitch = layer->offset;
         const Portamento& sweep = layer->portamento;
         if (sweep.mode != 0 && sweep.extent != 0.0)
@@ -704,6 +710,7 @@ float Performer::LayerPitch(std::size_t c)
             const double scale = 1.0 + sweep.extent * (std::pow(2.0, steps / kSweepSteps) - 1.0);
             pitch += static_cast<float>(12.0 * std::log2(std::max(scale, 1.0 / 65536.0)));
         }
+
         if (pitch != 0.0f && !found)
         {
             ch.layer_pitch = pitch;
@@ -864,12 +871,14 @@ Played Performer::Run()
     {
         group_.bank = data_.ResolveBank(banks.back()).value_or(0xff);
     }
+
     group_.enabled = true;
     group_.fade_volume_scale = piece_.volume;
     for (const auto& [port, value] : piece_.ports)
     {
         group_.ports[port & 7] = value;
     }
+
     for (std::size_t c = 0; c < kChannels; c++)
     {
         group_.channels[c].adsr = {data_.DefaultEnvelope(), kDefaultRelease};
@@ -891,6 +900,7 @@ Played Performer::Run()
             Update();
             continue;
         }
+
         tempo_accumulator_ -= kMaxTempo;
 
         if (!loop)
@@ -944,11 +954,13 @@ Played Performer::Run()
     {
         perf.truncated = true;
     }
+
     perf.seconds = static_cast<double>(update_) / kUpdatesPerSecond + TailSeconds();
     for (const auto& [what, count] : approximations_)
     {
         perf.approximations[what] += count;
     }
+
     perf.warnings = warnings_;
     out_.performance.approximations.insert(recorder_.Approximations().begin(), recorder_.Approximations().end());
 

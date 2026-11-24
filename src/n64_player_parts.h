@@ -93,7 +93,7 @@ struct Vibrato
     uint16_t delay = 0;
 };
 
-// A layer's sweep from one note to another (the library's portamento). `mode` holds the sweep's kind in its low bits
+// A layer's sweep from one note to another (the library's portamento). `mode` contains the sweep's kind in its low bits
 // and the bit of the special sweep, whose time scales with the note's length. `target` is the other note, in the
 // library's semitones with the transpositions. While a note sweeps, `steps` counts up to kSweepSteps by `rate` an
 // update, and `extent` is the share of the starting frequency that the whole sweep adds.
@@ -363,7 +363,7 @@ private:
     // Writes `value` at `at` in the sequence's data.
     void WriteData(std::size_t at, uint8_t value);
 
-    // A hash of the whole state, which repeats when the music does.
+    // A hash of the whole state. It repeats when the music does.
     uint64_t Signature() const;
 
     const Piece& piece_;

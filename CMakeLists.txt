@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.20)
 # the macOS app. A release changes it here and adds its notes in docs/release-notes/.
 # C is for the compression libraries below. A build that doesn't find them installed compiles them from their C
 # sources.
-project(dolphinsf2 VERSION 1.8.0 LANGUAGES C CXX)
+project(dolphinsf2 VERSION 1.9.0 LANGUAGES C CXX)
 
 # The libraries that dolphinsf2 shares with the other converters and the PSF players: seqlib for MIDI, SoundFont 2
 # and SFZ, xsflib for the common code and the build's templates, and ntdlib for Nintendo's formats. All three are
@@ -25,13 +25,6 @@ set(NTDLIB_SEQUENCE_EXPORT ON) # the converters' layer, with their command line
 set(XSFLIB_DISC_LIBRARIES ON)
 set(NTDLIB_DISC ON)
 xsflib_add_libraries(seqlib xsflib ntdlib)
-
-# dolphinsf2's designated initializers name only the fields that differ from their defaults. Naming the others would
-# copy their default member initializers into each initializer, where the copies could drift. clang-cl's /W4 warns about
-# the fields left out. The libraries above keep the warning.
-if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-  add_compile_options(-Wno-missing-designated-field-initializers)
-endif()
 
 add_library(dolphinsf2_core STATIC
   src/disc.cpp
@@ -56,8 +49,8 @@ add_library(dolphinsf2_core STATIC
   src/red_bank.cpp)
 target_include_directories(dolphinsf2_core PUBLIC src)
 target_link_libraries(dolphinsf2_core PUBLIC seqlib::seqlib xsflib::common ntdlib::common ntdlib::disc
-                      ntdlib::disc_containers ntdlib::jaudio ntdlib::musyx ntdlib::musyx_catalogue ntdlib::wave
-                      ntdlib::sequence_export ntdlib::sequence_export_jaudio)
+                      ntdlib::disc_containers ntdlib::jaudio ntdlib::musyx ntdlib::musyx_catalogue ntdlib::red
+                      ntdlib::wave ntdlib::sequence_export ntdlib::sequence_export_jaudio)
 
 add_executable(dolphinsf2 src/main.cpp)
 target_link_libraries(dolphinsf2 PRIVATE dolphinsf2_core)
@@ -80,23 +73,19 @@ xsflib_add_droplet_tool(dolphinsf2 APP_NAME Dolphinsf2 VERSION ${PROJECT_VERSION
 
 include(CTest)
 if(BUILD_TESTING)
-  add_executable(dolphinsf2_test tests/dolphinsf2_test.cpp)
-  target_link_libraries(dolphinsf2_test PRIVATE dolphinsf2_core ntdlib::testing)
+  # The test program and the converters' common tests: the version that the program reports, the rejection of a port
+  # that the game doesn't have, and the conversion of every sequence of the game that -DDOLPHINSF2_TEST_ARCHIVE names.
+  xsflib_add_converter_tests(dolphinsf2 EXTENSION .baa VERSION ${PROJECT_VERSION}
+                             LIBRARIES dolphinsf2_core ntdlib::testing
+                             SOURCES tests/dolphinsf2_test.cpp tests/fade_fit_test.cpp tests/musyx_game_test.cpp
+                                     tests/musyx_macro_test.cpp tests/musyx_song_test.cpp tests/musyx_step_test.cpp
+                                     tests/musyx_test_helpers.cpp tests/musyx_zone_test.cpp tests/n64_test.cpp
+                                     tests/red_test.cpp tests/test_helpers.cpp
+                             RANGE_ARGUMENT "--port 16=1"
+                             ARCHIVE_DESCRIPTION "Start-up archive (.baa, .aaf), disc image or main.dol of an extracted \
+disc for the conversion test")
+  # The function registers no run of the unit tests.
   add_test(NAME dolphinsf2_units COMMAND dolphinsf2_test)
-
-  # The program reports the version it was built as.
-  xsflib_add_version_test(dolphinsf2 VERSION ${PROJECT_VERSION})
-
-  # It rejects a port that the game doesn't have.
-  add_test(NAME dolphinsf2_port_range COMMAND dolphinsf2 --port 16=1 missing.baa)
-  set_tests_properties(dolphinsf2_port_range PROPERTIES PASS_REGULAR_EXPRESSION "--port 16=1 is out of range")
-  # Optionally convert and validate a game's sequences:
-  # -DDOLPHINSF2_TEST_ARCHIVE=path/to/archive.baa
-  set(DOLPHINSF2_TEST_ARCHIVE "" CACHE FILEPATH
-    "Start-up archive (.baa, .aaf), disc image or main.dol of an extracted disc for the conversion test")
-  if(DOLPHINSF2_TEST_ARCHIVE AND EXISTS "${DOLPHINSF2_TEST_ARCHIVE}")
-    add_test(NAME dolphinsf2_archive COMMAND dolphinsf2_test "${DOLPHINSF2_TEST_ARCHIVE}")
-  endif()
 
   # Load local_tests.cmake from each immediate subdirectory to register tests that use locally supplied files.
   xsflib_include_local_tests()

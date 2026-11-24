@@ -29,8 +29,8 @@ Conversion ConvertSong(const ntdlib::musyx::Song& song, const GameSong& listed, 
 Conversion ConvertEffect(const GameEffect& effect, Instruments& instruments);
 
 // The names that the SFZ files' shared folder gives the samples of `groups`, a game's groups: for each group, its
-// samples' names by their IDs. The first group that holds an ID names its sample "s" and the ID, such as "s27". A
-// later group can give the ID another sample. That sample's name also gives the index of the first group that holds
+// samples' names by their IDs. The first group that contains an ID names its sample "s" and the ID, such as "s27". A
+// later group can give the ID another sample. That sample's name also gives the index of the first group that contains
 // it, such as "s7_27". Two samples are the same when their entries agree apart from the offset and their data is the
 // same.
 std::vector<std::map<uint16_t, std::string>> SfzSampleNames(
@@ -59,7 +59,7 @@ public:
 
 private:
     // The names that the SFZ files give the samples that group `group` plays: its samples' names, then those of the
-    // groups pushed with it for the IDs that it lacks (SongGroup::pushed).
+    // groups pushed with it for the IDs missing from it (SongGroup::pushed).
     std::map<uint16_t, std::string> SfzNames(std::size_t group) const;
 
     Game game_;

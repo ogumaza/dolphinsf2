@@ -37,7 +37,7 @@ std::optional<uint16_t> PresetObject(const SongGroup& group, const PresetKey& pr
 
 // Play `song` as MusyX's sequencer does, with the voices of `instruments`. The game's code lists the song as `listed`.
 // Each preset's bank and program name a page of the instruments' song group. Throw FormatError if the song plays a
-// pattern that it lacks, or loops without time passing.
+// pattern that it doesn't have, or loops without time passing.
 Performance PlaySong(const ntdlib::musyx::Song& song, const GameSong& listed, Instruments& instruments,
                      const PerformOptions& options);
 

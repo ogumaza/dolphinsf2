@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 jobs:
-  # Read the project version, check the tag if present, and require release notes.
+  # Read the project version, check the tag if there is one, and require release notes.
   version:
     runs-on: ubuntu-24.04
     outputs:

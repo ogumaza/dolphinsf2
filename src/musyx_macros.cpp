@@ -9,11 +9,10 @@
 
 namespace dolphinsf2::musyx::macros::run
 {
-
 namespace
 {
 
-// The timecents of a DLS envelope's time in its table. The table holds 65536ths of a timecent. The table's lowest
+// The timecents of a DLS envelope's time in its table. The table contains 65536ths of a timecent. The table's lowest
 // value stands for no time.
 double TableTimecents(int32_t value)
 {
@@ -107,6 +106,7 @@ Run MacroRun::Follow(uint16_t macro)
     {
         return std::move(run_);
     }
+
     run_.voice.updates.push_back(0.0);
 
     for (int count = 0; count < kMostSteps && place_.at < place_.steps->size(); count++)
@@ -186,7 +186,7 @@ std::optional<MacroRun::Next> MacroRun::FlowStep(const MacroStep& s)
         {
             // The voice goes the same way once the whole part of its volume reaches byte 1 (macHandleActive). The
             // volume starts at the voice's start volume (StartVolume), and the steps so far have scaled it. A song's
-            // voice holds its start volume in its controls. An effect's voice goes on.
+            // voice keeps its start volume in its controls. An effect's voice goes on.
             int from = 0;
             while (from < 128 && std::min(from * v.volume + v.volume_add * 127.0, 127.0) < s.Byte(1))
             {
@@ -203,7 +203,7 @@ std::optional<MacroRun::Next> MacroRun::FlowStep(const MacroStep& s)
     case MacroOp::kGosub:
         {
             // MusyX keeps the voice's latest four returns. A fifth call takes the place of the oldest (0x801528D4 in
-            // Pokémon Colosseum). A call of a macro that the pool lacks ends the voice's macro.
+            // Pokémon Colosseum). A call of a macro missing from the pool ends the voice's macro.
             const Place back = place_;
             if (!Jump(s.Half(2), s.Half(4)))
             {
@@ -295,7 +295,7 @@ std::optional<MacroRun::Next> MacroRun::PitchStep(const MacroStep& s)
     case MacroOp::kPitchSweep1:
     case MacroOp::kPitchSweep2:
         {
-            // Byte 1 holds the number of steps, and bytes 2 and 3 the step in Hz, a signed number. MusyX turns the
+            // Byte 1 contains the number of steps, and bytes 2 and 3 the step in Hz, a signed number. MusyX turns the
             // step into the DSP's units as it does a rate, rounded toward 0 (0x80162fb0 in Pokémon Colosseum). The
             // sweep waits as AddKey does.
             const auto hz = static_cast<int16_t>(s.Half(2));
@@ -308,7 +308,7 @@ std::optional<MacroRun::Next> MacroRun::PitchStep(const MacroStep& s)
         }
 
     case MacroOp::kSetPitch:
-        // Bytes 1 to 3 hold the rate in Hz. The games' steps leave bytes 4 to 7 at 0. A step that sets them is
+        // Bytes 1 to 3 contain the rate in Hz. The games' steps leave bytes 4 to 7 at 0. A step that sets them is
         // reported.
         v.rate_hz = (s.Byte(1) << 16) | (s.Byte(2) << 8) | s.Byte(3);
         if (s.Byte(4) != 0 || s.Byte(5) != 0 || s.Byte(6) != 0 || s.Byte(7) != 0)
@@ -461,7 +461,8 @@ std::optional<MacroRun::Next> MacroRun::VolumeStep(const MacroStep& s)
     case MacroOp::kScaleVolume:
         {
             // Byte 5 picks the note's volume in place of the voice's. Byte 2 adds to the scaled volume in 127ths of
-            // full volume. Bytes 3 and 4 name a table of the pool as a curve. MusyX skips a curve that the pool lacks.
+            // full volume. Bytes 3 and 4 name a table of the pool as a curve. MusyX skips a curve missing from the
+            // pool.
             const double scale = s.Byte(1) / static_cast<double>(volume_scale_divisor_);
             v.volume = (s.Byte(5) != 0 ? 1.0 : v.volume) * scale;
             v.volume_add = (s.Byte(5) != 0 ? 0.0 : v.volume_add) * scale + s.Byte(2) / 127.0;
@@ -511,7 +512,7 @@ std::optional<MacroRun::Next> MacroRun::VoiceStep(const MacroStep& s)
     switch (s.Op())
     {
     case MacroOp::kPianoPan:
-        // Byte 1 holds the scale, byte 2 the centre key and byte 3 the centre pan.
+        // Byte 1 contains the scale, byte 2 the centre key and byte 3 the centre pan.
         v.piano_pan = PianoPan{.scale = static_cast<int8_t>(s.Byte(1)),
                                .centre_key = s.Byte(2),
                                .centre_pan = s.Byte(3),
@@ -521,7 +522,7 @@ std::optional<MacroRun::Next> MacroRun::VoiceStep(const MacroStep& s)
         break;
 
     case MacroOp::kPanning:
-        // Byte 1 holds the pan. MusyX then moves the pan by byte 4, a signed number, over the time in bytes 2 and 3.
+        // Byte 1 contains the pan. MusyX then moves the pan by byte 4, a signed number, over the time in bytes 2 and 3.
         v.pan = s.Byte(1) & 0x7f;
         v.pan_last = true;
         if (s.Byte(4) != 0 && s.Half(2) != 0)
@@ -595,8 +596,8 @@ std::optional<MacroRun::Next> MacroRun::VariableStep(const MacroStep& s)
 {
     switch (s.Op())
     {
-    // SetVariable sets a variable, or with byte 1 a MIDI controller that byte 2 names. Bytes 4 and 5 hold the value. A
-    // variable changes the sound only through a step that reads it.
+    // SetVariable sets a variable, or with byte 1 a MIDI controller that byte 2 names. Bytes 4 and 5 contain the value.
+    // A variable changes the sound only through a step that reads it.
     case MacroOp::kSetVariable:
         SetVariable(s);
         break;

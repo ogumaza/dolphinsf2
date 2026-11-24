@@ -38,6 +38,10 @@ SfzInstruments BuildSfzFiles(const Performance& perf, const MidiReport& midi, co
                              const std::vector<std::string>& names,
                              const std::function<std::string(uint32_t, SfzSamples&)>& group);
 
+// A global zone with seqlib's kGlobalZoneModulatorsNoModVibrato: the mod wheel adds none of SoundFont's default
+// vibrato.
+seqlib::sf2::Zone NoModVibratoGlobalZone();
+
 // Build the SoundFont and the SFZ files of conversion `c`, titled `title`. `midi` describes the MIDI file of `c`. The
 // comment of the SoundFont says that the files come from `source`. Preset i takes the name `names[i]`, the global zone
 // `global` and the zones `zones[i]`. Collect the warnings of the files too.

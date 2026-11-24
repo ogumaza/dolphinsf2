@@ -168,10 +168,10 @@ struct BentNote
     std::vector<PitchPoint> curve;
 };
 
-// A note of a song, as CutTails sees it, in seconds: its start, the file's note-off and where the game's voices of the
-// note have all fallen silent. `linear_ms` holds the longest linear release that a voice plays from the note-off, in
-// MusyX's milliseconds, or 0. `fades_to_release` is true where a voice fades after the note's release and then plays
-// a linear release at a KeyOff (KeyOff::kFade with ReleaseFade::releases).
+// A note of a song for CutTails, in seconds: its start, the file's note-off and where the game's voices of the note
+// have all fallen silent. `linear_ms` contains the longest linear release that a voice plays from the note-off, in
+// MusyX's milliseconds, or 0. `fades_to_release` is true where a voice fades after the note's release and then plays a
+// linear release at a KeyOff (KeyOff::kFade with ReleaseFade::releases).
 struct NoteTail
 {
     uint8_t channel = 0;
@@ -319,7 +319,7 @@ private:
 
     void ApplyTempos(SectionState& s, bool record);
 
-    // Set the ticks that a run adds to the clock of `s` at its tempo, as the game's build of MusyX works them out.
+    // Set the ticks that a run adds to the clock of `s` at its tempo. The game's build of MusyX gives the arithmetic.
     void SetTickDelta(SectionState& s) const;
 
     // Handle the section's events that are due. Return false if the section has none left.
@@ -363,9 +363,9 @@ private:
     // Whether the voices of the page of `channel` read `controller` (Instruments::ObjectControllers).
     bool ReadByVoices(uint8_t channel, uint8_t controller);
 
-    // The value from 0 to 127 that `channel` holds for `controller`, a controller as a macro reads it
-    // (KeptController). The pitch wheel (0x80) gives its high 7 bits. The other controllers from 0x80 up keep their
-    // values after a cold reset: 64 for controller 0x84, and 0 for the rest.
+    // The value from 0 to 127 that `channel` has for `controller`, a controller as a macro reads it (KeptController).
+    // The pitch wheel (0x80) gives its high 7 bits. The other controllers from 0x80 up keep their values after a cold
+    // reset: 64 for controller 0x84, and 0 for the rest.
     uint8_t HeldController(uint8_t channel, uint8_t controller) const;
 
     // Start a note of `voices`. NoteOn takes the voices that the channel's object starts for the key.
@@ -403,7 +403,7 @@ private:
     double WrittenVolume(std::size_t channel, int value) const;
 
     // Map `e`, an event of channel `channel`, to the voices' curves: its CC7 and CC11, and the velocity of a note on
-    // MusyX's volume table. `levels` holds the channel's CC7 and CC11 before `e`. Keep them up to date.
+    // MusyX's volume table. `levels` contains the channel's CC7 and CC11 before `e`. Keep them up to date.
     void MapLevel(std::size_t channel, TrackEvent& e, ChannelLevels& levels) const;
 
     void SetTempo(int64_t tick, const SectionState& s);

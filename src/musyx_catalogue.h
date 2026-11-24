@@ -3,8 +3,8 @@
 // The MusyX games whose code keeps its sounds in layouts of its own: Star Fox Adventures, Paper Mario: The
 // Thousand-Year Door, Pokémon Channel, Pokémon Colosseum, Star Wars Rogue Squadron II: Rogue Leader, Star Wars Rogue
 // Squadron III: Rebel Strike, Resident Evil, Resident Evil Zero, Tales of Symphonia, Metroid Prime, Metroid Prime 2:
-// Echoes, Nintendo Puzzle Collection and the NDDEMO disc. ntdlib::musyx::ReadCatalogue reads a catalogue of each
-// game's sounds: the sets of MusyX's four files that hold the groups, the songs, and for each sound the groups that the
+// Echoes, Nintendo Puzzle Collection and the NDDEMO disc. ntdlib::musyx::ReadCatalogue reads a catalogue of each game's
+// sounds: the sets of MusyX's four files that contain the groups, the songs, and for each sound the groups that the
 // game pushes before it plays the sound. BuildMusic turns the catalogue into the groups that play the songs and the
 // effects.
 
@@ -73,12 +73,12 @@ struct CatalogueMusic
     std::vector<GameEffect> effects;
 };
 
-// The music of `catalogue`, played as `rules` says. A song plays from the first of its pushed groups that holds its
-// song group. An effect plays from the first of its pushed groups that holds the effect, or with PushedSets::kLoaded
+// The music of `catalogue`, played as `rules` says. A song plays from the first of its pushed groups that contains its
+// song group. An effect plays from the first of its pushed groups that contains the effect, or with PushedSets::kLoaded
 // from the first set that it pushes. That group finds an object or a sample in the groups that the sound pushes, in
-// their order. A song that plays only a stream is left out. So is an effect that the game starts at a volume of 0.
-// With PushedSets::kHolders, so is a song that MusyX wouldn't start. The songs come first. Throws FormatError if a
-// file set is damaged, or if no pushed group plays a sound.
+// their order. A song that plays only a stream is left out. So is an effect that the game starts at a volume of 0. With
+// PushedSets::kHolders, so is a song that MusyX wouldn't start. The songs come first. Throws FormatError if a file set
+// is damaged, or if no pushed group plays a sound.
 CatalogueMusic BuildMusic(ntdlib::musyx::Catalogue catalogue, const CatalogueRules& rules);
 
 } // namespace dolphinsf2::musyx

@@ -2,8 +2,8 @@
 
 // The sound data of Nintendo's sound library for the Nintendo 64, as Animal Crossing's port keeps it on the GameCube.
 // Tables in main.dol place the sequences, the banks and the sample banks in the file of sound data (audiorom.img). A
-// bank holds instruments, drums and effects. Each plays a sample of one of the bank's sample banks, with an envelope.
-// The samples are VADPCM: frames of nine bytes that hold sixteen 4-bit samples.
+// bank contains instruments, drums and effects. Each plays a sample of one of the bank's sample banks, with an
+// envelope. The samples are VADPCM: frames of nine bytes that contain sixteen 4-bit samples.
 
 #pragma once
 
@@ -29,7 +29,7 @@ struct LibraryTables
 {
     // The tables of sequences, banks and sample banks: a 16-bit count, then from 16 bytes in an entry of 16 bytes for
     // each: the offset and the size in its part of the sound data, two bytes on how the library loads it, and three
-    // 16-bit values. The segment table follows them: three entries, which give the parts of the sound data that hold
+    // 16-bit values. The segment table follows them. Its three entries give the parts of the sound data that contain
     // the sequences, the banks and the samples. The map of each sequence's banks follows the segment table.
     uint32_t sequences = 0;
     uint32_t banks = 0;
@@ -69,7 +69,7 @@ constexpr int16_t kEnvelopeGoTo = -2;
 constexpr int16_t kEnvelopeRestart = -3;
 constexpr int16_t kEnvelopeSetValue = -4;
 
-// The most points that an envelope reads. Each envelope that the games' banks and sequences hold ends earlier.
+// The most points that an envelope reads. Each envelope that the games' banks and sequences contain ends earlier.
 constexpr std::size_t kMaxEnvelopePoints = 32;
 
 // A decoded sample of a bank. A looping sample's loop ends at the end of its PCM. A sample that doesn't loop plays to
@@ -107,7 +107,7 @@ struct Drum
     TunedSample sample;
 };
 
-// A bank. An instrument or a drum that the bank lacks is empty. An effect without a sample has none.
+// A bank. An instrument or a drum that the bank doesn't have is empty. An effect without a sample has none.
 struct Bank
 {
     std::vector<std::optional<Instrument>> instruments;
@@ -152,15 +152,15 @@ std::vector<EnvelopePoint> ReadEnvelope(std::span<const uint8_t> data, uint32_t 
 class SoundData
 {
 public:
-    // Read the tables of `dol` at `tables`, and the sound data `rom`. Throw FormatError if a table lies outside
+    // Read the tables of `dol` at `tables`, and the sound data `rom`. Throw FormatError if a table is outside
     // main.dol or a part of the sound data outside `rom`.
     SoundData(const ntdlib::Dol& dol, const LibraryTables& tables, std::vector<uint8_t> rom);
 
     // The number of the sequence whose data sequence `number` plays: a sequence of size 0 plays the one whose number
-    // its offset holds. Throw FormatError for a number outside the table or a chain that doesn't end.
+    // is its offset. Throw FormatError for a number outside the table or a chain that doesn't end.
     uint32_t Resolve(uint32_t number) const;
 
-    // The data of sequence `number` (Resolve). Throw FormatError if it lies outside the sound data.
+    // The data of sequence `number` (Resolve). Throw FormatError if it is outside the sound data.
     std::span<const uint8_t> Sequence(uint32_t number) const;
 
     // The banks of sequence `number`, from the map. The library gives a sequence the last of them.
@@ -221,14 +221,14 @@ private:
         int16_t value3 = 0;
     };
 
-    // Read the table at `address` in `dol`. Throw FormatError if it lies outside main.dol.
+    // Read the table at `address` in `dol`. Throw FormatError if it is outside main.dol.
     static std::vector<Entry> ReadTable(const ntdlib::Dol& dol, uint32_t address);
 
     // Read bank `number` (resolved). Throw FormatError if it can't be read.
     std::unique_ptr<Bank> ReadBank(uint8_t number) const;
 
-    // Read and decode the sample whose entry lies at `offset` in `bank_data`, the data of `bank`. `sample_banks` gives
-    // the sample bank of each medium. Return the sample that `bank` holds already at that offset. Throw FormatError if
+    // Read and decode the sample whose entry is at `offset` in `bank_data`, the data of `bank`. `sample_banks` gives
+    // the sample bank of each medium. Return the sample that `bank` already has at that offset. Throw FormatError if
     // it can't be read.
     const Sample* ReadSample(Bank& bank, std::span<const uint8_t> bank_data, uint32_t offset,
                              const std::array<int, 2>& sample_banks) const;
@@ -251,7 +251,7 @@ private:
 };
 
 // Decode `count` samples of VADPCM from `data`: frames of nine bytes, each a byte with the scale in its high nibble and
-// the predictor in its low one, then sixteen 4-bit samples. `book` holds each predictor's two rows of eight
+// the predictor in its low one, then sixteen 4-bit samples. `book` contains each predictor's two rows of eight
 // coefficients. The decoder's history starts at `history2` and `history1`, the two samples before the first. Throw
 // FormatError if the data ends early.
 std::vector<int16_t> DecodeVadpcm(std::span<const uint8_t> data, std::span<const int16_t> book, std::size_t count,

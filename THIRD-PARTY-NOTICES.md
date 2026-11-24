@@ -32,10 +32,10 @@ notice must appear with all copies, or in the documentation that goes with them.
 
 Nothing in dolphinsf2 licenses game data. The sound archives that dolphinsf2 reads belong to their copyright holders.
 
-ntdlib's `include/ntdlib/nwsnd/tables.h` holds the numeric tables of NintendoWare's sound libraries: powers of two,
-decibel levels, envelope attack multipliers, pan curves, low-pass cutoffs, biquad filter coefficients and sines. The
-models use the exact values to reproduce the consoles' output. ntdlib's `src/sequence_export/filter_tables_*.cpp` hold
-each console's filters fitted to SoundFont 2 and SFZ settings.
+ntdlib's `include/ntdlib/nwsnd/tables.h` contains the numeric tables of NintendoWare's sound libraries: powers of two,
+decibel levels, envelope attack multipliers, pan curves, low-pass cutoffs, biquad filter coefficients and sines. ntdlib's
+sound models use the exact values to reproduce each console's output. ntdlib's `src/sequence_export/filter_tables_*.cpp`
+contain each console's filters fitted to SoundFont 2 and SFZ settings.
 
 ## Licence texts
 

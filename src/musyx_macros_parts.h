@@ -51,11 +51,11 @@ constexpr uint8_t kVariableMask = 0x1f;
 // The centre of a signed source of a voice's inputs, from 0 to 1: 0x2000 of 0x3fff. A variable is such a source.
 constexpr double kSignedCentre = kWheelCentre / static_cast<double>(kWheelHighest);
 
-// The most sources that an input of a voice holds (inpAddCtrl, 0x80160F10 in Pokémon Colosseum).
+// The most sources that an input of a voice has (inpAddCtrl, 0x80160F10 in Pokémon Colosseum).
 constexpr std::size_t kMostSources = 4;
 
-// The share that a select step `s` (VolumeSelect and the like) gives its source. Bytes 2 and 3 hold the share in
-// percent, a signed number. Byte 6 holds a finer part in 256ths of a percent, with the share's sign. MusyX keeps the
+// The share that a select step `s` (VolumeSelect and the like) gives its source. Bytes 2 and 3 contain the share in
+// percent, a signed number. Byte 6 contains a finer part in 256ths of a percent, with the share's sign. MusyX keeps the
 // share in 65536ths. Its rounding moves the share by less than 1/65536.
 inline double SelectShare(const MacroStep& s)
 {
@@ -114,9 +114,10 @@ inline bool ReadsAsZero(uint8_t controller)
     return controller >= 0x60 && controller < 0x66;
 }
 
-// The value from 0 to 127 that MusyX reads for controller `controller` of a song's channel, whose controllers hold
-// `controls`: the high 7 bits of the value that inpGetMidiCtrl returns. A controller that `controls` lacks holds its
-// value after a cold reset of the channel. The switches from 64 to 69 read as 0 or 127, and controllers 96 to 101 as 0.
+// The value from 0 to 127 that MusyX reads for controller `controller` of a song's channel, whose controllers have the
+// values in `controls`: the high 7 bits of the value that inpGetMidiCtrl returns. A controller missing from `controls`
+// has its value after a cold reset of the channel. The switches from 64 to 69 read as 0 or 127, and controllers 96 to
+// 101 as 0.
 inline int ControllerValue(const ChannelControls& controls, uint8_t controller)
 {
     if (ReadsAsZero(controller))
@@ -172,7 +173,7 @@ public:
     {
     }
 
-    // Run macro `macro` from its first step. A macro that the pool lacks starts nothing.
+    // Run macro `macro` from its first step. A macro missing from the pool starts nothing.
     Run Follow(uint16_t macro);
 
 private:
@@ -235,7 +236,7 @@ private:
     void StartSample(const MacroStep& s);
     void SetVariable(const MacroStep& s);
 
-    // Go on at step `step` of macro `macro`. Return false if the pool lacks the macro.
+    // Go on at step `step` of macro `macro`. Return false if the macro is missing from the pool.
     bool Jump(uint16_t macro, uint16_t step);
 
     // Release the note. The run goes on where the trap of the release points.

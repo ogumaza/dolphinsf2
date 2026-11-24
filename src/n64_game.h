@@ -3,8 +3,8 @@
 // The music of a GameCube game that plays it through a port of Nintendo's sound library for the Nintendo 64: Animal
 // Crossing, Doubutsu no Mori+ and Doubutsu no Mori e+. dolphinsf2 recognizes a game by the SHA-1 of its main.dol. The
 // game numbers its pieces of music, and a table in main.dol gives each number's sequence (SEQ_TABLE). The game's code
-// then changes how some pieces play. A piece that plays the hour holds an arrangement for each kind of weather. The
-// game mutes the channels of the others. The museum's piece holds one for each room. In e+, the island's piece holds
+// then changes how some pieces play. A piece that plays the hour has an arrangement for each kind of weather. The
+// game mutes the channels of the others. The museum's piece has one for each room. In e+, the island's piece has
 // one for when the islander is there and one for when he isn't. A music disc's piece plays from a stereo. Each of
 // Kapp'n's songs plays in two parts. dolphinsf2 lists each arrangement as a piece (GameInput::Pieces).
 
@@ -28,8 +28,8 @@ namespace dolphinsf2::n64
 class GameInput
 {
 public:
-    // Open the game whose files `disc` holds, with its main.dol. Return nullptr if the game isn't one that dolphinsf2
-    // converts. Throw FormatError if the game's tables or its sound data can't be read.
+    // Open the game whose files `disc` contains, with its main.dol. Return nullptr if the game isn't one that
+    // dolphinsf2 converts. Throw FormatError if the game's tables or its sound data can't be read.
     static std::unique_ptr<GameInput> Open(const std::shared_ptr<ntdlib::disc::GameFiles>& disc);
 
     // The pieces, by the game's numbers for them. A piece that plays the hour comes in each weather with snow, cherry

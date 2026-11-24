@@ -6,8 +6,8 @@
 // section of the song applies the tempo changes that are due, handles the events that are due, then releases the notes
 // that are due, and its clock moves on by the tempo's ticks. Each track has one event waiting in its section's list at
 // a time: its pattern's next event, the next point of the pattern's pitch-wheel or mod-wheel stream, its next entry or
-// its loop. The list holds the events in order of time. Of two at the same time, the one that came first goes first. A
-// track's next entry comes after its pattern's last event, at the entry's time. That time can have passed: the
+// its loop. The list contains the events in order of time. Of two at the same time, the one that came first goes first.
+// A track's next entry comes after its pattern's last event, at the entry's time. That time can have passed: the
 // entry's events then come at once. A section loops when its list empties in a run that handled a loop: its clock goes
 // back to its loop start, and the tracks that loop start again from their loop entries. The notes that started before
 // keep the old clock and end by it. The old clock runs on beside the new one.
@@ -38,8 +38,8 @@ namespace dolphinsf2::musyx::player
 namespace
 {
 
-// A channel's controllers below 128 after MusyX's cold reset, which starts each song (seqStartPlay, inpResetMidiCtrl):
-// CC7 and CC11 at 127, CC10 at 64, and controllers 98 to 101 at 127. The rest start at 0.
+// A channel's controllers below 128 after MusyX's cold reset. Each song starts with the reset (seqStartPlay,
+// inpResetMidiCtrl): CC7 and CC11 at 127, CC10 at 64, and controllers 98 to 101 at 127. The rest start at 0.
 std::array<uint8_t, 128> ColdControllers()
 {
     std::array<uint8_t, 128> c{};
@@ -63,6 +63,7 @@ void WarmReset(std::array<uint8_t, 128>& c)
     {
         c[i] = 0;
     }
+
     c[kExpressionController] = 127;
     c[kExpressionController + kLowBits] = 127;
 }
@@ -372,6 +373,7 @@ void Player::ApplyTempos(SectionState& s, bool record)
         s.tempo_at++;
         changed = true;
     }
+
     SetTickDelta(s);
     if (changed && record)
     {
@@ -423,6 +425,7 @@ std::optional<Event> Player::NextEvent(std::size_t track)
         {
             return Event{t.base + pattern_time, EventType::kPattern, track, t.event++};
         }
+
         t.pattern = nullptr;
     }
 
@@ -450,8 +453,11 @@ std::optional<Event> Player::NextEvent(std::size_t track)
 
 void Player::Insert(SectionState& s, const Event& e)
 {
-    const auto later = std::upper_bound(s.pending.begin(), s.pending.end(), e.time,
-                                        [](uint32_t time, const Event& other) { return time < other.time; });
+    const auto earlier = [](uint32_t time, const Event& other)
+    {
+        return time < other.time;
+    };
+    const auto later = std::upper_bound(s.pending.begin(), s.pending.end(), e.time, earlier);
     s.pending.insert(later, e);
 }
 
@@ -490,6 +496,7 @@ bool Player::HandleEvents(std::size_t section)
             {
                 throw FormatError("the song loops without time passing");
             }
+
             looped = true;
             StartLoop(section);
             s.loop_due = false;
@@ -647,8 +654,7 @@ void Player::ProgramChange(uint8_t channel, uint8_t program, int64_t tick)
     page_key_[channel] = key;
     variant_controls_[channel].reset();
 
-    // A page whose voices read the channel's controllers plays a variant preset, which the next note picks
-    // (TakeControls).
+    // A page whose voices read the channel's controllers plays a variant preset. The next note picks it (TakeControls).
     if (!instruments_.ObjectControllers(page.object).empty())
     {
         return;
@@ -708,6 +714,7 @@ void Player::Controller(uint8_t channel, uint8_t controller, uint8_t value, int6
         {
             notes_[n.record].off = tick;
         }
+
         active_.clear();
         return;
 
@@ -722,6 +729,7 @@ void Player::Controller(uint8_t channel, uint8_t controller, uint8_t value, int6
         {
             return;
         }
+
         if (controller != kResetControllers && !ReadByVoices(channel, controller))
         {
             approximations_["controllers that no MusyX voice reads sent as MIDI's"]++;
@@ -789,6 +797,7 @@ void Player::TakeControls(uint8_t channel, std::vector<KeyVoice>& voices, uint8_
         controls.emplace_back(
             c, instruments_.ObjectValue(object, c, c == kVelocityControl ? velocity : HeldController(channel, c)));
     }
+
     for (KeyVoice& v : voices)
     {
         v.controls = VoiceControls(controls, v.volume);
@@ -899,6 +908,7 @@ bool Player::ReleaseNotes()
             still.push_back(n);
         }
     }
+
     active_ = std::move(still);
 
     return !active_.empty();
@@ -941,6 +951,7 @@ void Player::SetCurve(NoteRecord& n)
             break;
         }
     }
+
     n.sounds = first != nullptr;
     n.on_table = first != nullptr && !first->dls_volume;
 
@@ -1030,6 +1041,7 @@ void Player::AddFadeSteps(std::vector<ChannelEvent>& events) const
         step.value = static_cast<uint8_t>(set_volume);
         steps.push_back({tick, Rank::kSetting, std::numeric_limits<uint64_t>::max(), step});
     }
+
     events.insert(events.end(), steps.begin(), steps.end());
 }
 
@@ -1100,6 +1112,7 @@ bool Player::Step()
         {
             Controller(c.channel, c.controller, c.value, tick);
         }
+
         controls_.clear();
     }
 
@@ -1115,6 +1128,7 @@ bool Player::Step()
         ApplyTempos(s, i == master_);
         events = HandleEvents(i) || events;
     }
+
     const bool notes = ReleaseNotes();
 
     // Both clocks of each section move on, each by its tempo.
@@ -1126,6 +1140,7 @@ bool Player::Step()
             s.time[c] += s.delta[c];
         }
     }
+
     runs_++;
 
     return events || notes;
@@ -1141,6 +1156,7 @@ void Player::Run(std::size_t passes, std::size_t section_loops)
             truncated_ = true;
             return;
         }
+
         ended_ = !Step();
     }
 }
@@ -1246,6 +1262,7 @@ std::vector<EffectNote> EffectNotes(const GameEffect& effect, Instruments& instr
         {
             continue;
         }
+
         const Sample* sample = instruments.SampleOf(v);
 
         // Voices that start their samples at the same time and whose pitches and pans follow the same curves share a
@@ -1284,7 +1301,7 @@ std::vector<EffectNote> EffectNotes(const GameEffect& effect, Instruments& instr
         notes[note].voices.push_back(voice);
     }
 
-    // The zones of a note start at the pan of the note's start where they can. The shift holds CC10 and the zones' pans
+    // The zones of a note start at the pan of the note's start where they can. The shift keeps CC10 and the zones' pans
     // within 0 to 127 along the curve. Such a shift always exists: the voice's pan stays within 0 to 127.
     const int pan = EffectPan(effect);
     for (std::size_t i = 0; i < notes.size(); i++)
@@ -1294,15 +1311,23 @@ std::vector<EffectNote> EffectNotes(const GameEffect& effect, Instruments& instr
         {
             continue;
         }
-        const auto [low, high] = std::minmax_element(
-            curve.begin(), curve.end(), [](const PanPoint& a, const PanPoint& b) { return a.offset < b.offset; });
+
+        const auto by_offset = [](const PanPoint& a, const PanPoint& b)
+        {
+            return a.offset < b.offset;
+        };
+        const auto [low, high] = std::minmax_element(curve.begin(), curve.end(), by_offset);
         const int zone = *instruments.Voice(notes[i].voices.front()).pan;
         const double least = std::max(pan + high->offset - 127.0, -static_cast<double>(zone));
         const double most = std::min(pan + low->offset, 127.0 - zone);
         notes[i].pan_shift = std::min(std::max(curve.front().offset, least), most);
     }
-    std::stable_sort(notes.begin(), notes.end(),
-                     [](const EffectNote& a, const EffectNote& b) { return a.start_ms < b.start_ms; });
+
+    const auto by_start = [](const EffectNote& a, const EffectNote& b)
+    {
+        return a.start_ms < b.start_ms;
+    };
+    std::stable_sort(notes.begin(), notes.end(), by_start);
 
     return notes;
 }

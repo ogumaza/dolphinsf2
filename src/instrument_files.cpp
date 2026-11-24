@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: MIT
 
+// The SoundFont and the SFZ files of a conversion (see instrument_files.h).
+
 #include "instrument_files.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstddef>
 #include <optional>
 #include <utility>
 
 #include "ntdlib/sequence_export/conversion.h"
+#include "ntdlib/sequence_export/sfz_files.h"
 #include "seqlib/sf2/presets.h"
-#include "seqlib/sfz/text.h"
+#include "seqlib/sfz/opcodes.h"
 #include "seqlib/sfz/track_file.h"
 
 #include "output_units.h"
@@ -24,17 +26,24 @@ void WriteSoundFontFile(Conversion& c, seqlib::sf2::SoundFont& sf, const std::st
     ntdlib::sequence_export::WriteSoundFont(c, sf, title, comment, kProgram);
 }
 
+seqlib::sf2::Zone NoModVibratoGlobalZone()
+{
+    seqlib::sf2::Zone global;
+    global.modulators.assign(seqlib::sf2::kGlobalZoneModulatorsNoModVibrato.begin(),
+                             seqlib::sf2::kGlobalZoneModulatorsNoModVibrato.end());
+
+    return global;
+}
+
 SfzInstruments BuildSfzFiles(const Performance& perf, const MidiReport& midi, const std::string& title,
                              const std::vector<std::string>& names,
                              const std::function<std::string(uint32_t, SfzSamples&)>& group)
 {
-    seqlib::sfz::TrackFileOptions options;
-    options.title = title;
-    options.program = kProgram;
-    options.preset_names = names;
+    // ntdlib's options count the presets of the performance. A performance of Red's pieces lists none. The names give
+    // the count of every conversion.
+    seqlib::sfz::TrackFileOptions options =
+        ntdlib::sequence_export::SfzTrackFileOptions(perf, title, names, std::string(kProgram));
     options.presets = names.size();
-    options.level_cut_db = perf.level_cut_db;
-    options.track_names = true;
 
     // Each track's presets, with the samples that they share.
     SfzSamples samples;
@@ -82,6 +91,7 @@ void WriteInstrumentFiles(Conversion& c, const MidiReport& midi, const std::stri
     {
         seqlib::sf2::AddChannel10Copy(sf, preset, warnings);
     }
+
     WriteSoundFontFile(c, sf, title, source);
 
     const auto group = [&zones](uint32_t p, SfzSamples& waves)
@@ -105,13 +115,7 @@ void WriteInstrumentFiles(Conversion& c, const MidiReport& midi, const std::stri
 
 std::string SfzVolume(double volume_db)
 {
-    const double volume = std::max(volume_db, kSfzLowestVolumeDb);
-    if (std::abs(volume) >= 0.005)
-    {
-        return " volume=" + seqlib::sfz::Number(volume, 2);
-    }
-
-    return "";
+    return seqlib::sfz::VolumeOpcode(std::max(volume_db, kSfzLowestVolumeDb));
 }
 
 } // namespace dolphinsf2

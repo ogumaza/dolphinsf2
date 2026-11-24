@@ -43,9 +43,9 @@ using xsflib::FormatError;
 // Rogue Leader's songs that play a stream, each as its group << 16 | its song ID. Eight songs play a stream along with
 // their notes: The Battle Of Yavin I and III, Hyperspace, Imperial Attack, The Asteroid Field, Celebration & End
 // Titles, and two that the hall doesn't list, group 0x4D's song 0x1A and group 0x61's song 0x3D. A MIDI file can't
-// hold the stream. Those songs are left out. Three more play only a stream, through groups whose other songs play
+// contain the stream. Those songs are left out. Three more play only a stream, through groups whose other songs play
 // notes: Tatooine Training Cutscene 3 and 4 and Prisons Of The Maw Cutscene 1. Each starts one note, whose voice plays
-// a stream buffer. They're left out too. BuildMusic leaves out the songs whose groups hold only stream buffers.
+// a stream buffer. They're left out too. BuildMusic leaves out the songs whose groups contain only stream buffers.
 constexpr std::array<uint32_t, 11> kRogueLeaderStreams = {0x0046000b, 0x0072006d, 0x005a0030, 0x005d0039,
                                                           0x0047000c, 0x004d001b, 0x004d001a, 0x0061003d,
                                                           0x00620040, 0x00620041, 0x0065004b};
@@ -72,32 +72,32 @@ constexpr std::array<std::pair<uint32_t, uint8_t>, 1> kRogueLeaderVolumes = {{{0
 // a volume of 0 makes no sound. It's left out.
 //
 // Pokémon Channel (USA). The game's code lists its music at 0x8015EB50, in 38 rows of 8 bytes. The script of the sound
-// viewer holds the names of the sounds from 0x197C3 on. It holds their effects from 0x4552 on. dolphinsf2 plays every
-// sound at the music's volume and pan. The sound set-up (0x8001498C) calls sndMasterVolume(100, 100, 1, 1) and
+// viewer contains the names of the sounds from 0x197C3 on. It contains their effects from 0x4552 on. dolphinsf2 plays
+// every sound at the music's volume and pan. The sound set-up (0x8001498C) calls sndMasterVolume(100, 100, 1, 1) and
 // sndVolume(127, 100, 0xFF).
 //
-// Star Wars Rogue Squadron II: Rogue Leader (USA). main.dol is a loader. It holds the OS, MusyX and the game, a second
-// DOL at 0x80100000. The game's sound set-up (0x7FD49254 in the game) calls sndVolume(127, 0, 0xFF) and leaves the
-// master volumes at 127. The game's music hall lists its songs at 0x80060C38, in 114 entries of 16 bytes. The game's
-// table of sounds (0x7FDDBF30 in the game) holds 522 rows of 12 bytes.
+// Star Wars Rogue Squadron II: Rogue Leader (USA). main.dol is a loader. It contains the OS, MusyX and the game, a
+// second DOL at 0x80100000. The game's sound set-up (0x7FD49254 in the game) calls sndVolume(127, 0, 0xFF) and leaves
+// the master volumes at 127. The game's music hall lists its songs at 0x80060C38, in 114 entries of 16 bytes. The
+// game's table of sounds (0x7FDDBF30 in the game) contains 522 rows of 12 bytes.
 //
 // Star Wars Rogue Squadron III: Rebel Strike (USA, disc version 1). The game's set-up calls sndVolume(127, 0, 0xFF)
 // and leaves the master volumes at 127.
 //
-// Resident Evil Zero (USA). Both discs hold the same main.dol. The game's code lists its songs at 0x80243BCC. The
+// Resident Evil Zero (USA). Both discs contain the same main.dol. The game's code lists its songs at 0x80243BCC. The
 // set-up calls sndMasterVolume(127, 0, 1, 1) and sndVolume(127, 0, 0xFF) (0x80148F70 and 0x80148F88).
 //
-// Tales of Symphonia (USA). Both discs hold the same main.dol. The game's code lists its songs at 0x801F9830. The
+// Tales of Symphonia (USA). Both discs contain the same main.dol. The game's code lists its songs at 0x801F9830. The
 // set-up calls sndVolume(127, 0, 0xFF) at 0x800A2374 and leaves the master volumes at 127.
 //
 // Metroid Prime (USA, disc version 2) and Metroid Prime 2: Echoes (USA). The game's start-up calls
 // sndVolume(127, 0, 0xFF) and leaves the master volumes at 127.
 //
-// Pokémon Colosseum (USA). The module common_rel in common.fsys holds the game's table of 1,236 sounds at 0x141654 and
-// the table of its songs' 79 files at 0x1133d8. The table gives no song a volume. Every song plays at full volume. The
-// game calls sndMasterVolume (0x8014d928) through 0x80166d18 with 127, or with 0 to silence the music (at 0x8000c648,
-// 0x8000c660, 0x8000c6ac and 0x8000c6c4). The set-up calls sndVolume(100, 0, SND_FX_VOLGROUPS) (0x80167008). The
-// effects' volume groups play at 100/127.
+// Pokémon Colosseum (USA). The module common_rel in common.fsys contains the game's table of 1,236 sounds at 0x141654
+// and the table of its songs' 79 files at 0x1133d8. The table gives no song a volume. Every song plays at full volume.
+// The game calls sndMasterVolume (0x8014d928) through 0x80166d18 with 127, or with 0 to silence the music (at
+// 0x8000c648, 0x8000c660, 0x8000c6ac and 0x8000c6c4). The set-up calls sndVolume(100, 0, SND_FX_VOLGROUPS)
+// (0x80167008). The effects' volume groups play at 100/127.
 //
 // The NDDEMO disc. The disc never went on sale. Its code lists the paths of its nine songs at 0x80065394. The disc's
 // code keeps the master volume for music at 127 (0x80026a90). Its menu of scenes (0x80007b20) fades the music to 64
@@ -107,7 +107,7 @@ constexpr std::array<std::pair<uint32_t, uint8_t>, 1> kRogueLeaderVolumes = {{{0
 // the volume and the scale right by 7 bits. In Pokémon Colosseum, ScaleVolume divides it by 127. The set-up calls
 // sndVolume (0x80047e98) with 127, 0 and 0xff. Every volume group plays at full volume.
 //
-// Nintendo Puzzle Collection (Japan). main.dol holds the OS, the SDK's libraries and MusyX 2.0. Its module loader
+// Nintendo Puzzle Collection (Japan). main.dol contains the OS, the SDK's libraries and MusyX 2.0. Its module loader
 // (0x80006a10) loads the menu and the three games as modules of code. The sound set-up (0x80006d5c) calls sndInit for
 // 64 voices. dolphinsf2 plays the music at MusyX's default master volume of 127. MusyX's salCalcVolume (0x8002fb78)
 // takes the volume table at 0x800bf7e8, or the DLS table at 0x800bf5cc.
@@ -274,10 +274,10 @@ struct SetSamples
     std::set<uint16_t> streams;
 };
 
-// The samples in sample directory `sdir`, without its stream buffers. A sample of format 5 is a stream buffer. It holds
-// no sound of its own: the game streams audio into it while a voice plays it. Rogue Leader's banks hold such samples.
-// Each later entry moves up into a stream buffer's place, and the end marker follows the last entry. The entries
-// give the offsets of their DSP-ADPCM settings from the directory's start. Those settings stay in place.
+// The samples in sample directory `sdir`, without its stream buffers. A sample of format 5 is a stream buffer. It
+// contains no sound of its own: the game streams audio into it while a voice plays it. Rogue Leader's banks contain
+// such samples. Each later entry moves up into a stream buffer's place, and the end marker follows the last entry. The
+// entries give the offsets of their DSP-ADPCM settings from the directory's start. Those settings stay in place.
 SetSamples ReadSamplesWithoutStreams(std::vector<uint8_t> sdir)
 {
     constexpr std::size_t kEntry = 32;
@@ -330,7 +330,7 @@ public:
     }
 
 private:
-    // A file set as MusyX reads it: the groups of its project, its pool, a group that holds its samples, and the IDs
+    // A file set as MusyX reads it: the groups of its project, its pool, a group that contains its samples, and the IDs
     // of its stream buffers (ReadSamplesWithoutStreams).
     struct ReadSet
     {
@@ -341,21 +341,21 @@ private:
     };
 
     // File set `number`. Each set is read once, when a sound first pushes one of its groups. Its holder joins the
-    // music's groups. The holder holds the set's samples, and SFZ files name the samples by it.
+    // music's groups. The holder contains the set's samples, and SFZ files name the samples by it.
     const ReadSet& SetOf(std::size_t number);
 
     // Whether `sound`, a song, plays. MusyX plays a song through the first pushed group with the song's group ID
     // (sndSeqPlayEx, 0x8001D040 in Rogue Leader's loader). It plays nothing if that group isn't a song group with a
-    // MIDI setup for the song. A song group whose samples are all stream buffers plays only a stream. A MIDI file
-    // can't hold the stream. Such songs are left out.
+    // MIDI setup for the song. A song group whose samples are all stream buffers plays only a stream. A MIDI file can't
+    // contain the stream. Such songs are left out.
     bool Plays(const Sound& sound);
 
-    // The index of the pushed group that plays `sound`: the first that holds the song's group or the effect. Throws
+    // The index of the pushed group that plays `sound`: the first that contains the song's group or the effect. Throws
     // FormatError if none does.
     std::size_t PlayingGroup(const Sound& sound);
 
-    // The music's group that plays `sound` from its pushed group `pushed_index`, by the set and the ID of the group
-    // and the groups that the sound pushes. Its pool holds the objects of every pushed set. An object of an earlier set
+    // The music's group that plays `sound` from its pushed group `pushed_index`, by the set and the ID of the group and
+    // the groups that the sound pushes. Its pool contains the objects of every pushed set. An object of an earlier set
     // comes first. Its samples are in the holders of the sets, in the same order.
     std::size_t GroupOf(const Sound& sound, std::size_t pushed_index);
 
@@ -548,8 +548,8 @@ private:
     // FormatError if the set has no such group.
     void MakeGroup(const Sound& sound, GroupType type);
 
-    // The row of `sound`, an effect, in the table of effects of the first pushed group that holds it. Throws
-    // FormatError if no pushed group holds it.
+    // The row of `sound`, an effect, in the table of effects of the first pushed group that contains it. Throws
+    // FormatError if no pushed group contains it.
     const ntdlib::musyx::Effect& RowOf(const Sound& sound);
 
     const ntdlib::musyx::Catalogue& catalogue_;

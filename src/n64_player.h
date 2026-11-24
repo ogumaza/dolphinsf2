@@ -54,7 +54,7 @@ struct PresetVoice
     uint8_t note_pan = 64;
 };
 
-// The MIDI key of effect number `number`: its low 7 bits. The rest of the number gives the program that holds it.
+// The MIDI key of effect number `number`: its low 7 bits. The rest of the number gives the program that contains it.
 constexpr uint8_t EffectKey(uint32_t number)
 {
     return static_cast<uint8_t>(number & 0x7f);

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+// The fit of an envelope to fades in lines in amplitude (see fade_fit.h).
+
 #include "fade_fit.h"
 
 #include <algorithm>
@@ -45,23 +47,23 @@ double TimecentsMs(int timecents)
     return 1000.0 * std::exp2(timecents / 1200.0);
 }
 
-// The timecents of a fall at `db_per_ms` that falls kSoundFontFallDb in its time. A rate of 0 never falls: it takes the
-// longest time.
+// The timecents of a fall at `db_per_ms` that falls seqlib's sf2::kEnvelopeFallDb in its time. A rate of 0 never falls:
+// it takes the longest time.
 int FallTimecents(double db_per_ms)
 {
     if (db_per_ms <= 0.0)
     {
-        return kLongestTimecents;
+        return sf2::kLongestTimecents;
     }
 
-    return sf2::ToTimecents(kSoundFontFallDb / db_per_ms, kShortestTimecents, kLongestTimecents);
+    return sf2::ToTimecents(sf2::kEnvelopeFallDb / db_per_ms, sf2::kShortestTimecents, sf2::kLongestTimecents);
 }
 
-// The seconds of a fall at `db_per_ms` that falls kSfzFallDb in its time. A rate of 0 never falls: it takes
-// kLongestSfzSeconds.
+// The seconds of a fall at `db_per_ms` that falls seqlib's sfz::kEnvelopeFallDb in its time. A rate of 0 never falls:
+// it takes kLongestSfzSeconds.
 double FallSeconds(double db_per_ms)
 {
-    return db_per_ms <= 0.0 ? kLongestSfzSeconds : kSfzFallDb / db_per_ms / 1000.0;
+    return db_per_ms <= 0.0 ? kLongestSfzSeconds : seqlib::sfz::kEnvelopeFallDb / db_per_ms / 1000.0;
 }
 
 // The hold, up to the longest, that brings a SoundFont zone closest to `curve` by least squares in decibels. The
@@ -70,8 +72,8 @@ double FallSeconds(double db_per_ms)
 // quickly first and then falls slowly takes a short hold.
 double SoundFontHold(const FadeCurve& curve, const FadeShape& shape)
 {
-    const double kSlowest = kSoundFontFallDb / TimecentsMs(kLongestTimecents);
-    const double kLongest = TimecentsMs(kLongestHoldTimecents);
+    const double kSlowest = sf2::kEnvelopeFallDb / TimecentsMs(sf2::kLongestTimecents);
+    const double kLongest = TimecentsMs(sf2::kLongestHoldTimecents);
     const double drop = -shape.sustain_db;
     const double span = kLongest + drop / kSlowest;
     double best = std::numeric_limits<double>::max();
@@ -97,6 +99,50 @@ double SoundFontHold(const FadeCurve& curve, const FadeShape& shape)
     }
 
     return best_hold;
+}
+
+// The hold and the decay of `shape` over `span` milliseconds from `start`, the time of the peak. A fade in a line in
+// amplitude starts slowly in decibels. A hold and then a decay follow it down to the fitted level. Each of kFitHolds
+// holds gets the decay that fits its points best by least squares. The best of them gives the shape.
+void FitHoldAndDecay(const FadeCurve& curve, double start, double span, FadeShape& shape)
+{
+    double best = std::numeric_limits<double>::max();
+    for (int h = 0; h < kFitHolds; h++)
+    {
+        const double held_for = span * h / kFitHolds;
+        double error = 0.0;
+        double xx = 0.0;
+        double xy = 0.0;
+        double yy = 0.0;
+        for (int i = 0; i < kFitPoints; i++)
+        {
+            const double t = span * (i + 0.5) / kFitPoints;
+            const double y =
+                -20.0 * std::log10(std::max(FadeAmplitude(curve, start + t) / shape.peak, kLowestAmplitude));
+            if (t <= held_for)
+            {
+                error += y * y;
+                continue;
+            }
+
+            const double x = t - held_for;
+            xx += x * x;
+            xy += x * y;
+            yy += y * y;
+        }
+        if (xx <= 0.0 || xy <= 0.0)
+        {
+            continue;
+        }
+
+        error += yy - xy * xy / xx;
+        if (error < best)
+        {
+            best = error;
+            shape.hold_ms = held_for;
+            shape.decay_db_per_ms = xy / xx;
+        }
+    }
 }
 
 } // namespace
@@ -144,7 +190,7 @@ FadeShape FitFades(const FadeCurve& curve)
     shape.attack_ms = start;
 
     const double hold = curve.back().second / shape.peak;
-    shape.sustain_db = hold > 0.0 ? 20.0 * std::log10(hold) : -kSilentCentibels / 10.0;
+    shape.sustain_db = hold > 0.0 ? 20.0 * std::log10(hold) : -sf2::kMaxCentibels / 10.0;
     if (hold >= 1.0)
     {
         return shape;
@@ -167,47 +213,11 @@ FadeShape FitFades(const FadeCurve& curve)
 
     const double span = std::max(reached - start, kShortestSpanMs);
 
-    // A fade in a line in amplitude starts slowly in decibels. A hold and then a decay follow it down to the fitted
-    // level. Each of kFitHolds holds gets the decay that fits its points best by least squares. The best of them gives
-    // the shape.
-    double best = std::numeric_limits<double>::max();
-    for (int h = 0; h < kFitHolds; h++)
-    {
-        const double held_for = span * h / kFitHolds;
-        double error = 0.0;
-        double xx = 0.0;
-        double xy = 0.0;
-        double yy = 0.0;
-        for (int i = 0; i < kFitPoints; i++)
-        {
-            const double t = span * (i + 0.5) / kFitPoints;
-            const double y =
-                -20.0 * std::log10(std::max(FadeAmplitude(curve, start + t) / shape.peak, kLowestAmplitude));
-            if (t <= held_for)
-            {
-                error += y * y;
-                continue;
-            }
-            const double x = t - held_for;
-            xx += x * x;
-            xy += x * y;
-            yy += y * y;
-        }
-        if (xx <= 0.0 || xy <= 0.0)
-        {
-            continue;
-        }
-        error += yy - xy * xy / xx;
-        if (error < best)
-        {
-            best = error;
-            shape.hold_ms = held_for;
-            shape.decay_db_per_ms = xy / xx;
-        }
-    }
+    FitHoldAndDecay(curve, start, span, shape);
 
     // SoundFont's slowest decay falls faster than such a decay. A SoundFont zone then holds before it.
-    if (shape.decay_db_per_ms > 0.0 && kSoundFontFallDb / shape.decay_db_per_ms > TimecentsMs(kLongestTimecents))
+    if (shape.decay_db_per_ms > 0.0 &&
+        sf2::kEnvelopeFallDb / shape.decay_db_per_ms > TimecentsMs(sf2::kLongestTimecents))
     {
         shape.soundfont_hold_ms = SoundFontHold(curve, shape);
     }
@@ -222,11 +232,11 @@ double FitRelease(double ms)
 
 void SetEnvelope(const FadeShape& shape, sf2::ZoneValues& values)
 {
-    values.attack = sf2::ToTimecents(shape.attack_ms, kShortestTimecents, kLongestTimecents);
-    values.hold =
-        sf2::ToTimecents(shape.soundfont_hold_ms.value_or(shape.hold_ms), kShortestTimecents, kLongestHoldTimecents);
-    values.decay = shape.decay_db_per_ms > 0.0 ? FallTimecents(shape.decay_db_per_ms) : kShortestTimecents;
-    values.sustain = SustainCentibels(shape.sustain_db);
+    values.attack = sf2::ToTimecents(shape.attack_ms, sf2::kShortestTimecents, sf2::kLongestTimecents);
+    values.hold = sf2::ToTimecents(shape.soundfont_hold_ms.value_or(shape.hold_ms), sf2::kShortestTimecents,
+                                   sf2::kLongestHoldTimecents);
+    values.decay = shape.decay_db_per_ms > 0.0 ? FallTimecents(shape.decay_db_per_ms) : sf2::kShortestTimecents;
+    values.sustain = sf2::SustainCentibels(shape.sustain_db);
     values.release = FallTimecents(shape.release_db_per_ms);
 }
 

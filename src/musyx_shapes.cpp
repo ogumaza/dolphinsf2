@@ -8,12 +8,18 @@
 #include <cmath>
 #include <optional>
 
+#include "seqlib/sf2/units.h"
+#include "seqlib/sfz/opcodes.h"
+
 #include "jaudio.h"
 
 namespace dolphinsf2::musyx::shapes
 {
 namespace
 {
+
+namespace sf2 = seqlib::sf2;
+namespace sfz = seqlib::sfz;
 
 // A macro's fades and the fade of a stopped voice are fitted to reach the level that they reach kFitDb down. A fade to
 // a level less than twice as far down is fitted halfway down in decibels. kFitShare is the share of the amplitude at
@@ -180,7 +186,7 @@ std::optional<HeldShape> HeldShapeOf(const Instruments& instruments, const Macro
     HeldShape shape;
     shape.hold_ms = start - played_attack_ms;
     shape.decay_db_per_ms = crossed > start ? fit_db / (crossed - start) : kAtOnce;
-    shape.sustain_db = last > 0.0 ? -range_db : -kSilentCentibels / 10.0;
+    shape.sustain_db = last > 0.0 ? -range_db : -sf2::kMaxCentibels / 10.0;
 
     return shape;
 }
@@ -224,6 +230,7 @@ double FadeInDelayMs(const Instruments& instruments, const MacroVoice& voice, do
             crossed = at - step * (l - fit) / (l - before);
             break;
         }
+
         before = l;
     }
 
@@ -305,7 +312,7 @@ VolumeShape VolumeOf(const Instruments& instruments, const MacroVoice& voice, do
         }
 
         const bool silent = dls ? e->sustain < kDlsSilence : e->sustain <= 0.0;
-        shape.sustain_db = silent ? -kSilentCentibels / 10.0 : 20.0 * std::log10(e->sustain);
+        shape.sustain_db = silent ? -sf2::kMaxCentibels / 10.0 : 20.0 * std::log10(e->sustain);
     }
 
     // A fade-in at the voice's start becomes the attack. The longer of the two plays. A fade-in that plays starts after
@@ -390,8 +397,8 @@ PitchShape PitchOf(const PitchEnvelope& envelope, int key)
     p.decay_ms =
         middle < 1.0 ? decay_ms * db / kDlsFallDb / (1.0 - middle) : decay_ms * 20.0 / std::log(10.0) / kDlsFallDb;
     p.release_ms = release_ms * 20.0 * std::log10(2.0) / kDlsFallDb * 2.0;
-    p.sfz_decay_ms = decay_ms * kSfzFallDb / kDlsFallDb;
-    p.sfz_release_ms = release_ms * kSfzFallDb / kDlsFallDb;
+    p.sfz_decay_ms = decay_ms * sfz::kEnvelopeFallDb / kDlsFallDb;
+    p.sfz_release_ms = release_ms * sfz::kEnvelopeFallDb / kDlsFallDb;
 
     return p;
 }
@@ -410,7 +417,7 @@ std::optional<TremoloShape> TremoloOf(const MacroVoice& voice)
 
     const auto range_db = [](double depth)
     {
-        return depth >= 1.0 ? kSilentCentibels / 10.0 : -20.0 * std::log10(1.0 - std::max(depth, 0.0));
+        return depth >= 1.0 ? sf2::kMaxCentibels / 10.0 : -20.0 * std::log10(1.0 - std::max(depth, 0.0));
     };
     const Tremolo& t = *voice.tremolo;
     const double range = range_db(t.depth);
@@ -436,8 +443,9 @@ std::optional<WheelLfo> PlayedWheelLfo(const MacroVoice& voice)
 
 int ShapeFallTimecents(double db_per_ms)
 {
-    return db_per_ms == kAtOnce ? kShortestTimecents
-                                : ToTimecents(kSoundFontFallDb / db_per_ms, kShortestTimecents, kLongestTimecents);
+    return db_per_ms == kAtOnce
+               ? sf2::kShortestTimecents
+               : ToTimecents(sf2::kEnvelopeFallDb / db_per_ms, sf2::kShortestTimecents, sf2::kLongestTimecents);
 }
 
 int KeyScaleTimecents(double per_key)

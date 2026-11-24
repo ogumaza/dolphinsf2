@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "seqlib/sf2/units.h"
+
 #include "musyx_player_parts.h"
 
 namespace dolphinsf2::musyx::player
@@ -14,9 +16,11 @@ namespace dolphinsf2::musyx::player
 namespace
 {
 
+namespace sf2 = seqlib::sf2;
+
 // Whether a reset of all controllers (CC121) sets events of `kind` back to their defaults. RP-015 keeps the program,
 // the bank, the volume, the pan, the sound controllers 70 to 79 and the effect depths 91 to 95. Other players reset
-// more of the controllers that RP-015 doesn't name, so those count as reset.
+// more of the controllers that RP-015 doesn't name. Those count as reset.
 bool ResetsToDefault(EventKind kind)
 {
     if (kind == EventKind::kPreset || kind == EventKind::kVolume || kind == EventKind::kPan ||
@@ -59,6 +63,7 @@ Performance Player::Finish(const PerformOptions& options)
     {
         EndAfterLastSound(perf, last_tick, sound_end);
     }
+
     CutTails(perf);
 
     return perf;
@@ -136,6 +141,7 @@ VoiceEnds Player::EndsOf(const NoteRecord& n, double on_seconds, double off_seco
                 ends.linear_ms = std::max(ends.linear_ms, v.envelope->release_ms);
             }
         }
+
         if (v.key_off == KeyOff::kFade && v.release_fade.releases && v.envelope && !v.envelope->dls &&
             v.envelope->release_ms > 0.0 && end >= off_seconds)
         {
@@ -159,8 +165,11 @@ double Player::EndNotes(Performance& perf, int64_t last_tick)
         const double end_seconds = ends.latest.value_or(off_seconds);
         const double silent = std::max(end_seconds + ends.tail, ends.faded);
         std::optional<uint8_t> part;
-        const bool sweeps = std::any_of(n.voices.begin(), n.voices.end(),
-                                        [this](const KeyVoice& kv) { return !instruments_.Voice(kv).sweeps.empty(); });
+        const auto sweeping = [this](const KeyVoice& kv)
+        {
+            return !instruments_.Voice(kv).sweeps.empty();
+        };
+        const bool sweeps = std::any_of(n.voices.begin(), n.voices.end(), sweeping);
         if (!effect_ && sweeps)
         {
             part = BendPart(n, on_seconds, silent);
@@ -227,12 +236,17 @@ std::optional<uint8_t> Player::BendPart(const NoteRecord& n, double on_seconds, 
     {
         parts.insert({b.channel, b.part});
     }
+
     std::size_t channels = parts.size();
     for (const std::vector<ChannelEvent>& events : events_)
     {
-        channels += std::any_of(events.begin(), events.end(),
-                                [](const ChannelEvent& ce) { return ce.event.kind == EventKind::kNoteOn; });
+        const auto is_note = [](const ChannelEvent& ce)
+        {
+            return ce.event.kind == EventKind::kNoteOn;
+        };
+        channels += std::any_of(events.begin(), events.end(), is_note);
     }
+
     for (uint8_t part = 1; part < kChannels; part++)
     {
         const bool used = parts.contains({n.channel, part});
@@ -240,6 +254,7 @@ std::optional<uint8_t> Player::BendPart(const NoteRecord& n, double on_seconds, 
         {
             return std::nullopt;
         }
+
         const auto overlaps = [&](const BentNote& b)
         {
             return b.channel == n.channel && b.part == part && b.on < end && on < b.end;
@@ -315,13 +330,14 @@ void Player::AddBentParts(uint8_t channel, std::vector<ChannelEvent>& events)
             }
         }
     }
+
     events.insert(events.end(), added.begin(), added.end());
 }
 
 void Player::AddBends(const BentNote& b, const std::vector<ChannelEvent>& events, std::vector<ChannelEvent>& added)
 {
-    // The points of the curve and the moves of the wheel during the note, in order of their ticks. A point holds the
-    // bend of the curve. A move holds the bend of the wheel.
+    // The points of the curve and the moves of the wheel during the note, in order of their ticks. A point contains the
+    // bend of the curve. A move contains the bend of the wheel.
     struct Change
     {
         int64_t tick = 0;
@@ -335,6 +351,7 @@ void Player::AddBends(const BentNote& b, const std::vector<ChannelEvent>& events
         const int64_t tick = p.ms == 0.0 ? b.on : std::min(TickAt(start + p.ms / 1000.0), b.end);
         changes.push_back({tick, false, p.semitones});
     }
+
     float wheel = 0.0f;
     for (const ChannelEvent& ce : events)
     {
@@ -347,6 +364,7 @@ void Player::AddBends(const BentNote& b, const std::vector<ChannelEvent>& events
             }
         }
     }
+
     std::stable_sort(changes.begin(), changes.end(), [](const Change& x, const Change& y) { return x.tick < y.tick; });
 
     // MusyX adds the sweep to the DSP's pitch after the wheel. The wheel's move therefore scales the DSP's
@@ -463,6 +481,7 @@ std::optional<double> Player::SampleSecondsOf(const MacroVoice& v, int key)
             return *ms / 1000.0;
         }
     }
+
     const int voice_key = v.fixed_key.value_or(key + v.key_shift);
     double ratio = sample != nullptr ? std::pow(2.0, (voice_key - sample->key) / 12.0 + v.detune_cents / 1200.0) : 1.0;
     if (sample != nullptr && v.rate_hz && *v.rate_hz > 0.0 && sample->pcm.sample_rate > 0)
@@ -541,12 +560,14 @@ void Player::BendNote(const EffectNote& note, uint8_t channel, double start, dou
             bend.semitones = static_cast<float>(wheel);
             Record(channel, 0, bend);
         }
+
         return;
     }
     if (std::any_of(curves.begin(), curves.end(), [moving](const auto& curve) { return curve != *moving; }))
     {
         approximations_["layered voices whose pitches move apart bend together"]++;
     }
+
     for (const PitchPoint& p : *moving)
     {
         TrackEvent bend{.kind = EventKind::kPitch};
@@ -567,17 +588,19 @@ void Player::PanNote(const EffectNote& note, uint8_t channel, int pan, double st
             curves.push_back(PanCurve(v, ms));
         }
     }
+
     const auto moving = std::find_if(curves.begin(), curves.end(), [](const auto& curve) { return !curve.empty(); });
     if (moving == curves.end())
     {
         return;
     }
+
     if (std::any_of(curves.begin(), curves.end(), [&](const auto& curve) { return curve != *moving; }))
     {
         approximations_["layered voices whose pans move apart pan together"]++;
     }
 
-    // MusyX adds the channel's distance from the centre to the voice's pan. It holds the sum within 0 to 127
+    // MusyX adds the channel's distance from the centre to the voice's pan. It keeps the sum within 0 to 127
     // (0x8014b788 in Pokémon Colosseum).
     for (const PanPoint& p : *moving)
     {
@@ -710,10 +733,13 @@ void Player::AddEvents(Performance& perf)
             if (e.kind == seqlib::midi::ControlKind(kResetControllers))
             {
                 // A reset of all controllers always goes out. It sets the pitch wheel and the controllers that RP-015
-                // names back, so a later value equal to the last one before it goes out again.
+                // names back. A later value equal to the last one before the reset therefore goes out again.
                 pitch[e.part] = 0.0f;
-                std::erase_if(last, [&e](const auto& entry)
-                              { return entry.first.first == e.part && ResetsToDefault(entry.first.second); });
+                const auto reset = [&e](const auto& entry)
+                {
+                    return entry.first.first == e.part && ResetsToDefault(entry.first.second);
+                };
+                std::erase_if(last, reset);
             }
             else if (e.kind == EventKind::kPitch)
             {
@@ -721,6 +747,7 @@ void Player::AddEvents(Performance& perf)
                 {
                     continue;
                 }
+
                 pitch[e.part] = e.semitones;
             }
             else if (seqlib::midi::IsSetting(e.kind) || e.kind == EventKind::kPreset)
@@ -731,6 +758,7 @@ void Player::AddEvents(Performance& perf)
                 {
                     continue;
                 }
+
                 last[{e.part, e.kind}] = value;
             }
 
@@ -800,11 +828,9 @@ void Player::MarkLoop(Performance& perf, const PerformOptions& options) const
         ntdlib::sequence_export::RestoreAtLoopStart(perf, {}, next, kRules);
     }
 
-    // The run went on past the end to find the loop. CutAt leaves out the tracks' events after the end. The tempo
-    // changes after it go too. A tempo table that starts again in each pass makes some.
-    seqlib::midi::ClampNoteOffs(perf, end);
-    seqlib::midi::CutAt(perf, end);
-    std::erase_if(perf.tempo, [end](const Performance::Tempo& t) { return t.tick > end; });
+    // The run went on past the end to find the loop. EndAt leaves out the tracks' events and the tempo changes after
+    // the end. A tempo table that starts again in each pass makes tempo changes there.
+    seqlib::midi::EndAt(perf, end);
     perf.end_tick = end;
     perf.seconds = SecondsAt(end);
 }
@@ -834,12 +860,12 @@ std::optional<TailCut> Player::TailCutAt(uint8_t channel, const std::vector<cons
                                          const NoteTail& last) const
 {
     // The parts on which a linear release of the files still sounds. The files fit it by its energy: it falls
-    // kEnergyFitDb in the game's time, and kSoundFontFallDb in that time's kSoundFontFallDb / kEnergyFitDb. The release
-    // of a fade that ends in a linear release reaches only 20 dB down when the game's voice does (FadeRate).
+    // kEnergyFitDb in the game's time, and sf2::kEnvelopeFallDb in that time's sf2::kEnvelopeFallDb / kEnergyFitDb. The
+    // release of a fade that ends in a linear release reaches only 20 dB down when the game's voice does (FadeRate).
     TailCut cut{.channel = channel, .at = silent};
     for (const NoteTail* n : notes)
     {
-        if ((n->linear_ms > 0.0 && silent - n->off < n->linear_ms / 1000.0 * kSoundFontFallDb / kEnergyFitDb) ||
+        if ((n->linear_ms > 0.0 && silent - n->off < n->linear_ms / 1000.0 * sf2::kEnvelopeFallDb / kEnergyFitDb) ||
             n->fades_to_release)
         {
             cut.parts.insert(n->part);
@@ -925,8 +951,12 @@ std::vector<TailCut> Player::TailCuts() const
                 notes.push_back(&n);
             }
         }
-        std::stable_sort(notes.begin(), notes.end(),
-                         [](const NoteTail* a, const NoteTail* b) { return a->on < b->on; });
+
+        const auto by_start = [](const NoteTail* a, const NoteTail* b)
+        {
+            return a->on < b->on;
+        };
+        std::stable_sort(notes.begin(), notes.end(), by_start);
 
         // Where the voices of the notes so far have all fallen silent, and the note whose voices fall silent last. A
         // note with a linear release goes first among those that fall silent together. The channel's next note starts
@@ -980,6 +1010,7 @@ bool Player::KeepsCut(const Performance& perf, const std::vector<TailCut>& cuts,
     {
         return false;
     }
+
     if (perf.loop)
     {
         const Performance::Loop loop = *perf.loop;
@@ -987,6 +1018,7 @@ bool Player::KeepsCut(const Performance& perf, const std::vector<TailCut>& cuts,
         {
             return false;
         }
+
         const int64_t length = static_cast<int64_t>(loop.end) - loop.start;
         if (from > loop.start && at < loop.end &&
             std::none_of(cuts.begin(), cuts.end(), [&](const TailCut& later) { return same_cut(cut, later, length); }))
@@ -1046,6 +1078,7 @@ void Player::CutPart(std::vector<TrackEvent>& events, const TailCut& cut, uint8_
             written = value;
         }
     }
+
     const auto tick = static_cast<uint32_t>(at);
     added.push_back({.tick = tick, .kind = EventKind::kSoundOff, .part = part});
     added.push_back(

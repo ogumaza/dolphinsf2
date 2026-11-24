@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-// The interpreter of MusyX's macros, which musyx_voices.cpp runs for each note of a voice.
+// The interpreter of MusyX's macros. musyx_voices.cpp runs it for each note of a voice.
 
 #pragma once
 

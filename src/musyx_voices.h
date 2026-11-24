@@ -64,7 +64,7 @@ using ChannelControls = std::vector<std::pair<uint8_t, uint8_t>>;
 
 // The stand-in for the note's velocity among a song's channel controls. A split on the voice's volume reads it
 // (SplitVelocity). A channel's controls hold the note's velocity there, and a voice's controls hold the voice's start
-// volume (VoiceControls). MusyX's controllers end at 0xA4, so no controller has this number.
+// volume (VoiceControls). MusyX's controllers end at 0xA4. No controller has this number.
 constexpr uint8_t kVelocityControl = 0xff;
 
 // The MIDI controllers that MusyX songs and macros give a meaning: the mod wheel, the volume, the pan, the expression
@@ -360,8 +360,8 @@ struct MacroVoice
 
     // The splits that the macro meets, in order: each a controller and the value from which the voice goes another way.
     // SplitModulation reads the mod wheel, and SplitVelocity the start volume (kVelocityControl). A song's voice reads
-    // its controls there. An effect's voice goes on. The list comes from a run without controls, which goes on at each
-    // split. A split that only another way reaches isn't listed.
+    // its controls there. An effect's voice goes on. The list comes from a run without controls. That run goes on at
+    // each split. A split that only another way reaches isn't listed.
     std::vector<std::pair<uint8_t, uint8_t>> splits;
 
     // The ramps of the voice's volume while its note is held, up to the voice's stop (stop_ms).
@@ -390,7 +390,7 @@ struct MacroVoice
     std::vector<std::string> approximations;
 };
 
-// Follow SoundMacro `macro` of `pool` for a note. A macro that the pool lacks starts nothing. ScaleVolume divides by
+// Follow SoundMacro `macro` of `pool` for a note. A macro missing from the pool starts nothing. ScaleVolume divides by
 // `volume_scale_divisor` (SongGroup). A song's note gives its channel's controllers in `controls`. With none, the voice
 // leaves out an envelope that it takes from the controllers.
 MacroVoice FollowMacro(const ntdlib::musyx::Pool& pool, uint16_t macro, int volume_scale_divisor,
@@ -408,7 +408,7 @@ double VoiceVolume(const MacroVoice& voice, double volume, double controller);
 // The milliseconds after its note's start at which a held note of `voice` ends through its envelope: where the decay of
 // a linear envelope whose sustain is under kSilentSustain ends. A voice whose release outlasts its decay would ring on
 // through that release in the files. The game's voice is silent there. Its note ends where the files' decay has fallen
-// kSoundFontFallDb. Nothing for any other voice.
+// seqlib's sf2::kEnvelopeFallDb. Nothing for any other voice.
 std::optional<double> DecayedMs(const MacroVoice& voice);
 
 // The milliseconds after its note's start at which a held note of `voice` falls silent: at the end of the cut after
@@ -473,7 +473,7 @@ struct PitchPoint
 // Pokémon Colosseum). The curve starts with a point at 0.
 std::vector<PitchPoint> PitchCurve(const MacroVoice& voice, const Sample& sample, int key, double wheel, double ms);
 
-// A point on the curve of a voice's pan: from `ms` after the note's start, the voice's pan lies `offset` steps of CC10
+// A point on the curve of a voice's pan: from `ms` after the note's start, the voice's pan is `offset` steps of CC10
 // away from the pan of its last Panning step.
 struct PanPoint
 {
@@ -574,7 +574,7 @@ public:
     // decoded. The instruments record why a sample can't be decoded.
     const Sample* GetSample(uint16_t id);
 
-    // The sample that `voice` starts, as GetSample gives it. Return nullptr for a voice that starts none.
+    // The sample that `voice` starts (GetSample). Return nullptr for a voice that starts none.
     const Sample* SampleOf(const MacroVoice& voice);
 
     // The seconds that sample `id` plays when its pitch is `ratio` times its rate, or nothing if it loops. Return 0 for

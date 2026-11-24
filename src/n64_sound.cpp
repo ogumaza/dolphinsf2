@@ -33,12 +33,12 @@ constexpr int kMaxAliases = 8;
 // A bank's header: the offsets of its drums' list and of its effects, then an offset for each instrument.
 constexpr uint32_t kBankHeader = 8;
 
-// An instrument's size, and where its envelope and its three tuned samples lie in it.
+// An instrument's size, and where its envelope and its three tuned samples are in it.
 constexpr uint32_t kInstrumentSize = 0x20;
 constexpr uint32_t kInstrumentEnvelope = 4;
 constexpr uint32_t kInstrumentSamples = 8;
 
-// A drum's size, and where its tuned sample and its envelope lie in it.
+// A drum's size, and where its tuned sample and its envelope are in it.
 constexpr uint32_t kDrumSize = 0x10;
 constexpr uint32_t kDrumSample = 4;
 constexpr uint32_t kDrumEnvelope = 0xc;
@@ -231,12 +231,13 @@ SoundData::SoundData(const ntdlib::Dol& dol, const LibraryTables& tables, std::v
       banks_(ReadTable(dol, tables.banks)),
       sample_banks_(ReadTable(dol, tables.sample_banks))
 {
-    // The segment table's three parts have to lie in the sound data.
+    // The three parts of the segment table have to be in the sound data.
     const std::vector<Entry> segments = ReadTable(dol, tables.segments);
     if (segments.size() < segments_.size())
     {
         throw FormatError("main.dol's table of the sound data's parts is too short");
     }
+
     for (std::size_t i = 0; i < segments_.size(); i++)
     {
         segments_[i] = segments[i];
@@ -254,6 +255,7 @@ SoundData::SoundData(const ntdlib::Dol& dol, const LibraryTables& tables, std::v
     {
         throw FormatError("main.dol's map of the sequences' banks ends early");
     }
+
     for (std::size_t i = 0; i < sequences_.size(); i++)
     {
         const std::size_t list = xsflib::LoadBe16(map.data() + 2 * i);
@@ -261,6 +263,7 @@ SoundData::SoundData(const ntdlib::Dol& dol, const LibraryTables& tables, std::v
         {
             throw FormatError("main.dol's map of the sequences' banks ends early");
         }
+
         map_end = std::max(map_end, list + 1 + map[list]);
     }
     bank_map_.assign(map.begin(), map.begin() + static_cast<std::ptrdiff_t>(map_end));
@@ -302,6 +305,7 @@ uint32_t SoundData::Resolve(uint32_t number) const
         {
             return number;
         }
+
         number = sequences_[number].offset;
     }
 
@@ -343,6 +347,7 @@ std::optional<uint8_t> SoundData::ResolveBank(uint32_t number) const
         {
             return static_cast<uint8_t>(number);
         }
+
         number = banks_[number].offset;
     }
 
@@ -503,7 +508,7 @@ const Sample* SoundData::ReadSample(Bank& bank, std::span<const uint8_t> bank_da
         throw FormatError("a sample's medium names no sample bank");
     }
 
-    // The sample bank's data, which an entry of size 0 names by number.
+    // The data of the sample bank. An entry of size 0 names another bank by number.
     uint32_t sample_bank = static_cast<uint32_t>(sample_banks[medium]);
     for (int chain = 0;
          chain < kMaxAliases && sample_bank < sample_banks_.size() && sample_banks_[sample_bank].size == 0; chain++)
@@ -514,11 +519,13 @@ const Sample* SoundData::ReadSample(Bank& bank, std::span<const uint8_t> bank_da
     {
         throw FormatError("a sample's sample bank isn't in main.dol's table");
     }
+
     const Entry& bank_entry = sample_banks_[sample_bank];
     if (uint64_t{bank_entry.offset} + bank_entry.size > segments_[2].size || uint64_t{address} + size > bank_entry.size)
     {
         throw FormatError("a sample lies outside its sample bank");
     }
+
     const std::span<const uint8_t> sample_data =
         std::span<const uint8_t>(rom_).subspan(segments_[2].offset + bank_entry.offset + address, size);
 
@@ -530,11 +537,13 @@ const Sample* SoundData::ReadSample(Bank& bank, std::span<const uint8_t> bank_da
         throw FormatError("a sample's book has order " + std::to_string(order) + " and " + std::to_string(predictors) +
                           " predictors");
     }
+
     const uint64_t coefficients = uint64_t{order} * predictors * kHalfSamples;
     if (book + 8 + 2 * coefficients > bank_data.size())
     {
         throw FormatError("a sample's book runs past the end of the bank");
     }
+
     std::vector<int16_t> codebook(coefficients);
     for (std::size_t i = 0; i < codebook.size(); i++)
     {
@@ -547,6 +556,7 @@ const Sample* SoundData::ReadSample(Bank& bank, std::span<const uint8_t> bank_da
     {
         throw FormatError("a sample's loop runs past the end of the bank");
     }
+
     const uint32_t loop_start = Word(bank_data, loop, "a sample's loop");
     const uint32_t loop_end = Word(bank_data, uint64_t{loop} + 4, "a sample's loop");
     const uint32_t loop_count = Word(bank_data, uint64_t{loop} + 8, "a sample's loop");
@@ -565,10 +575,10 @@ const Sample* SoundData::ReadSample(Bank& bank, std::span<const uint8_t> bank_da
             throw FormatError("a sample's loop runs past the end of the bank");
         }
 
-        // The state holds the samples of the frame that holds the loop's start. A repeat takes them from the state, and
-        // decodes from the next frame with the state's last two samples as the decoder's history. If that gives other
-        // samples than the first pass, a loop without end plays once unrolled. Each later repeat then gives the same
-        // samples as the first. A loop with a count keeps the samples of the first pass.
+        // The state contains the samples of the frame that contains the loop's start. A repeat takes them from the
+        // state, and decodes from the next frame with the state's last two samples as the decoder's history. If that
+        // gives other samples than the first pass, a loop without end plays once unrolled. Each later repeat then gives
+        // the same samples as the first. A loop with a count keeps the samples of the first pass.
         const std::size_t next_frame = loop_start / kFrameSamples + 1;
         std::vector<int16_t> state(kFrameSamples);
         for (std::size_t i = 0; i < kFrameSamples; i++)

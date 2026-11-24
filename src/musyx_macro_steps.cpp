@@ -99,6 +99,7 @@ void MacroRun::SetControllerEnvelope(const MacroStep& s)
             v.controllers.push_back(kept);
         }
     }
+
     std::ranges::sort(v.controllers);
     if (controls_.empty())
     {
@@ -238,7 +239,7 @@ void MacroRun::Split(const MacroStep& s, uint8_t controller, uint8_t value, int 
         run_.voice.splits.push_back(split);
     }
 
-    // A macro that the pool lacks leaves the voice where it is.
+    // A macro missing from the pool leaves the voice where it is.
     if (!controls_.empty() && read >= value)
     {
         Jump(s.Half(2), s.Half(4));
@@ -300,6 +301,7 @@ MacroRun::Next MacroRun::Pass(const Wait& wait)
     {
         return Next::kStep;
     }
+
     CheckWheel();
     SettlePart();
 

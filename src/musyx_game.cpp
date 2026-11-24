@@ -44,10 +44,10 @@ using ntdlib::musyx::MsmSong;
 
 // What the code of a game with Hudson's sound manager says about its music: the sound manager's file, and the sound
 // test that lists the songs. `sound_test_entries` entries start at offset `sound_test` of the code module's file
-// `module`. The message file `messages` holds the songs' names. Every kind of rules gives the address of MusyX's volume
-// table in main.dol and the game's master volume for music. The module's list of `voice_entries` voices at `voices`
-// names some of the effects (ReadSoundTestEffects). With `japanese_messages`, the messages take the game's Japanese
-// font.
+// `module`. The message file `messages` contains the songs' names. Every kind of rules gives the address of MusyX's
+// volume table in main.dol and the game's master volume for music. The module's list of `voice_entries` voices at
+// `voices` names some of the effects (ReadSoundTestEffects). With `japanese_messages`, the messages take the game's
+// Japanese font.
 struct SoundManagerRules
 {
     std::string_view dol_sha1;
@@ -65,7 +65,7 @@ struct SoundManagerRules
 
 // What the code of a game with Intelligent Systems' sound layer says about its music. `project` names the four files of
 // its MusyX project without their extensions: the project (.proj), the pool (.pool), the sample directory (.sdir) and
-// the samples (.samp). The file `songs` holds `song_count` songs back to back. The table at `song_sizes` gives their
+// the samples (.samp). The file `songs` contains `song_count` songs back to back. The table at `song_sizes` gives their
 // sizes. The sound room's table at `sound_room` lists `sound_room_entries` of the songs (ReadSoundRoom). The tables of
 // `effect_song_entries` songs at `effect_songs` (ReadEffectSongs) and of `effect_entries` effects at `effects`
 // (ReadPlayedEffects) list the sounds that the game plays as effects. The master volume applies to both kinds.
@@ -86,15 +86,15 @@ struct SoundRoomRules
     uint32_t effect_entries = 0;
 };
 
-// What the code of a game by Camelot says about its effects. Each group of effects lies in four files. So does the
-// song group (Rules). The game pushes the group whose first file is `startup_files` at start-up. The table at
-// `ranges` gives the IDs of that group's effects that the game starts: pairs of words, the first ID and the last, up
-// to a word of 0xFFFFFFFF. The table at `voice_banks` holds `voice_bank_count` entries of `voice_bank_size` bytes. An
-// entry starts with the bank's name in `voice_bank_name_size` bytes, or with the name's address for a size of 0. The
-// number of the bank's first file, the count of its effects, the first effect's ID and the group's ID follow, a word
-// each. The table at `narrations` holds `narration_count` entries of 8 bytes: the number of the narration's first file
-// in a word, then the group's ID and the effect's ID in a half each. A file of 0xFFFFFFFF marks a narration of the
-// first group of effects in the files from `narration_files`. The table at `courts` holds `court_count` entries of 8
+// What the code of a game by Camelot says about its effects. Each group of effects is in four files. So is the song
+// group (Rules). The game pushes the group whose first file is `startup_files` at start-up. The table at `ranges` gives
+// the IDs of that group's effects that the game starts: pairs of words, the first ID and the last, up to a word of
+// 0xFFFFFFFF. The table at `voice_banks` contains `voice_bank_count` entries of `voice_bank_size` bytes. An entry
+// starts with the bank's name in `voice_bank_name_size` bytes, or with the name's address for a size of 0. The number
+// of the bank's first file, the count of its effects, the first effect's ID and the group's ID follow, a word each. The
+// table at `narrations` contains `narration_count` entries of 8 bytes: the number of the narration's first file in a
+// word, then the group's ID and the effect's ID in a half each. A file of 0xFFFFFFFF marks a narration of the first
+// group of effects in the files from `narration_files`. The table at `courts` contains `court_count` entries of 8
 // bytes: the number of the first file of a court's group in a word, then the group's ID in the low half of a word. The
 // effects of a court are those of its group. `other_group_count` groups that no table lists follow each other on the
 // disc from the file numbered `other_groups`. Their effects are those of each project's first group of effects. The
@@ -122,7 +122,11 @@ struct CamelotEffectRules
 namespace
 {
 
+using ntdlib::musyx::CamelotPath;
+using ntdlib::musyx::CamelotSongList;
 using ntdlib::musyx::EffectName;
+using ntdlib::musyx::PlayedEffect;
+using ntdlib::musyx::SoundRoomSong;
 using xsflib::FormatError;
 
 // What a game's code says about its music: the number of its song group's first file, and its lists of songs. The
@@ -132,7 +136,7 @@ struct Rules
 {
     std::string_view dol_sha1;
     uint32_t group_file = 0;
-    std::array<SongList, 2> lists;
+    std::array<CamelotSongList, 2> lists;
     uint32_t volume_table = 0;
     uint8_t master_volume = 127;
     CamelotEffectRules effects;
@@ -145,27 +149,27 @@ struct Rules
 // entries: the address of the song's name, then the three words. The sound set-up (0x80014088) calls 0x8001307c with a
 // master volume of 127 (at 0x800140ac). That function passes it to sndMasterVolume (0x8007394c) for the music.
 //
-// Groups 0 to 88 hold Mario Golf's 737 effects. The bank loader (0x80012a9c) pushes group 87 from B/T/M with the song
-// group. fx_play (0x80011b88) starts its effects. The table of voice banks at 0x80137308 holds 37 entries of 0x14
-// bytes. JVoiceLoad1 (0x80012844) loads a bank, and voiceFXcall (0x800120a8) starts its effects. The narration player
-// (0x80013be8) loads the group of an entry of the table at 0x801375ec and starts the entry's effect. Each one calls
-// sndFXStartEx with a pan of 0xff and studio 0. The narration player and some other calls give a volume of 0xff. MusyX
-// then takes the row's volume, and dolphinsf2 starts every effect at it. The sound set-up (0x80012ecc) gives every
-// volume group a volume of 127 through sndVolume (0x800738ec). It then gives the music's groups 86. The master volume
-// for effects stays at 127.
+// Groups 0 to 88 contain Mario Golf's 737 effects. The bank loader (0x80012a9c) pushes group 87 from B/T/M with the
+// song group. fx_play (0x80011b88) starts its effects. The table of voice banks at 0x80137308 contains 37 entries of
+// 0x14 bytes. JVoiceLoad1 (0x80012844) loads a bank, and voiceFXcall (0x800120a8) starts its effects. The narration
+// player (0x80013be8) loads the group of an entry of the table at 0x801375ec and starts the entry's effect. Each one
+// calls sndFXStartEx with a pan of 0xff and studio 0. The narration player and some other calls give a volume of 0xff.
+// MusyX then takes the row's volume, and dolphinsf2 starts every effect at it. The sound set-up (0x80012ecc) gives
+// every volume group a volume of 127 through sndVolume (0x800738ec). It then gives the music's groups 86. The master
+// volume for effects stays at 127.
 //
 // Mario Power Tennis (USA). Its 66 groups are in files of the same kind. The song group is 0x40. The code lists 111
 // songs in entries of 0x24 bytes: the name in the first 0x18 bytes, then the three words. The sound set-up calls
 // 0x8001a8d4 with a volume of 127 (at 0x80019f6c). That function multiplies the volume by 0.8 and truncates the
 // product. It passes 101 to sndMasterVolume (0x800a4ee4) for the music and for the effects.
 //
-// Its 980 effects lie in the other 65 groups. The bank loader (0x8001a214) pushes group 63 from A/O/F with the song
-// group. The table of voice banks at 0x80215e98 holds 18 entries of 0x20 bytes, the bank's name in the first 16.
-// JVoiceLoad1 (0x8001b77c) and voiceFXcall (0x8001ba3c) load and start them. NarrationInit (0x8001a31c) pushes group
-// 65 from A/O/N. Each of the 106 entries of the table of narrations at 0x80216298 names an effect of that group. The
-// court loader (0x8001a670) loads the group of an entry of the table at 0x80217828. The 37 groups from B/X/J to C/D/A
-// hold 56 more effects. No table in main.dol lists them. Tables in the code and the data that the files A/O/E and
-// C/I/L unpack to name them. The game starts every effect with studio 1 and a pan of 0xff. It then sets the effect's
+// Its 980 effects are in the other 65 groups. The bank loader (0x8001a214) pushes group 63 from A/O/F with the song
+// group. The table of voice banks at 0x80215e98 contains 18 entries of 0x20 bytes, the bank's name in the first 16.
+// JVoiceLoad1 (0x8001b77c) and voiceFXcall (0x8001ba3c) load and start them. NarrationInit (0x8001a31c) pushes group 65
+// from A/O/N. Each of the 106 entries of the table of narrations at 0x80216298 names an effect of that group. The court
+// loader (0x8001a670) loads the group of an entry of the table at 0x80217828. The 37 groups from B/X/J to C/D/A contain
+// 56 more effects. No table in main.dol lists them. Tables in the code and the data that the files A/O/E and C/I/L
+// unpack to name them. The game starts every effect with studio 1 and a pan of 0xff. It then sets the effect's
 // controller 0x5b to 0x40 through sndFXCtrl (0x800a4550). The sound set-up (0x80019d94) gives the volume groups the
 // same volumes as Mario Golf's.
 constexpr std::array<Rules, 2> kGames{{
@@ -205,29 +209,29 @@ constexpr std::array<Rules, 2> kGames{{
 
 // The games with Hudson's sound manager that dolphinsf2 converts.
 //
-// Mario Party 4 (USA, disc version 1). The sound manager's file holds 127 groups and 78 songs. The options module's
-// sound test lists 76 of the songs on 14 pages of 10 entries. Bank 47 of the board messages holds their names. The
+// Mario Party 4 (USA, disc version 1). The sound manager's file contains 127 groups and 78 songs. The options module's
+// sound test lists 76 of the songs on 14 pages of 10 entries. Bank 47 of the board messages contains their names. The
 // sound manager calls sndMasterVolume (0x800fa09c) only with 0, to silence the music at the game's resets (0x8005adb8
 // and 0x8005b0d8). dolphinsf2 plays the music at a master volume of 127.
 //
-// The sound manager's table holds 2,308 entries of effects. 2,072 of them hold an effect. The options module's list of
-// voices names 93 of them in 123 entries. The sound manager's set-up (0x801176ac) calls sndVolume(127, 0, 0xff).
-// Every volume group plays at full volume. The game plays an effect through msmSePlay (0x80119a94). That function
-// starts the effect through sndFXStartParaInfo with a volume and a pan of 0xff and studio 0. It passes the settings of
-// the effect's entry as controllers (MsmEffect). It then sets the effect's surround pan.
+// The sound manager's table contains 2,308 entries of effects. 2,072 of them contain an effect. The options module's
+// list of voices names 93 of them in 123 entries. The sound manager's set-up (0x801176ac) calls sndVolume(127, 0,
+// 0xff). Every volume group plays at full volume. The game plays an effect through msmSePlay (0x80119a94). That
+// function starts the effect through sndFXStartParaInfo with a volume and a pan of 0xff and studio 0. It passes the
+// settings of the effect's entry as controllers (MsmEffect). It then sets the effect's surround pan.
 //
 // Mario Party 4 (USA, disc version 0). Its main.dol differs from disc version 1's only in three of the debugger's
 // functions. The options module, the messages and the sound manager's file are disc version 1's byte for byte.
 //
-// Mario Party 4 (Europe, disc versions 0 and 2). Both discs hold the same main.dol. Its sound manager and MusyX are the
-// American code at other addresses. msmSePlay is at 0x801198c4, and the volume table at 0x8015cec0. The options module
-// holds the American sound test and list of voices 0x68 bytes lower. The English messages give the American names,
-// apart from five. The sound manager's file is the American one byte for byte.
+// Mario Party 4 (Europe, disc versions 0 and 2). Both discs contain the same main.dol. Its sound manager and MusyX are
+// the American code at other addresses. msmSePlay is at 0x801198c4, and the volume table at 0x8015cec0. The options
+// module contains the American sound test and list of voices 0x68 bytes lower. The English messages give the American
+// names, apart from five. The sound manager's file is the American one byte for byte.
 //
 // Mario Party 4 (Japan). Its sound manager and MusyX are the American code at other addresses. msmSePlay is at
-// 0x80119684, and the volume table at 0x8013f7c0. The options module holds the American sound test and list of voices
-// at the American offsets. The messages name the sounds in the game's Japanese font. The sound manager's file leaves
-// out two macros and two samples of group 0x5A. That group holds se-2066 to se-2071.
+// 0x80119684, and the volume table at 0x8013f7c0. The options module contains the American sound test and list of
+// voices at the American offsets. The messages name the sounds in the game's Japanese font. The sound manager's file
+// leaves out two macros and two samples of group 0x5A. That group contains se-2066 to se-2071.
 constexpr std::array<SoundManagerRules, 4> kSoundManagerGames{{
     {"64b42eac733a57a53d2ce25e7e47f54fc1e31915", "sound/mpgcsnd.msm", "dll/option.rel", 0xac58, 140, "mess/board_e.dat",
      0x8013fb20, 127, 0xb518, 123},
@@ -241,8 +245,8 @@ constexpr std::array<SoundManagerRules, 4> kSoundManagerGames{{
 
 // The games with Intelligent Systems' sound layer that dolphinsf2 converts.
 //
-// WarioWare, Inc.: Mega Party Game$! (USA). Its MusyX project holds 12 groups: 9 of songs and 3 of effects. The game
-// loads all of them at once. sound_data.bin holds the game's 1,606 songs. The songs of the sound effects are among
+// WarioWare, Inc.: Mega Party Game$! (USA). Its MusyX project contains 12 groups: 9 of songs and 3 of effects. The game
+// loads all of them at once. sound_data.bin contains the game's 1,606 songs. The songs of the sound effects are among
 // them. The sound room lists the 231 songs of the game's music. The sound set-up calls sndVolume (0x800cdce8) with 127,
 // 0 and 0xff (at 0x80033294). Every volume group plays at full volume. It calls sndMasterVolume (0x800cdd48) with 100
 // for the music and the effects (at 0x800332a8).
@@ -255,21 +259,6 @@ constexpr std::array<SoundRoomRules, 1> kSoundRoomGames{{
     {"422e40ca1283a91e9f3c6a8e5da6ae82639b1e02", "gcwario_sound", "sound_data.bin", 0x80264a94, 1606, 0x801b2c38, 231,
      0x8026f6f8, 100, 0x801b4918, 933, 0x801b6640, 145},
 }};
-
-// The longest name that a list's entry gives.
-constexpr std::size_t kLongestName = 64;
-
-// The size of an entry of a sound room's table, and the offset of the entry's English name.
-constexpr uint32_t kSoundRoomEntrySize = 0x20;
-constexpr uint32_t kEnglishName = 0xc;
-
-// The bytes with which a sound room's names mark each space.
-constexpr std::string_view kSoundRoomSpace = "\x94\xbc";
-
-// The sizes of an entry of the table of songs that play as effects, and of the table of effects that a play function
-// starts.
-constexpr uint32_t kEffectSongEntrySize = 8;
-constexpr uint32_t kPlayedEffectSize = 6;
 
 // The rules in `games` of the game whose main.dol has the SHA-1 `sha1`. Return nullptr for a game that `games` leaves
 // out.
@@ -342,23 +331,23 @@ std::shared_ptr<const SongGroup> ReadSoundManagerGroup(const MsmFile& file, uint
     std::shared_ptr<SongGroup> group = MakeSongGroup(parts.project, parts.pool, parts.directory,
                                                      {parts.samples.begin(), parts.samples.end()}, type, id, no_group);
 
-    // The samples that the group's macros start and its directory lacks.
+    // The samples that the group's macros start and that are missing from its directory.
     std::set<uint16_t> missing = StartedSamples(group->pool);
     for (const ntdlib::musyx::SampleInfo& sample : group->samples)
     {
         missing.erase(sample.id);
     }
 
-    // The samples of each base group that holds one of them go after the group's samples. The base group's directory
-    // entries that the group lacks go into the group's directory.
+    // The samples of each base group that contains one of them go after the group's samples. The base group's directory
+    // entries missing from the group go into the group's directory.
     for (const MsmGroup& base : file.BaseGroups())
     {
         const std::vector<ntdlib::musyx::SampleInfo> samples = ntdlib::musyx::ReadSampleDirectory(base.directory);
-        const auto lacking = [&missing](const ntdlib::musyx::SampleInfo& s)
+        const auto is_missing = [&missing](const ntdlib::musyx::SampleInfo& s)
         {
             return missing.contains(s.id);
         };
-        if (std::none_of(samples.begin(), samples.end(), lacking))
+        if (std::none_of(samples.begin(), samples.end(), is_missing))
         {
             continue;
         }
@@ -463,97 +452,22 @@ private:
 
 } // namespace
 
-std::string PathOf(uint32_t number)
+std::vector<GameSong> ReadSongList(const ntdlib::Dol& dol, const CamelotSongList& list)
 {
-    const uint32_t n = number >> 1;
-    std::string path;
-    path += static_cast<char>('A' + n / (26 * 26) % 26);
-    path += '/';
-    path += static_cast<char>('A' + n / 26 % 26);
-    path += '/';
-    path += static_cast<char>('A' + n % 26);
-
-    return path;
-}
-
-std::vector<GameSong> ReadSongList(const ntdlib::Dol& dol, const SongList& list)
-{
-    constexpr char kList[] = "the song list";
     std::vector<GameSong> songs;
-    for (uint32_t i = 0; i < list.count; i++)
+    for (ntdlib::musyx::CamelotSong& listed : ntdlib::musyx::ReadCamelotSongs(dol, list))
     {
-        const uint32_t entry = list.address + i * list.entry_size;
-        const uint32_t words = entry + list.entry_size - 12;
-        GameSong song;
-        song.name = list.name_inline ? dol.Text(entry, words - entry, kList)
-                                     : dol.Text(dol.Word(entry, kList), kLongestName, "a song's name");
-        if (song.name.ends_with(".sng"))
+        if (listed.name.ends_with(".sng"))
         {
-            song.name.resize(song.name.size() - 4);
+            listed.name.resize(listed.name.size() - 4);
         }
-        song.path = PathOf(dol.Word(words, kList));
-        song.id = static_cast<uint16_t>(dol.Word(words + 4, kList));
-        song.volume = static_cast<uint8_t>(dol.Word(words + 8, kList) >> 24);
-        songs.push_back(std::move(song));
+        songs.push_back({.name = std::move(listed.name),
+                         .path = CamelotPath(listed.file_number),
+                         .id = listed.id,
+                         .volume = listed.volume});
     }
 
     return songs;
-}
-
-std::vector<SoundRoomSong> ReadSoundRoom(const ntdlib::Dol& dol, uint32_t address, uint32_t count)
-{
-    constexpr char kRoom[] = "the sound room";
-    std::vector<SoundRoomSong> songs;
-    for (uint32_t i = 0; i < count; i++)
-    {
-        const uint32_t entry = address + i * kSoundRoomEntrySize;
-        const uint32_t id = dol.Word(entry, kRoom);
-        SoundRoomSong song;
-        song.number = static_cast<uint16_t>(id);
-        song.group_id = static_cast<uint16_t>(id >> 24);
-        song.volume = dol.Bytes(entry + 4, 1, kRoom)[0];
-        song.name = dol.Text(dol.Word(entry + kEnglishName, kRoom), kLongestName, "a song's name");
-        for (std::size_t at = song.name.find(kSoundRoomSpace); at != std::string::npos;
-             at = song.name.find(kSoundRoomSpace, at + 1))
-        {
-            song.name.replace(at, kSoundRoomSpace.size(), " ");
-        }
-        songs.push_back(std::move(song));
-    }
-
-    return songs;
-}
-
-std::vector<SoundRoomSong> ReadEffectSongs(const ntdlib::Dol& dol, uint32_t address, uint32_t count)
-{
-    std::vector<SoundRoomSong> songs;
-    for (uint32_t i = 0; i < count; i++)
-    {
-        const std::span<const uint8_t> entry = dol.Bytes(address + i * kEffectSongEntrySize, kEffectSongEntrySize,
-                                                         "the table of songs that play as effects");
-        SoundRoomSong song;
-        song.number = xsflib::LoadBe16(entry.data() + 2);
-        song.group_id = entry[0];
-        song.volume = entry[4];
-        song.name = EffectName("se", song.number);
-        songs.push_back(std::move(song));
-    }
-
-    return songs;
-}
-
-std::vector<PlayedEffect> ReadPlayedEffects(const ntdlib::Dol& dol, uint32_t address, uint32_t count)
-{
-    std::vector<PlayedEffect> effects;
-    for (uint32_t i = 0; i < count; i++)
-    {
-        const std::span<const uint8_t> entry =
-            dol.Bytes(address + i * kPlayedEffectSize, kPlayedEffectSize, "the table of effects");
-        effects.push_back(
-            {.number = xsflib::LoadBe16(entry.data()), .volume = entry[2], .reverb = entry[4], .chorus = entry[5]});
-    }
-
-    return effects;
 }
 
 std::span<const uint8_t> SongIn(const ntdlib::Dol& dol, uint32_t sizes, uint32_t count, std::span<const uint8_t> songs,
@@ -681,7 +595,7 @@ std::optional<Game> Game::Open(std::shared_ptr<ntdlib::disc::GameFiles> disc)
 
     // The code's lists of songs.
     const ntdlib::Dol dol = ntdlib::Dol::ParseMain(game.disc_->dol);
-    for (const SongList& list : rules->lists)
+    for (const CamelotSongList& list : rules->lists)
     {
         std::vector<GameSong> songs = ReadSongList(dol, list);
         for (GameSong& song : songs)
@@ -760,7 +674,7 @@ void Game::ReadSoundManager(const SoundManagerRules& rules)
     }
 
     // The effects in the order of their table, each named after its number and its name in the list of voices. Each
-    // effects group is read once. MusyX starts no effect that its group lacks.
+    // effects group is read once. MusyX starts no effect missing from its group.
     const std::map<uint32_t, std::string> names = ntdlib::musyx::ReadSoundTestEffects(
         module, rules.module, rules.voices, rules.voice_entries, messages, rules.messages, rules.japanese_messages);
     std::map<uint16_t, std::size_t> effect_groups;
@@ -838,14 +752,14 @@ void Game::ReadSoundRoomGame(const SoundRoomRules& rules)
         song_data_.emplace_back(song.begin(), song.end());
         numbers.insert(listed.number);
     };
-    for (SoundRoomSong& listed : ReadSoundRoom(dol, rules.sound_room, rules.sound_room_entries))
+    for (SoundRoomSong& listed : ntdlib::musyx::ReadSoundRoom(dol, rules.sound_room, rules.sound_room_entries))
     {
         add(listed);
     }
 
     // The songs that the play function plays as effects, unless the sound room lists them. The function starts an
     // effect for a number from the count of songs on.
-    for (SoundRoomSong& listed : ReadEffectSongs(dol, rules.effect_songs, rules.effect_song_entries))
+    for (SoundRoomSong& listed : ntdlib::musyx::ReadEffectSongs(dol, rules.effect_songs, rules.effect_song_entries))
     {
         if (listed.number < rules.song_count && !numbers.contains(listed.number))
         {
@@ -854,8 +768,8 @@ void Game::ReadSoundRoomGame(const SoundRoomRules& rules)
     }
 
     // The play function's effects: the effect whose ID is the number less the count of songs. Every group of the
-    // project holds the pool and the samples. The effects play from the first.
-    for (const PlayedEffect& listed : ReadPlayedEffects(dol, rules.effects, rules.effect_entries))
+    // project contains the pool and the samples. The effects play from the first.
+    for (const PlayedEffect& listed : ntdlib::musyx::ReadPlayedEffects(dol, rules.effects, rules.effect_entries))
     {
         if (listed.number < rules.song_count || !numbers.insert(listed.number).second)
         {
@@ -896,37 +810,33 @@ void Game::ReadCatalogueGame(const CatalogueRules& rules)
 std::shared_ptr<SongGroup> Game::ReadGroup(uint32_t first_file, ntdlib::musyx::GroupType type,
                                            std::optional<uint16_t> id) const
 {
-    // The group's four files. A file's number goes up by 2 from one file to the next (PathOf).
-    const std::vector<uint8_t> pool = ReadFile(PathOf(first_file));
-    const std::vector<uint8_t> project = ReadFile(PathOf(first_file + 2));
-    const std::vector<uint8_t> directory = ReadFile(PathOf(first_file + 4));
-    std::vector<uint8_t> samples = ReadFile(PathOf(first_file + 6));
+    // The group's four files. A file's number goes up by 2 from one file to the next (CamelotPath).
+    const std::vector<uint8_t> pool = ReadFile(CamelotPath(first_file));
+    const std::vector<uint8_t> project = ReadFile(CamelotPath(first_file + 2));
+    const std::vector<uint8_t> directory = ReadFile(CamelotPath(first_file + 4));
+    std::vector<uint8_t> samples = ReadFile(CamelotPath(first_file + 6));
 
     // The project's group, with the pool and the samples.
     const auto no_group = [first_file, id](const char* kind)
     {
-        return PathOf(first_file + 2) + " has no " + kind + " group" + (id ? " " + std::to_string(*id) : std::string());
+        return CamelotPath(first_file + 2) + " has no " + kind + " group" +
+               (id ? " " + std::to_string(*id) : std::string());
     };
     return MakeSongGroup(project, pool, directory, std::move(samples), type, id, no_group);
 }
 
 void Game::ReadCamelotEffects(const CamelotEffectRules& rules)
 {
-    constexpr uint32_t kEndOfRanges = 0xffffffff, kNoFiles = 0xffffffff, kEntry = 8, kGroupStep = 8;
-    constexpr uint32_t kMostRanges = 256;
-    constexpr char kRanges[] = "the table of effects' ranges", kBanks[] = "the table of voice banks",
-                   kNarrations[] = "the table of narrations", kCourts[] = "the table of courts";
+    constexpr uint32_t kGroupStep = 8;
+
+    // The tables. Each one is checked whole before any group is read.
     const ntdlib::Dol dol = ntdlib::Dol::ParseMain(disc_->dol);
-    const auto table = [&dol](uint32_t address, uint32_t count, uint32_t size, const char* what)
-    {
-        if (address != 0)
-        {
-            dol.Bytes(address, std::size_t{count} * size, what);
-        }
-    };
-    table(rules.voice_banks, rules.voice_bank_count, rules.voice_bank_size, kBanks);
-    table(rules.narrations, rules.narration_count, kEntry, kNarrations);
-    table(rules.courts, rules.court_count, kEntry, kCourts);
+    const std::vector<ntdlib::musyx::VoiceBank> banks = ntdlib::musyx::ReadVoiceBanks(
+        dol, {rules.voice_banks, rules.voice_bank_count, rules.voice_bank_size, rules.voice_bank_name_size});
+    const std::vector<ntdlib::musyx::Narration> narrations =
+        ntdlib::musyx::ReadNarrations(dol, rules.narrations, rules.narration_count);
+    const std::vector<ntdlib::musyx::CourtBank> courts =
+        ntdlib::musyx::ReadCourtBanks(dol, rules.courts, rules.court_count);
 
     // The effects of the tables below, in their order.
     const auto read_group = [this](uint32_t first_file, std::optional<uint16_t> id)
@@ -937,57 +847,38 @@ void Game::ReadCamelotEffects(const CamelotEffectRules& rules)
 
     // The group that the game pushes at start-up, and the ranges of its effects.
     const std::size_t startup = effects.StartUp(rules.startup_files);
-    for (uint32_t r = 0; r < kMostRanges; r++)
+    for (const ntdlib::musyx::CamelotRange& range : ntdlib::musyx::ReadCamelotRanges(dol, rules.ranges))
     {
-        const uint32_t first = dol.Word(rules.ranges + r * kEntry, kRanges);
-        if (first == kEndOfRanges)
-        {
-            break;
-        }
-
-        const uint32_t last = dol.Word(rules.ranges + r * kEntry + 4, kRanges);
-        for (uint32_t id = first; id <= last && id <= 0xffff; id++)
+        for (uint32_t id = range.first; id <= range.last && id <= 0xffff; id++)
         {
             effects.Add(startup, id, "se");
         }
     }
 
     // The voice banks, named by the table.
-    const uint32_t name_size = rules.voice_bank_name_size != 0 ? rules.voice_bank_name_size : 4;
-    for (uint32_t b = 0; b < rules.voice_bank_count; b++)
+    for (const ntdlib::musyx::VoiceBank& bank : banks)
     {
-        const uint32_t entry = rules.voice_banks + b * rules.voice_bank_size;
-        const std::string name = rules.voice_bank_name_size != 0
-                                     ? dol.Text(entry, rules.voice_bank_name_size, kBanks)
-                                     : dol.Text(dol.Word(entry, kBanks), kLongestName, "a voice bank's name");
-        const uint32_t count = dol.Word(entry + name_size + 4, kBanks);
-        const uint32_t first = dol.Word(entry + name_size + 8, kBanks);
-        const auto id = static_cast<uint16_t>(dol.Word(entry + name_size + 12, kBanks));
-        const std::size_t group = effects.GroupAt(dol.Word(entry + name_size, kBanks), id);
-        for (uint32_t e = first; e < first + count && e <= 0xffff; e++)
+        const std::size_t group = effects.GroupAt(bank.first_file, bank.group_id);
+        for (uint32_t e = bank.first_effect; e < bank.first_effect + bank.effect_count && e <= 0xffff; e++)
         {
-            effects.Add(group, e, name);
+            effects.Add(group, e, bank.name);
         }
     }
 
     // The narrations, the courts' groups and the groups that no table lists.
-    for (uint32_t n = 0; n < rules.narration_count; n++)
+    for (const ntdlib::musyx::Narration& narration : narrations)
     {
-        const uint32_t entry = rules.narrations + n * kEntry;
-        const uint32_t file = dol.Word(entry, kNarrations);
-        const uint32_t ids = dol.Word(entry + 4, kNarrations);
-        const std::size_t group = file != kNoFiles ? effects.GroupAt(file, static_cast<uint16_t>(ids >> 16))
-                                                   : effects.GroupAt(rules.narration_files, std::nullopt);
-        effects.Add(group, ids & 0xffff, "narration");
+        const std::size_t group = narration.first_file != ntdlib::musyx::kCamelotNoFiles
+                                      ? effects.GroupAt(narration.first_file, narration.group_id)
+                                      : effects.GroupAt(rules.narration_files, std::nullopt);
+        effects.Add(group, narration.effect_id, "narration");
     }
 
-    for (uint32_t c = 0; c < rules.court_count; c++)
+    for (const ntdlib::musyx::CourtBank& court : courts)
     {
-        const uint32_t entry = rules.courts + c * kEntry;
-        const uint32_t file = dol.Word(entry, kCourts);
-        if (file != kNoFiles)
+        if (court.first_file != ntdlib::musyx::kCamelotNoFiles)
         {
-            effects.AddAll(effects.GroupAt(file, static_cast<uint16_t>(dol.Word(entry + 4, kCourts))), "court");
+            effects.AddAll(effects.GroupAt(court.first_file, court.group_id), "court");
         }
     }
 

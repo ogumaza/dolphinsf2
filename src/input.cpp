@@ -76,7 +76,7 @@ Input Input::Open(const std::filesystem::path& path)
     f.read(reinterpret_cast<char*>(header.data()), static_cast<std::streamsize>(header.size()));
     header.resize(static_cast<std::size_t>(f.gcount()));
 
-    // A disc image: a GameCube or Wii disc, or a container that holds one. The disc reader reads a GameCube image,
+    // A disc image: a GameCube or Wii disc, or a container of one. The disc reader reads a GameCube image,
     // plain or in a container, and says why it refuses the others.
     if (!ntdlib::disc::ContainerFormat(header).empty() || ntdlib::disc::DiscConsole(header))
     {
@@ -183,15 +183,18 @@ Input Input::OpenDisc(const std::filesystem::path& path)
         input.jaudio_ = std::make_unique<GameInput>(std::move(*game));
         return input;
     }
+
     if (std::optional<musyx::Game> game = musyx::Game::Open(disc))
     {
         input.musyx_ = std::make_unique<musyx::GameInput>(std::move(*game));
         return input;
     }
+
     if ((input.n64_ = n64::GameInput::Open(disc)))
     {
         return input;
     }
+
     if ((input.red_ = red::GameInput::Open(disc)))
     {
         return input;

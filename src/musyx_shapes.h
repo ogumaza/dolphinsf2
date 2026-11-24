@@ -38,7 +38,7 @@ VolumeShape VolumeOf(const Instruments& instruments, const MacroVoice& voice, do
 // A pitch envelope in SoundFont's and SFZ's terms, in real milliseconds. MusyX's decay and release fall linearly in
 // decibels of their range. SoundFont's fall in a line, fitted to reach half the range at the same time as MusyX's.
 // SFZ's decays and releases fall by a factor of e^-8 in their time. MusyX's decays and releases fall by the same factor
-// in kSfzFallDb / kDlsFallDb of their time.
+// in seqlib's sfz::kEnvelopeFallDb / kDlsFallDb of their time.
 struct PitchShape
 {
     double attack_ms = 0.0;
@@ -76,8 +76,8 @@ double WheelLfoCents(const MacroVoice& voice, const WheelLfo& lfo);
 // a tremolo may hold. The LFO then plays only if it runs at the tremolo's rate from the note's start.
 std::optional<WheelLfo> PlayedWheelLfo(const MacroVoice& voice);
 
-// The timecents of a fall of a VolumeShape at `db_per_ms`. The fall covers kSoundFontFallDb in that time. A fall at
-// kAtOnce takes the shortest time of SoundFont.
+// The timecents of a fall of a VolumeShape at `db_per_ms`. The fall covers seqlib's sf2::kEnvelopeFallDb in that time.
+// A fall at kAtOnce takes the shortest time of SoundFont.
 int ShapeFallTimecents(double db_per_ms);
 
 // The value of a keynumTo generator for a time that changes by `per_key` timecents a key. A positive value shortens

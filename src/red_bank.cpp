@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "ntdlib/wave/adpcm.h"
 #include "ntdlib/wave/decode.h"
 #include "xsflib/bytes.h"
 
@@ -21,25 +22,19 @@ namespace
 constexpr std::size_t kBankTable = 0x20;
 constexpr std::size_t kRegionSize = 0x60;
 
-// A region's flags: the next record holds the right side of a stereo wave, the instrument's last region, and that the
+// A region's flags: the next record is the right side of a stereo wave, the instrument's last region, and that the
 // instrument's first region starts a list of splits. Only the first region's flags decide that (_WaveSplitSelect).
 constexpr uint32_t kRegionStereo = 0x1;
 constexpr uint32_t kRegionLast = 0x200;
 constexpr uint32_t kRegionSplits = 0x30000;
 
-// A region's fixed pan: its byte at 0x1b holds this flag and the pan.
+// A region's fixed pan: its byte at 0x1b contains this flag and the pan.
 constexpr uint8_t kFixedPan = 0x80;
 
 // Whether regions `a` and `b` decode a wave that starts at the same byte the same way.
 bool SameDecode(const Region& a, const Region& b)
 {
     return a.end == b.end && a.loop == b.loop && a.coefs == b.coefs && a.yn1 == b.yn1 && a.yn2 == b.yn2;
-}
-
-// The sample of a nibble in DSP-ADPCM: a frame holds 16 nibbles, and its first 2 hold the frame's header.
-uint32_t SampleOfNibble(uint32_t nibble)
-{
-    return nibble / 16 * 14 + std::max(nibble % 16, 2u) - 2;
 }
 
 } // namespace
@@ -129,6 +124,7 @@ void Bank::Read()
     {
         throw FormatError("a bank's samples or its table of instruments run past its end");
     }
+
     samples_ = data_.size() - samples;
 
     instruments_.resize(count);
@@ -230,12 +226,13 @@ std::optional<Pcm> Bank::Decode(const Region& region) const
     ntdlib::wave::EncodedWave wave;
     wave.encoding = ntdlib::wave::Encoding::kDspAdpcm;
     wave.sum = ntdlib::wave::DspAdpcmSum::kAccelerator;
-    wave.loop_end = SampleOfNibble(end) + 1;
-    if (region.loop >= 0 && SampleOfNibble(static_cast<uint32_t>(region.loop)) < wave.loop_end)
+    wave.loop_end = ntdlib::wave::DspAdpcmSampleAt(end) + 1;
+    if (region.loop >= 0 && ntdlib::wave::DspAdpcmSampleAt(static_cast<uint32_t>(region.loop)) < wave.loop_end)
     {
         wave.loop = true;
-        wave.loop_start = SampleOfNibble(static_cast<uint32_t>(region.loop));
+        wave.loop_start = ntdlib::wave::DspAdpcmSampleAt(static_cast<uint32_t>(region.loop));
     }
+
     wave.channels.push_back(channel);
 
     ntdlib::wave::Pcm decoded = ntdlib::wave::DecodeWave(wave);

@@ -30,6 +30,7 @@
 #include "ntdlib/musyx/pool.h"
 #include "ntdlib/musyx/project.h"
 #include "ntdlib/musyx/samples.h"
+#include "seqlib/sf2/units.h"
 #include "xsflib/binary.h"
 
 #include "musyx_game.h"
@@ -40,6 +41,8 @@ namespace dolphinsf2::musyx
 {
 namespace
 {
+
+namespace sf2 = seqlib::sf2;
 
 using macros::kLaterSamplesLeftOut;
 using macros::kNever;
@@ -210,6 +213,7 @@ ReleaseFade FadeOf(const Run& run, double release_ms)
             fade.ramps.push_back({r.start_ms - release_ms, r.ms, r.scale, r.add});
         }
     }
+
     fade.releases = run.release_at && *run.release_at == stop_at && RampedVolume(fade.ramps, 1.0, fade.stop_ms) > 0.0;
 
     return fade;
@@ -406,6 +410,7 @@ MacroVoice FollowMacro(const Pool& pool, uint16_t macro, int volume_scale_diviso
             part.approximations = voice.approximations;
             std::erase(part.approximations, std::string(kLaterSamplesLeftOut));
         }
+
         voice.parts = std::move(held.parts);
     }
 
@@ -516,6 +521,7 @@ std::vector<PitchPoint> PitchCurve(const MacroVoice& voice, const Sample& sample
             {
                 continue;
             }
+
             slot.count -= delta * 16;
             if (slot.count <= 0)
             {
@@ -614,6 +620,7 @@ std::vector<PanPoint> PanCurve(const MacroVoice& voice, double ms)
         {
             break;
         }
+
         const std::optional<double> next = NextUpdate(voice, t, ms, next_update);
         if (!next)
         {
@@ -621,6 +628,7 @@ std::vector<PanPoint> PanCurve(const MacroVoice& voice, double ms)
         }
         t = *next;
     }
+
     if (curve.size() == 1 && curve.front().offset == 0.0)
     {
         curve.clear();
@@ -662,6 +670,7 @@ std::optional<double> CurveSampleMs(const MacroVoice& voice, const Sample& sampl
     {
         return std::nullopt;
     }
+
     for (std::size_t i = 0; i < curve.size(); i++)
     {
         const double rate = frames_per_ms * std::exp2(curve[i].semitones / 12.0);
@@ -670,6 +679,7 @@ std::optional<double> CurveSampleMs(const MacroVoice& voice, const Sample& sampl
         {
             return curve[i].ms + left / rate;
         }
+
         left -= rate * span;
     }
 
@@ -693,7 +703,7 @@ std::optional<double> DecayedMs(const MacroVoice& voice)
     const Envelope& e = *voice.envelope;
     const bool slow_release = voice.key_off == KeyOff::kRelease && e.release_ms > e.decay_ms;
 
-    return e.attack_ms + (slow_release ? e.decay_ms * kSoundFontFallDb / kEnergyFitDb : e.decay_ms);
+    return e.attack_ms + (slow_release ? e.decay_ms * sf2::kEnvelopeFallDb / kEnergyFitDb : e.decay_ms);
 }
 
 std::optional<double> HeldSilenceMs(const MacroVoice& voice)
@@ -748,7 +758,7 @@ double TableLevel(const VolumeTable& volumes, double volume)
 
 double TableVolume(const VolumeTable& volumes, double level)
 {
-    // The entries up to 127 rise. The first above `level` ends the step that holds it.
+    // The entries up to 127 rise. The first above `level` ends the step that contains it.
     const auto end = volumes.begin() + 128;
     const auto above = std::upper_bound(volumes.begin(), end, level);
     if (above == volumes.begin())
@@ -795,6 +805,7 @@ const MacroVoice& Instruments::Macro(uint16_t macro, std::size_t part, double fr
                 read.push_back(value);
             }
         }
+
         const std::tuple<uint16_t, std::size_t, double, ChannelControls> key{macro, part, from_ms, read};
         auto it = controlled_macros_.find(key);
         if (it == controlled_macros_.end())
@@ -811,6 +822,7 @@ const MacroVoice& Instruments::Macro(uint16_t macro, std::size_t part, double fr
             {
                 return whole->second;
             }
+
             const MacroVoice& voice = whole->second;
             it =
                 controlled_macros_.emplace(key, VoiceFrom(part == 0 ? voice : voice.parts.at(part - 1), from_ms)).first;
@@ -889,6 +901,7 @@ const Instruments::ObjectReads& Instruments::Reads(uint16_t object)
             }
         }
     }
+
     std::ranges::sort(reads.controllers);
 
     return object_reads_.emplace(object, std::move(reads)).first->second;
@@ -928,6 +941,7 @@ uint32_t Instruments::VariantBank(uint32_t bank, uint32_t program, const Channel
             return kVariantBank + static_cast<uint32_t>(i);
         }
     }
+
     variants_.push_back({bank, program, controls});
 
     return kVariantBank + static_cast<uint32_t>(variants_.size() - 1);
@@ -999,8 +1013,12 @@ std::vector<EffectVoice> EffectVoicesOf(Instruments& instruments, uint16_t objec
             parts.push_back(part);
         }
     }
-    std::stable_sort(parts.begin(), parts.end(),
-                     [](const EffectVoice& a, const EffectVoice& b) { return a.start_ms < b.start_ms; });
+
+    const auto by_start = [](const EffectVoice& a, const EffectVoice& b)
+    {
+        return a.start_ms < b.start_ms;
+    };
+    std::stable_sort(parts.begin(), parts.end(), by_start);
 
     return parts;
 }
@@ -1018,11 +1036,15 @@ const Sample* Instruments::GetSample(uint16_t id)
         return it->second.get();
     }
 
-    // The group's entry for the sample, or that of the first group pushed with it that holds one (SongGroup::pushed).
+    // The group's entry for the sample, or that of the first group pushed with it that contains one
+    // (SongGroup::pushed).
     const auto entry_in = [id](const SongGroup& group) -> const ntdlib::musyx::SampleInfo*
     {
-        const auto found = std::find_if(group.samples.begin(), group.samples.end(),
-                                        [id](const ntdlib::musyx::SampleInfo& s) { return s.id == id; });
+        const auto is_id = [id](const ntdlib::musyx::SampleInfo& s)
+        {
+            return s.id == id;
+        };
+        const auto found = std::find_if(group.samples.begin(), group.samples.end(), is_id);
         return found != group.samples.end() ? &*found : nullptr;
     };
     const SongGroup* holder = &group_;
