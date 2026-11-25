@@ -506,11 +506,26 @@ points of health, one above 40, one below that, and one in a lit room. The game 
 three. The hallways, the outdoors and the other rooms each play other children as the
 accompaniment. Some rooms play none. The piece also plays slower as Luigi's health falls, at
 0.6 + 0.4 × the health / 100 of its tempo. In a lit room the tempo follows Luigi's steps. It's
-0.9 while he stands still. The game never plays every track at once. dolphinsf2 converts the
-piece in 13 states: the hallway, a room, outdoors and a room without accompaniment, each at 100,
-70 and 40 HP, and a lit room at 100 HP. A state at 70 or 40 HP takes the top of its band of
-health. The files are named after the state, such as
-`LuigiSings_hallway_70_HP` and `LuigiSings_lit_room`. There's no file with every track.
+0.9 while he stands still. While a message window is open, for example while Luigi examines the
+furniture or someone talks to him, the game mutes the tune, and the accompaniment plays on
+alone. The game never plays every track at once. dolphinsf2 converts the piece in 16 states:
+the hallway, a room, outdoors and a room without accompaniment, each at 100, 70 and 40 HP, a lit
+room at 100 HP, and the hallway, a room and outdoors at 100 HP without the tune. A state at 70
+or 40 HP takes the top of its band of health. Without the tune, health changes only the tempo.
+The files are named after the state, such as `LuigiSings_hallway_70_HP`, `LuigiSings_lit_room`
+and `LuigiSings_room_100_HP_no_humming`. There's no file with every track.
+
+The music of four boss fights changes during the fight: BabyBattle (Chauncey), BlueBattle
+(Bogmire), TelesaBattle (Boolossus) and KuppaBattle (King Boo). Each piece has two or three
+states. The game's code numbers them, and each state plays some of the piece's tracks. Some
+states also play faster. A fight starts its music in state 0, and the game switches to the
+other states as the fight goes on. The piece's file plays state 0. Each other state is a file of
+its own, named after its number, such as `BabyBattle_state_1` and `BabyBattle_state_2`. No file
+plays every track. The game switches the tracks at once.
+
+Melody Pianissima's piano piece, the one heard from the hallway next to her room, is the sound
+effect `se1-0169`. Every conversion contains it. Her quiz pieces are PianistQuiz01 to 03, and
+her fight's music is PianistBattle.
 
 dolphinsf2 also recognizes the start-up archive of the USA release of Mario Kart: Double Dash!!.
 Its sound table gives each sound's volume in 255ths. The game plays its five categories of sound
@@ -1033,11 +1048,11 @@ in MIDI, SoundFont or SFZ:
 - **The Wii's and the Wii U's rate.** JAudio times its music for the GameCube's rate of about
   32,028 Hz. The Wii and the Wii U play it at 32,000 Hz. There the music plays 0.089% slower and
   1.5 cents lower than in the files.
-- **Luigi's Mansion.** After the first 30 seconds of TelesaBattle, its balance is to the right
-  of the game's. Nobody has traced that yet. The game's code sets LuigiSings's tempo in the game's
-  frames. In a lit room, the tempo rises from 0.5 over about ten frames. The files play the
-  state's tempo from the start. Their notes come a little later than the game's at 70 and 40 HP,
-  and earlier in a lit room.
+- **Luigi's Mansion.** The game's code sets LuigiSings's tempo in the game's frames. In a lit
+  room, the tempo rises from 0.5 over about ten frames. The files play the state's tempo from the
+  start. Their notes come a little later than the game's at 70 and 40 HP, and earlier in a lit
+  room. In TelesaBattle's state 1, the game raises the tempo as the fight goes on, up to about
+  1.4 times. The file keeps the tempo that the state starts with.
 
 For MusyX games, the files differ from the game in these ways too. dolphinsf2 reports the first
 nine where a song has them:
